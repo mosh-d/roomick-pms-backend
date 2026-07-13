@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell($p = 'prisma\\\\migrations\\\\20260712000000_init\\\\migration.sql'; $text = Get-Content $p -Raw; [IO.File]::WriteAllText\\(\\(Resolve-Path $p\\), $text, \\(New-Object System.Text.UTF8Encoding $false\\)\\); $p2 = 'prisma\\\\migrations\\\\migration_lock.toml'; $t2 = Get-Content $p2 -Raw; [IO.File]::WriteAllText\\(\\(Resolve-Path $p2\\), $t2, \\(New-Object System.Text.UTF8Encoding $false\\)\\); \\(Get-Content $p | Measure-Object -Line\\).Lines)",
+      "PowerShell(npm run test:e2e)",
+      "PowerShell(npm test -- --passWithNoTests)",
+      "PowerShell(git init -b main)",
+      "PowerShell(npm install -D httpyac --no-audit --no-fund)",
+      "PowerShell(npx prisma migrate status)",
+      "PowerShell(node -e \"const {PrismaClient}=require\\('@prisma/client'\\);\\(async\\(\\)=>{const p=new PrismaClient\\(\\);const t=await p.tenant.findMany\\({select:{id:true,subdomain:true,status:true}}\\);console.log\\(JSON.stringify\\(t,null,2\\)\\);await p.$disconnect\\(\\);}\\)\\(\\).catch\\(e=>{console.error\\(e.message\\);process.exit\\(1\\)}\\)\")",
+      "PowerShell(node \"C:\\\\Temp\\\\claude\\\\c--Users-WINDOWS-Desktop-PROJECTS-Roomick-PMS-roomick-pms-backend\\\\a556d039-8025-4ae3-bb31-3a40f231db63\\\\scratchpad\\\\check-seed.js\")",
+      "PowerShell(npm install dotenv --no-audit --no-fund)",
+      "PowerShell(Invoke-RestMethod http://localhost:3000/api/v1/system/health)",
+      "PowerShell($env:PORT='3001'; node dist/main.js)"
+    ]
+  }
+}

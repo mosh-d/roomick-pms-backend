@@ -1,0 +1,1908 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PMS — Database Architecture</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600;700&display=swap');
+
+:root {
+  --bg:    #f5f3ef;
+  --bg2:   #ede9e2;
+  --bg3:   #e3ded5;
+  --bg4:   #d8d2c6;
+  --ink:   #1a1814;
+  --ink2:  #4a4640;
+  --ink3:  #8a8680;
+  --ink4:  #b0ac a6;
+  --rule:  rgba(26,24,20,0.10);
+  --rule2: rgba(26,24,20,0.18);
+
+  /* domain colors */
+  --d-identity:  #2d4a6e;  --d-identity-bg:  #edf2f8;
+  --d-property:  #3a6b3a;  --d-property-bg:  #edf5ed;
+  --d-res:       #6b3a2d;  --d-res-bg:       #f5edeb;
+  --d-finance:   #5a3a6b;  --d-finance-bg:   #f2edf8;
+  --d-ops:       #6b5a2d;  --d-ops-bg:       #f8f3ed;
+  --d-comms:     #2d6b6b;  --d-comms-bg:     #edf8f8;
+  --d-system:    #3a3a3a;  --d-system-bg:    #f0f0ee;
+
+  --pk: #b84040;  --pk-bg: #fdf0f0;
+  --fk: #4060a0;  --fk-bg: #f0f3fd;
+  --idx: #4a7a3a; --idx-bg: #f0f6ed;
+}
+
+*,*::before,*::after { box-sizing:border-box; margin:0; padding:0; }
+
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: 'IBM Plex Sans', sans-serif;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+/* ── CHROME ── */
+.chrome {
+  position: sticky; top: 0; z-index: 200;
+  background: var(--ink);
+  display: flex; align-items: center;
+  padding: 0 28px; height: 48px; gap: 0;
+}
+.chrome-logo {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 13px; font-weight: 500;
+  color: rgba(255,255,255,0.9);
+  letter-spacing: -0.01em;
+  margin-right: 28px; white-space: nowrap;
+}
+.chrome-logo span { color: #d4a84a; }
+.nav-tabs { display: flex; gap: 2px; overflow-x: auto; flex: 1; }
+.nav-tabs::-webkit-scrollbar { display: none; }
+.ntab {
+  padding: 5px 14px; border-radius: 4px;
+  font-size: 12px; font-weight: 500;
+  cursor: pointer; border: none;
+  background: none; color: rgba(255,255,255,0.45);
+  transition: all 0.15s; white-space: nowrap;
+  font-family: 'IBM Plex Sans', sans-serif;
+}
+.ntab:hover { background: rgba(255,255,255,0.08); color: rgba(255,255,255,0.8); }
+.ntab.active { background: rgba(255,255,255,0.12); color: #fff; }
+.ntab .dot {
+  display: inline-block; width: 7px; height: 7px;
+  border-radius: 50%; margin-right: 6px;
+}
+
+/* ── LAYOUT ── */
+.body-wrap { display: flex; min-height: calc(100vh - 48px); }
+
+/* ── SIDEBAR ── */
+.sidebar {
+  width: 220px; flex-shrink: 0;
+  background: var(--bg2);
+  border-right: 1px solid var(--rule2);
+  padding: 20px 0;
+  position: sticky; top: 48px;
+  height: calc(100vh - 48px);
+  overflow-y: auto;
+}
+.sidebar::-webkit-scrollbar { width: 3px; }
+.sidebar::-webkit-scrollbar-thumb { background: var(--bg4); }
+.sb-section { padding: 14px 16px 4px; }
+.sb-section-label {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 9px; text-transform: uppercase;
+  letter-spacing: 0.12em; color: var(--ink3);
+  font-weight: 500;
+}
+.sb-item {
+  display: flex; align-items: center; gap: 7px;
+  padding: 6px 16px; cursor: pointer;
+  font-size: 12px; font-weight: 500;
+  color: var(--ink2); border: none;
+  background: none; width: 100%; text-align: left;
+  transition: background 0.12s; border-radius: 0;
+  font-family: 'IBM Plex Sans', sans-serif;
+}
+.sb-item:hover { background: var(--bg3); }
+.sb-item.active { background: var(--bg3); color: var(--ink); }
+.sb-item .sb-dot {
+  width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0;
+}
+.sb-count {
+  margin-left: auto; font-size: 10px;
+  font-family: 'IBM Plex Mono', monospace;
+  color: var(--ink3); background: var(--bg4);
+  padding: 1px 5px; border-radius: 8px;
+}
+
+/* ── MAIN CONTENT ── */
+.main { flex: 1; overflow: hidden; }
+.page { display: none; height: calc(100vh - 48px); overflow-y: auto; }
+.page.active { display: block; }
+.page::-webkit-scrollbar { width: 5px; }
+.page::-webkit-scrollbar-thumb { background: var(--bg4); border-radius: 3px; }
+
+.page-inner { padding: 32px 36px 80px; max-width: 1000px; }
+
+/* ── PAGE HERO ── */
+.page-hero { margin-bottom: 28px; padding-bottom: 20px; border-bottom: 1px solid var(--rule2); }
+.page-hero h1 {
+  font-size: 26px; font-weight: 700; letter-spacing: -0.02em;
+  color: var(--ink); margin-bottom: 6px; line-height: 1.2;
+}
+.page-hero p { color: var(--ink2); font-size: 13px; max-width: 680px; line-height: 1.7; }
+.domain-badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 10px; font-weight: 500;
+  padding: 3px 10px; border-radius: 12px;
+  margin-bottom: 10px; letter-spacing: 0.04em;
+}
+.domain-badge .db-dot { width: 7px; height: 7px; border-radius: 50%; }
+
+/* ── TABLE CARD ── */
+.table-card {
+  background: #fff; border: 1px solid var(--rule2);
+  border-radius: 8px; overflow: hidden;
+  margin-bottom: 20px;
+}
+.tc-header {
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 16px; cursor: pointer;
+  border-bottom: 1px solid var(--rule);
+  user-select: none;
+  background: var(--bg2);
+}
+.tc-header:hover { background: var(--bg3); }
+.tc-name {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 14px; font-weight: 600; color: var(--ink);
+}
+.tc-desc { font-size: 12px; color: var(--ink3); margin-left: 4px; }
+.tc-meta { margin-left: auto; display: flex; gap: 6px; align-items: center; }
+.tc-pill {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 9px; padding: 1px 6px; border-radius: 8px;
+  font-weight: 500; letter-spacing: 0.04em;
+}
+.pill-softdel { background: #fef3e2; color: #a06020; border: 1px solid #f0d090; }
+.pill-rls     { background: #e8f4e8; color: #2a6a2a; border: 1px solid #90cc90; }
+.pill-audit   { background: #e8eef8; color: #2a4a8a; border: 1px solid #90aad0; }
+.tc-chevron { font-size: 10px; color: var(--ink3); transition: transform 0.18s; }
+.table-card.open .tc-chevron { transform: rotate(180deg); }
+.tc-body { display: none; }
+.table-card.open .tc-body { display: block; }
+
+/* ── COLUMNS TABLE ── */
+.col-table { width: 100%; border-collapse: collapse; }
+.col-table th {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 9px; text-transform: uppercase;
+  letter-spacing: 0.1em; color: var(--ink3);
+  padding: 7px 16px; text-align: left;
+  border-bottom: 1px solid var(--rule2);
+  background: var(--bg);
+}
+.col-table td {
+  padding: 7px 16px; border-bottom: 1px solid var(--rule);
+  font-size: 12px; vertical-align: top;
+}
+.col-table tr:last-child td { border-bottom: none; }
+.col-table tr:hover td { background: var(--bg); }
+
+.col-name {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 12px; font-weight: 500; color: var(--ink);
+}
+.col-type {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px; color: #5a6aaa;
+}
+.col-pk {
+  background: var(--pk-bg);
+  border-left: 2px solid var(--pk);
+}
+.col-pk .col-name { color: var(--pk); }
+.col-fk .col-name::after {
+  content: ' →'; color: var(--fk); font-size: 10px;
+}
+.badge-pk {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 9px; background: var(--pk-bg);
+  color: var(--pk); padding: 1px 5px; border-radius: 3px;
+  border: 1px solid #e8b0b0; font-weight: 600;
+}
+.badge-fk {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 9px; background: var(--fk-bg);
+  color: var(--fk); padding: 1px 5px; border-radius: 3px;
+  border: 1px solid #a0b8e0;
+}
+.badge-uk {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 9px; background: #f5f0ff;
+  color: #6a40a0; padding: 1px 5px; border-radius: 3px;
+  border: 1px solid #c0a0e0;
+}
+.badge-idx {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 9px; background: var(--idx-bg);
+  color: var(--idx); padding: 1px 5px; border-radius: 3px;
+  border: 1px solid #a0cc90;
+}
+.badge-nn {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 9px; background: #f8f8f8;
+  color: #888; padding: 1px 5px; border-radius: 3px;
+  border: 1px solid #ddd;
+}
+.col-notes { font-size: 11px; color: var(--ink3); line-height: 1.5; }
+
+/* ── INDEX BLOCK ── */
+.index-block {
+  border-top: 1px solid var(--rule);
+  padding: 12px 16px; background: var(--bg);
+}
+.ib-title {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 9px; text-transform: uppercase;
+  letter-spacing: 0.1em; color: var(--ink3);
+  margin-bottom: 8px;
+}
+.index-row {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px; color: var(--ink2);
+  padding: 3px 0; display: flex; gap: 10px; align-items: baseline;
+}
+.idx-code { color: var(--ink); font-weight: 500; }
+.idx-note { font-size: 10px; color: var(--ink3); font-family: 'IBM Plex Sans', sans-serif; }
+
+/* ── CASCADE BLOCK ── */
+.cascade-block {
+  border-top: 1px solid var(--rule);
+  padding: 12px 16px; background: #fffdf8;
+}
+.cb-title {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 9px; text-transform: uppercase;
+  letter-spacing: 0.1em; color: var(--ink3);
+  margin-bottom: 8px;
+}
+.cascade-row { display: flex; gap: 8px; align-items: baseline; margin-bottom: 4px; }
+.cr-rel {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px; color: var(--ink); font-weight: 500; min-width: 200px;
+}
+.cr-action {
+  font-size: 11px; color: var(--ink2);
+}
+.cr-type {
+  font-family: 'IBM Plex Mono', monospace; font-size: 9px;
+  padding: 1px 5px; border-radius: 3px; border: 1px solid;
+}
+.cr-cascade  { background: #fdeaea; color: #a03030; border-color: #e0a0a0; }
+.cr-setnull  { background: #eaf0fd; color: #3050a0; border-color: #a0b8e0; }
+.cr-restrict { background: #edfaed; color: #2a602a; border-color: #90cc90; }
+.cr-softdel  { background: #fef8e8; color: #806020; border-color: #e0c860; }
+
+/* ── ENUM BLOCK ── */
+.enum-grid { display: flex; flex-wrap: wrap; gap: 12px; padding: 14px 16px; border-top: 1px solid var(--rule); background: var(--bg); }
+.enum-item { }
+.enum-name {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px; font-weight: 600; color: var(--ink);
+  margin-bottom: 4px;
+}
+.enum-vals { display: flex; flex-wrap: wrap; gap: 3px; }
+.enum-val {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 10px; padding: 1px 6px;
+  border-radius: 3px; background: var(--bg3);
+  color: var(--ink2); border: 1px solid var(--rule2);
+}
+
+/* ── RELATIONSHIP MAP (SVG) ── */
+.rel-map { background: #fff; border: 1px solid var(--rule2); border-radius: 8px; padding: 20px; margin-bottom: 20px; overflow-x: auto; }
+.rel-map svg { min-width: 100%; }
+
+/* ── INFO BOX ── */
+.info-box {
+  border-radius: 7px; padding: 14px 16px;
+  margin-bottom: 16px; border: 1px solid;
+}
+.info-box.rule { background: #fff8e8; border-color: #e8c878; }
+.info-box.warn { background: #fef0f0; border-color: #e8a0a0; }
+.info-box.tip  { background: #edf8ed; border-color: #90c890; }
+.info-box-title {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 10px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.08em;
+  margin-bottom: 6px;
+}
+.info-box.rule .info-box-title { color: #a06010; }
+.info-box.warn .info-box-title { color: #a02020; }
+.info-box.tip  .info-box-title { color: #2a702a; }
+.info-box p { font-size: 12px; color: var(--ink2); line-height: 1.7; }
+.info-box code {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px; background: rgba(0,0,0,0.06);
+  padding: 0 3px; border-radius: 2px;
+}
+
+/* ── OVERVIEW GRID ── */
+.overview-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px,1fr)); gap: 10px; margin-bottom: 24px; }
+.ov-card {
+  background: #fff; border: 1px solid var(--rule2); border-radius: 8px;
+  padding: 14px; cursor: pointer; transition: border-color 0.15s, transform 0.12s;
+}
+.ov-card:hover { border-color: var(--rule2); transform: translateY(-1px); }
+.ov-domain-bar { height: 3px; border-radius: 2px; margin-bottom: 10px; }
+.ov-count { font-size: 24px; font-weight: 700; color: var(--ink); letter-spacing: -0.03em; margin-bottom: 2px; }
+.ov-label { font-size: 12px; font-weight: 600; color: var(--ink); margin-bottom: 3px; }
+.ov-desc { font-size: 11px; color: var(--ink3); line-height: 1.5; }
+
+/* ── SECTION DIVIDER ── */
+.sdiv {
+  display: flex; align-items: center; gap: 10px;
+  margin: 28px 0 16px; font-family: 'IBM Plex Mono', monospace;
+  font-size: 10px; text-transform: uppercase;
+  letter-spacing: 0.1em; color: var(--ink3);
+}
+.sdiv::before, .sdiv::after { content: ''; flex: 1; height: 1px; background: var(--rule2); }
+
+/* scrollbar */
+::-webkit-scrollbar { width: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--bg4); border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<!-- CHROME -->
+<div class="chrome">
+  <div class="chrome-logo">Lodgix <span>PMS</span> — Database Architecture</div>
+  <div class="nav-tabs">
+    <button class="ntab active" onclick="showPage('overview')"><span class="dot" style="background:#d4a84a"></span>Overview</button>
+    <button class="ntab" onclick="showPage('identity')"><span class="dot" style="background:#4a7ab8"></span>Identity</button>
+    <button class="ntab" onclick="showPage('property')"><span class="dot" style="background:#4a8a4a"></span>Property</button>
+    <button class="ntab" onclick="showPage('reservations')"><span class="dot" style="background:#a84a38"></span>Reservations</button>
+    <button class="ntab" onclick="showPage('financial')"><span class="dot" style="background:#7a4a9a"></span>Financial</button>
+    <button class="ntab" onclick="showPage('operations')"><span class="dot" style="background:#9a7a38"></span>Operations</button>
+    <button class="ntab" onclick="showPage('comms')"><span class="dot" style="background:#388a8a"></span>Comms & Compl.</button>
+    <button class="ntab" onclick="showPage('system')"><span class="dot" style="background:#606060"></span>System</button>
+    <button class="ntab" onclick="showPage('patterns')"><span class="dot" style="background:#c04040"></span>Patterns & Rules</button>
+  </div>
+</div>
+
+<div class="body-wrap">
+
+<!-- SIDEBAR -->
+<aside class="sidebar" id="sidebar">
+  <div id="sb-contents">
+    <!-- populated by JS -->
+  </div>
+</aside>
+
+<!-- MAIN -->
+<main class="main" id="main">
+
+  <!-- ═══ OVERVIEW ═══ -->
+  <div class="page active" id="page-overview">
+  <div class="page-inner">
+    <div class="page-hero">
+      <h1>Database Architecture</h1>
+      <p>PostgreSQL schema for Lodgix PMS. 39 tables across 7 domain groups. Multi-tenant with row-level isolation on every table. Soft-delete pattern applied to all financial and reservation records. TypeORM entities map 1:1 to these definitions.</p>
+    </div>
+
+    <div class="info-box rule">
+      <div class="info-box-title">Core Architectural Rule — Tenant Isolation</div>
+      <p>Every table (except <code>tenants</code> itself) carries a <code>tenantId UUID NOT NULL</code> column with a foreign key to <code>tenants.id</code>. PostgreSQL Row-Level Security policies enforce this at the DB layer — not just at the ORM layer. All TypeORM queries are wrapped in a <code>TenantAwareRepository</code> base class that automatically appends <code>WHERE "tenantId" = $currentTenantId</code>. This means a bug in application code cannot leak cross-tenant data.</p>
+    </div>
+
+    <div class="info-box tip">
+      <div class="info-box-title">Soft Delete Pattern</div>
+      <p>Financial records (folios, line items, payments), reservations, and guest profiles are never hard-deleted. They carry a <code>deletedAt TIMESTAMPTZ NULL</code> column. All queries use a base scope of <code>WHERE "deletedAt" IS NULL</code>. Hard deletes are only permitted on configuration tables (room type amenities, tax rules) and only by an owner-level action. This preserves audit trails and prevents revenue reporting gaps.</p>
+    </div>
+
+    <div class="info-box tip">
+      <div class="info-box-title">UUID Strategy</div>
+      <p>All primary keys are <code>UUID</code> generated with <code>gen_random_uuid()</code> (PostgreSQL 13+). This prevents enumeration attacks, is safe for multi-tenant environments, and allows client-side ID generation for optimistic UI. The exception is <code>AuditLog</code> which uses <code>BIGSERIAL</code> for efficient append-only sequential writes.</p>
+    </div>
+
+    <div class="sdiv">Domain Groups</div>
+    <div class="overview-grid">
+      <div class="ov-card" onclick="showPage('identity')">
+        <div class="ov-domain-bar" style="background:#4a7ab8"></div>
+        <div class="ov-count">5</div>
+        <div class="ov-label">Identity & Auth</div>
+        <div class="ov-desc">Tenants, users, roles, permissions, invite tokens</div>
+      </div>
+      <div class="ov-card" onclick="showPage('property')">
+        <div class="ov-domain-bar" style="background:#4a8a4a"></div>
+        <div class="ov-count">7</div>
+        <div class="ov-label">Property</div>
+        <div class="ov-desc">Brands, branches, buildings, floors, rooms, room types, blocks</div>
+      </div>
+      <div class="ov-card" onclick="showPage('reservations')">
+        <div class="ov-domain-bar" style="background:#a84a38"></div>
+        <div class="ov-count">6</div>
+        <div class="ov-label">Reservations</div>
+        <div class="ov-desc">Reservations, guests, rate plans, rate audit, no-show records, walk records</div>
+      </div>
+      <div class="ov-card" onclick="showPage('financial')">
+        <div class="ov-domain-bar" style="background:#7a4a9a"></div>
+        <div class="ov-count">6</div>
+        <div class="ov-label">Financial</div>
+        <div class="ov-desc">Folios, line items, payments, tax rules, refunds, folio transfers</div>
+      </div>
+      <div class="ov-card" onclick="showPage('operations')">
+        <div class="ov-domain-bar" style="background:#9a7a38"></div>
+        <div class="ov-count">10</div>
+        <div class="ov-label">Operations</div>
+        <div class="ov-desc">Housekeeping tasks, shifts, shift issues, maintenance, assets, reg cards, overbooking config, outlets, user_outlets, night_audit_log</div>
+      </div>
+      <div class="ov-card" onclick="showPage('comms')">
+        <div class="ov-domain-bar" style="background:#388a8a"></div>
+        <div class="ov-count">3</div>
+        <div class="ov-label">Comms & Compliance</div>
+        <div class="ov-desc">Communication log, GDPR data requests, staff audit log</div>
+      </div>
+      <div class="ov-card" onclick="showPage('system')">
+        <div class="ov-domain-bar" style="background:#606060"></div>
+        <div class="ov-count">2</div>
+        <div class="ov-label">System</div>
+        <div class="ov-desc">Feature flags, backups</div>
+      </div>
+      <div class="ov-card" onclick="showPage('patterns')">
+        <div class="ov-domain-bar" style="background:#c04040"></div>
+        <div class="ov-count">—</div>
+        <div class="ov-label">Patterns & Rules</div>
+        <div class="ov-desc">Index strategy, cascade rules, naming conventions, migration approach</div>
+      </div>
+    </div>
+
+    <div class="sdiv">Relationship Overview</div>
+    <div class="rel-map">
+      <svg viewBox="0 0 900 520" width="100%">
+        <defs>
+          <marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M2 2L8 5L2 8" fill="none" stroke="#888" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          </marker>
+        </defs>
+        <!-- Domain boxes -->
+        <!-- Identity -->
+        <rect x="10" y="10" width="140" height="70" rx="6" fill="#edf2f8" stroke="#b8cce8" stroke-width="1"/>
+        <text x="80" y="28" text-anchor="middle" font-family="IBM Plex Mono" font-size="9" font-weight="600" fill="#2d4a6e" letter-spacing="0.06em">IDENTITY</text>
+        <text x="80" y="44" text-anchor="middle" font-family="IBM Plex Mono" font-size="10" fill="#2d4a6e">tenants</text>
+        <text x="80" y="58" text-anchor="middle" font-family="IBM Plex Mono" font-size="10" fill="#2d4a6e">users · roles</text>
+        <text x="80" y="72" text-anchor="middle" font-family="IBM Plex Mono" font-size="10" fill="#2d4a6e">permissions</text>
+
+        <!-- Property -->
+        <rect x="10" y="110" width="140" height="90" rx="6" fill="#edf5ed" stroke="#b8d8b8" stroke-width="1"/>
+        <text x="80" y="128" text-anchor="middle" font-family="IBM Plex Mono" font-size="9" font-weight="600" fill="#3a6b3a" letter-spacing="0.06em">PROPERTY</text>
+        <text x="80" y="144" text-anchor="middle" font-family="IBM Plex Mono" font-size="10" fill="#3a6b3a">brands · branches</text>
+        <text x="80" y="158" text-anchor="middle" font-family="IBM Plex Mono" font-size="10" fill="#3a6b3a">buildings · floors</text>
+        <text x="80" y="172" text-anchor="middle" font-family="IBM Plex Mono" font-size="10" fill="#3a6b3a">rooms · roomTypes</text>
+        <text x="80" y="186" text-anchor="middle" font-family="IBM Plex Mono" font-size="10" fill="#3a6b3a">roomBlocks</text>
+
+        <!-- Reservations -->
+        <rect x="340" y="10" width="160" height="90" rx="6" fill="#f5edeb" stroke="#e8c8c0" stroke-width="1"/>
+        <text x="420" y="28" text-anchor="middle" font-family="IBM Plex Mono" font-size="9" font-weight="600" fill="#6b3a2d" letter-spacing="0.06em">RESERVATIONS</text>
+        <text x="420" y="44" text-anchor="middle" font-family="IBM Plex Mono" font-size="10" fill="#6b3a2d">reservations</text>
+        <text x="420" y="58" text-anchor="middle" font-family="IBM Plex Mono" font-size="10" fill="#6b3a2d">guestProfiles</text>
+        <text x="420" y="72" text-anchor="middle" font-family="IBM Plex Mono" font-size="10" fill="#6b3a2d">ratePlans · rateAudit</text>
+        <text x="420" y="86" text-anchor="middle" font-family="IBM Plex Mono" font-size="10" fill="#6b3a2d">noShowRecords · walkRecords</text>
+
+        <!-- Financial -->
+        <rect x="340" y="130" width="160" height="90" rx="6" fill="#f2edf8" stroke="#d0b8e8" stroke-width="1"/>
+        <text x="420" y="148" text-anchor="middle" font-family="IBM Plex Mono" font-size="9" font-weight="600" fill="#5a3a6b" letter-spacing="0.06em">FINANCIAL</text>
+        <text x="420" y="164" text-anchor="middle" font-family="IBM Plex Mono" font-size="10" fill="#5a3a6b">folios · lineItems(+outletId)</text>
+        <text x="420" y="178" text-anchor="middle" font-family="IBM Plex Mono" font-size="10" fill="#5a3a6b">payments(+purpose) · refunds</text>
+        <text x="420" y="192" text-anchor="middle" font-family="IBM Plex Mono" font-size="10" fill="#5a3a6b">taxRules · folioTransfers</text>
+        <text x="420" y="206" text-anchor="middle" font-family="IBM Plex Mono" font-size="10" fill="#5a3a6b">night_audit_log</text>
+
+        <!-- Operations -->
+        <rect x="340" y="250" width="160" height="110" rx="6" fill="#f8f3ed" stroke="#e0d0b0" stroke-width="1"/>
+        <text x="420" y="268" text-anchor="middle" font-family="IBM Plex Mono" font-size="9" font-weight="600" fill="#6b5a2d" letter-spacing="0.06em">OPERATIONS</text>
+        <text x="420" y="284" text-anchor="middle" font-family="IBM Plex Mono" font-size="10" fill="#6b5a2d">housekeepingTasks</text>
+        <text x="420" y="298" text-anchor="middle" font-family="IBM Plex Mono" font-size="10" fill="#6b5a2d">shifts · shiftIssues</text>
+        <text x="420" y="312" text-anchor="middle" font-family="IBM Plex Mono" font-size="10" fill="#6b5a2d">maintenanceOrders · assets</text>
+        <text x="420" y="326" text-anchor="middle" font-family="IBM Plex Mono" font-size="10" fill="#6b5a2d">registrationCards · obConfig</text>
+        <text x="420" y="340" text-anchor="middle" font-family="IBM Plex Mono" font-size="10" fill="#6b5a2d">outlets · user_outlets</text>
+        <text x="420" y="354" text-anchor="middle" font-family="IBM Plex Mono" font-size="10" fill="#6b5a2d">night_audit_log</text>
+
+        <!-- Comms -->
+        <rect x="680" y="10" width="150" height="70" rx="6" fill="#edf8f8" stroke="#b0d8d8" stroke-width="1"/>
+        <text x="755" y="28" text-anchor="middle" font-family="IBM Plex Mono" font-size="9" font-weight="600" fill="#2d6b6b" letter-spacing="0.06em">COMMS</text>
+        <text x="755" y="44" text-anchor="middle" font-family="IBM Plex Mono" font-size="10" fill="#2d6b6b">communicationLog</text>
+        <text x="755" y="58" text-anchor="middle" font-family="IBM Plex Mono" font-size="10" fill="#2d6b6b">gdprRequests</text>
+        <text x="755" y="72" text-anchor="middle" font-family="IBM Plex Mono" font-size="10" fill="#2d6b6b">auditLog</text>
+
+        <!-- System -->
+        <rect x="680" y="110" width="150" height="60" rx="6" fill="#f0f0ee" stroke="#c8c8c4" stroke-width="1"/>
+        <text x="755" y="128" text-anchor="middle" font-family="IBM Plex Mono" font-size="9" font-weight="600" fill="#3a3a3a" letter-spacing="0.06em">SYSTEM</text>
+        <text x="755" y="144" text-anchor="middle" font-family="IBM Plex Mono" font-size="10" fill="#3a3a3a">featureFlags</text>
+        <text x="755" y="158" text-anchor="middle" font-family="IBM Plex Mono" font-size="10" fill="#3a3a3a">backupRecords</text>
+
+        <!-- Tenant anchor (center top) -->
+        <rect x="370" y="430" width="100" height="34" rx="5" fill="#1a1814" />
+        <text x="420" y="451" text-anchor="middle" font-family="IBM Plex Mono" font-size="11" font-weight="600" fill="#d4a84a">tenants</text>
+
+        <!-- Arrows: tenants → all domains -->
+        <line x1="420" y1="430" x2="80" y2="80" stroke="#c8a860" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#arr)" opacity="0.5"/>
+        <line x1="420" y1="430" x2="80" y2="200" stroke="#c8a860" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#arr)" opacity="0.5"/>
+        <line x1="420" y1="430" x2="420" y2="100" stroke="#c8a860" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#arr)" opacity="0.5"/>
+        <line x1="420" y1="430" x2="420" y2="220" stroke="#c8a860" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#arr)" opacity="0.5"/>
+        <line x1="420" y1="430" x2="420" y2="360" stroke="#c8a860" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#arr)" opacity="0.5"/>
+        <line x1="420" y1="430" x2="755" y2="80" stroke="#c8a860" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#arr)" opacity="0.5"/>
+        <line x1="420" y1="430" x2="755" y2="170" stroke="#c8a860" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#arr)" opacity="0.5"/>
+
+        <!-- Domain → Domain arrows -->
+        <!-- Property → Reservations -->
+        <line x1="150" y1="155" x2="340" y2="55" stroke="#888" stroke-width="1" marker-end="url(#arr)" opacity="0.4"/>
+        <!-- Reservations → Financial -->
+        <line x1="420" y1="100" x2="420" y2="130" stroke="#888" stroke-width="1.5" marker-end="url(#arr)" opacity="0.5"/>
+        <!-- Reservations → Operations -->
+        <line x1="440" y1="100" x2="440" y2="250" stroke="#888" stroke-width="1" marker-end="url(#arr)" opacity="0.4"/>
+        <!-- Financial → Operations -->
+        <line x1="400" y1="220" x2="400" y2="250" stroke="#888" stroke-width="1" marker-end="url(#arr)" opacity="0.4"/>
+        <!-- Reservations → Comms -->
+        <line x1="500" y1="55" x2="680" y2="45" stroke="#888" stroke-width="1" marker-end="url(#arr)" opacity="0.4"/>
+        <!-- Operations → Comms -->
+        <line x1="500" y1="300" x2="680" y2="50" stroke="#888" stroke-width="1" stroke-dasharray="3 3" marker-end="url(#arr)" opacity="0.3"/>
+        <!-- Identity → Reservations -->
+        <line x1="150" y1="45" x2="340" y2="35" stroke="#888" stroke-width="1" marker-end="url(#arr)" opacity="0.4"/>
+
+        <!-- Legend -->
+        <line x1="30" y1="400" x2="60" y2="400" stroke="#c8a860" stroke-width="1" stroke-dasharray="4 3"/>
+        <text x="66" y="404" font-family="IBM Plex Sans" font-size="10" fill="#666">tenantId FK (all tables)</text>
+        <line x1="30" y1="416" x2="60" y2="416" stroke="#888" stroke-width="1" marker-end="url(#arr)"/>
+        <text x="66" y="420" font-family="IBM Plex Sans" font-size="10" fill="#666">domain relationship</text>
+        <line x1="30" y1="432" x2="60" y2="432" stroke="#888" stroke-width="1" stroke-dasharray="3 3" marker-end="url(#arr)"/>
+        <text x="66" y="436" font-family="IBM Plex Sans" font-size="10" fill="#666">optional relationship</text>
+      </svg>
+    </div>
+  </div>
+  </div>
+
+  <!-- ═══ IDENTITY ═══ -->
+  <div class="page" id="page-identity">
+  <div class="page-inner">
+    <div class="page-hero">
+      <div class="domain-badge" style="background:#edf2f8;color:#2d4a6e">
+        <span class="db-dot" style="background:#4a7ab8"></span>Identity & Auth Domain
+      </div>
+      <h1>Identity & Auth</h1>
+      <p>5 tables. The root of the entire system. Every other table's tenantId traces back to <code style="font-family:IBM Plex Mono;font-size:12px">tenants.id</code>. Users belong to tenants and are scoped to one or more branches via role assignments.</p>
+    </div>
+
+    <!-- TENANTS -->
+    <div class="table-card" id="tc-tenants">
+      <div class="tc-header" onclick="toggleTable('tc-tenants')">
+        <span class="tc-name">tenants</span>
+        <span class="tc-desc">— Root record for each hotel group</span>
+        <div class="tc-meta"><span class="tc-pill pill-rls">RLS ROOT</span></div>
+        <span class="tc-chevron">▼</span>
+      </div>
+      <div class="tc-body">
+        <table class="col-table">
+          <tr><th>Column</th><th>Type</th><th>Constraints</th><th>Notes</th></tr>
+          <tr class="col-pk"><td><span class="col-name">id</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-pk">PK</span></td><td class="col-notes">gen_random_uuid()</td></tr>
+          <tr><td><span class="col-name">subdomain</span></td><td><span class="col-type">VARCHAR(63)</span></td><td><span class="badge-uk">UNIQUE</span> <span class="badge-nn">NOT NULL</span></td><td class="col-notes">e.g. "acme" → acme.lodgix.com. Lowercase alphanumeric + hyphens only.</td></tr>
+          <tr><td><span class="col-name">groupName</span></td><td><span class="col-type">VARCHAR(200)</span></td><td><span class="badge-nn">NOT NULL</span></td><td class="col-notes">e.g. "Acme Hotels Group"</td></tr>
+          <tr><td><span class="col-name">brandMode</span></td><td><span class="col-type">brand_mode_enum</span></td><td><span class="badge-nn">NOT NULL</span></td><td class="col-notes">single_brand | multi_brand. Immutable after first brand created.</td></tr>
+          <tr><td><span class="col-name">status</span></td><td><span class="col-type">tenant_status_enum</span></td><td><span class="badge-nn">NOT NULL</span></td><td class="col-notes">active | suspended | trial | cancelled</td></tr>
+          <tr><td><span class="col-name">trialEndsAt</span></td><td><span class="col-type">TIMESTAMPTZ</span></td><td></td><td class="col-notes">NULL = paid plan</td></tr>
+          <tr><td><span class="col-name">createdAt</span></td><td><span class="col-type">TIMESTAMPTZ</span></td><td><span class="badge-nn">NOT NULL</span></td><td class="col-notes">DEFAULT NOW()</td></tr>
+          <tr><td><span class="col-name">updatedAt</span></td><td><span class="col-type">TIMESTAMPTZ</span></td><td><span class="badge-nn">NOT NULL</span></td><td class="col-notes">Auto-updated via trigger</td></tr>
+        </table>
+        <div class="index-block">
+          <div class="ib-title">Indexes</div>
+          <div class="index-row"><span class="idx-code">UNIQUE (subdomain)</span><span class="idx-note">— Subdomain lookup on every request</span></div>
+        </div>
+        <div class="enum-grid">
+          <div class="enum-item"><div class="enum-name">brand_mode_enum</div><div class="enum-vals"><span class="enum-val">single_brand</span><span class="enum-val">multi_brand</span></div></div>
+          <div class="enum-item"><div class="enum-name">tenant_status_enum</div><div class="enum-vals"><span class="enum-val">trial</span><span class="enum-val">active</span><span class="enum-val">suspended</span><span class="enum-val">cancelled</span></div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- USERS -->
+    <div class="table-card" id="tc-users">
+      <div class="tc-header" onclick="toggleTable('tc-users')">
+        <span class="tc-name">users</span>
+        <span class="tc-desc">— All staff and owner accounts</span>
+        <div class="tc-meta"><span class="tc-pill pill-softdel">SOFT DELETE</span><span class="tc-pill pill-rls">RLS</span></div>
+        <span class="tc-chevron">▼</span>
+      </div>
+      <div class="tc-body">
+        <table class="col-table">
+          <tr><th>Column</th><th>Type</th><th>Constraints</th><th>Notes</th></tr>
+          <tr class="col-pk"><td><span class="col-name">id</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-pk">PK</span></td><td class="col-notes"></td></tr>
+          <tr class="col-fk"><td><span class="col-name">tenantId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span> <span class="badge-nn">NOT NULL</span></td><td class="col-notes">→ tenants.id ON DELETE RESTRICT</td></tr>
+          <tr><td><span class="col-name">email</span></td><td><span class="col-type">VARCHAR(320)</span></td><td><span class="badge-nn">NOT NULL</span></td><td class="col-notes">Lowercase. Unique per tenant (not globally — same email can work at 2 hotels).</td></tr>
+          <tr><td><span class="col-name">passwordHash</span></td><td><span class="col-type">VARCHAR(72)</span></td><td></td><td class="col-notes">bcrypt. NULL for SSO-only accounts.</td></tr>
+          <tr><td><span class="col-name">name</span></td><td><span class="col-type">VARCHAR(200)</span></td><td><span class="badge-nn">NOT NULL</span></td><td class="col-notes"></td></tr>
+          <tr><td><span class="col-name">phone</span></td><td><span class="col-type">VARCHAR(20)</span></td><td></td><td class="col-notes"></td></tr>
+          <tr><td><span class="col-name">emailVerified</span></td><td><span class="col-type">BOOLEAN</span></td><td><span class="badge-nn">NOT NULL</span></td><td class="col-notes">DEFAULT FALSE</td></tr>
+          <tr><td><span class="col-name">lastLoginAt</span></td><td><span class="col-type">TIMESTAMPTZ</span></td><td></td><td class="col-notes"></td></tr>
+          <tr><td><span class="col-name">createdAt</span></td><td><span class="col-type">TIMESTAMPTZ</span></td><td><span class="badge-nn">NOT NULL</span></td><td class="col-notes"></td></tr>
+          <tr><td><span class="col-name">deletedAt</span></td><td><span class="col-type">TIMESTAMPTZ</span></td><td></td><td class="col-notes">Soft delete — deactivated staff. Never hard-deleted.</td></tr>
+        </table>
+        <div class="index-block">
+          <div class="ib-title">Indexes</div>
+          <div class="index-row"><span class="idx-code">UNIQUE (tenantId, email)</span><span class="idx-note">— Email unique within a tenant</span></div>
+          <div class="index-row"><span class="idx-code">INDEX (tenantId, deletedAt)</span><span class="idx-note">— Active user lookup</span></div>
+        </div>
+        <div class="cascade-block">
+          <div class="cb-title">Relationships</div>
+          <div class="cascade-row"><span class="cr-rel">users.tenantId → tenants.id</span><span class="cr-action">On tenant delete:</span><span class="cr-type cr-restrict">RESTRICT</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ROLES -->
+    <div class="table-card" id="tc-roles">
+      <div class="tc-header" onclick="toggleTable('tc-roles')">
+        <span class="tc-name">roles</span>
+        <span class="tc-desc">— Named role definitions per tenant</span>
+        <span class="tc-chevron">▼</span>
+      </div>
+      <div class="tc-body">
+        <table class="col-table">
+          <tr><th>Column</th><th>Type</th><th>Constraints</th><th>Notes</th></tr>
+          <tr class="col-pk"><td><span class="col-name">id</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-pk">PK</span></td><td class="col-notes"></td></tr>
+          <tr class="col-fk"><td><span class="col-name">tenantId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span> <span class="badge-nn">NOT NULL</span></td><td class="col-notes">→ tenants.id</td></tr>
+          <tr><td><span class="col-name">name</span></td><td><span class="col-type">VARCHAR(100)</span></td><td><span class="badge-nn">NOT NULL</span></td><td class="col-notes">owner | admin | manager | front_desk | housekeeper | accountant (or custom)</td></tr>
+          <tr><td><span class="col-name">isSystem</span></td><td><span class="col-type">BOOLEAN</span></td><td><span class="badge-nn">NOT NULL</span></td><td class="col-notes">TRUE = seeded default role. Cannot be deleted.</td></tr>
+        </table>
+        <div class="index-block">
+          <div class="ib-title">Indexes</div>
+          <div class="index-row"><span class="idx-code">UNIQUE (tenantId, name)</span><span class="idx-note">— Role name unique per tenant</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- USER_BRANCH_ROLES -->
+    <div class="table-card" id="tc-ubr">
+      <div class="tc-header" onclick="toggleTable('tc-ubr')">
+        <span class="tc-name">user_branch_roles</span>
+        <span class="tc-desc">— Assigns a user a role scoped to a specific branch</span>
+        <span class="tc-chevron">▼</span>
+      </div>
+      <div class="tc-body">
+        <table class="col-table">
+          <tr><th>Column</th><th>Type</th><th>Constraints</th><th>Notes</th></tr>
+          <tr class="col-pk"><td><span class="col-name">id</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-pk">PK</span></td><td class="col-notes"></td></tr>
+          <tr class="col-fk"><td><span class="col-name">tenantId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span> <span class="badge-nn">NOT NULL</span></td><td class="col-notes">→ tenants.id</td></tr>
+          <tr class="col-fk"><td><span class="col-name">userId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span> <span class="badge-nn">NOT NULL</span></td><td class="col-notes">→ users.id ON DELETE CASCADE</td></tr>
+          <tr class="col-fk"><td><span class="col-name">roleId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span> <span class="badge-nn">NOT NULL</span></td><td class="col-notes">→ roles.id ON DELETE RESTRICT</td></tr>
+          <tr class="col-fk"><td><span class="col-name">branchId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span></td><td class="col-notes">→ branches.id. NULL = access to all branches (owner/admin).</td></tr>
+          <tr><td><span class="col-name">assignedAt</span></td><td><span class="col-type">TIMESTAMPTZ</span></td><td><span class="badge-nn">NOT NULL</span></td><td class="col-notes"></td></tr>
+          <tr class="col-fk"><td><span class="col-name">assignedBy</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span></td><td class="col-notes">→ users.id</td></tr>
+        </table>
+        <div class="index-block">
+          <div class="ib-title">Indexes</div>
+          <div class="index-row"><span class="idx-code">UNIQUE (userId, roleId, branchId)</span><span class="idx-note">— No duplicate role assignments</span></div>
+          <div class="index-row"><span class="idx-code">INDEX (userId, branchId)</span><span class="idx-note">— Auth check: what can this user do at this branch?</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- INVITE_TOKENS -->
+    <div class="table-card" id="tc-invites">
+      <div class="tc-header" onclick="toggleTable('tc-invites')">
+        <span class="tc-name">invite_tokens</span>
+        <span class="tc-desc">— Staff invitation links</span>
+        <span class="tc-chevron">▼</span>
+      </div>
+      <div class="tc-body">
+        <table class="col-table">
+          <tr><th>Column</th><th>Type</th><th>Constraints</th><th>Notes</th></tr>
+          <tr class="col-pk"><td><span class="col-name">id</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-pk">PK</span></td><td class="col-notes"></td></tr>
+          <tr class="col-fk"><td><span class="col-name">tenantId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span> <span class="badge-nn">NOT NULL</span></td><td class="col-notes">→ tenants.id</td></tr>
+          <tr><td><span class="col-name">email</span></td><td><span class="col-type">VARCHAR(320)</span></td><td><span class="badge-nn">NOT NULL</span></td><td class="col-notes">Invited email address</td></tr>
+          <tr><td><span class="col-name">token</span></td><td><span class="col-type">VARCHAR(128)</span></td><td><span class="badge-uk">UNIQUE</span> <span class="badge-nn">NOT NULL</span></td><td class="col-notes">crypto.randomBytes(64).toString('hex')</td></tr>
+          <tr class="col-fk"><td><span class="col-name">roleId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span> <span class="badge-nn">NOT NULL</span></td><td class="col-notes">→ roles.id</td></tr>
+          <tr class="col-fk"><td><span class="col-name">branchId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span></td><td class="col-notes">→ branches.id. NULL = all branches.</td></tr>
+          <tr><td><span class="col-name">expiresAt</span></td><td><span class="col-type">TIMESTAMPTZ</span></td><td><span class="badge-nn">NOT NULL</span></td><td class="col-notes">NOW() + 72 hours</td></tr>
+          <tr><td><span class="col-name">acceptedAt</span></td><td><span class="col-type">TIMESTAMPTZ</span></td><td></td><td class="col-notes">NULL = pending. Set on acceptance.</td></tr>
+        </table>
+      </div>
+    </div>
+
+  </div>
+  </div>
+
+  <!-- ═══ PROPERTY ═══ -->
+  <div class="page" id="page-property">
+  <div class="page-inner">
+    <div class="page-hero">
+      <div class="domain-badge" style="background:#edf5ed;color:#3a6b3a"><span class="db-dot" style="background:#4a8a4a"></span>Property Domain</div>
+      <h1>Property</h1>
+      <p>7 tables. The physical hierarchy of the PMS: Brand → Branch → Building → Floor → Room. Room types define the category template; individual rooms are instances of that template assigned to floors.</p>
+    </div>
+
+    <div class="info-box rule">
+      <div class="info-box-title">Hierarchy Rule</div>
+      <p>Single-brand tenants have exactly one Brand record created automatically on signup. The UI hides the brand selector but the data model is identical. This means single-brand tenants can be upgraded to multi-brand without any schema migration — just add more Brand rows and update the UI flag.</p>
+    </div>
+
+    <!-- BRANDS -->
+    <div class="table-card" id="tc-brands">
+      <div class="tc-header" onclick="toggleTable('tc-brands')">
+        <span class="tc-name">brands</span><span class="tc-desc">— Hotel brand identities</span>
+        <span class="tc-chevron">▼</span>
+      </div>
+      <div class="tc-body">
+        <table class="col-table">
+          <tr><th>Column</th><th>Type</th><th>Constraints</th><th>Notes</th></tr>
+          <tr class="col-pk"><td><span class="col-name">id</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-pk">PK</span></td><td></td></tr>
+          <tr class="col-fk"><td><span class="col-name">tenantId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span> <span class="badge-nn">NOT NULL</span></td><td class="col-notes">→ tenants.id ON DELETE CASCADE</td></tr>
+          <tr><td><span class="col-name">name</span></td><td><span class="col-type">VARCHAR(200)</span></td><td><span class="badge-nn">NOT NULL</span></td><td></td></tr>
+          <tr><td><span class="col-name">logoUrl</span></td><td><span class="col-type">TEXT</span></td><td></td><td class="col-notes">S3/CDN URL</td></tr>
+          <tr><td><span class="col-name">primaryColor</span></td><td><span class="col-type">VARCHAR(7)</span></td><td></td><td class="col-notes">Hex e.g. #2d4a6e</td></tr>
+          <tr><td><span class="col-name">defaultPolicies</span></td><td><span class="col-type">JSONB</span></td><td></td><td class="col-notes">Inherited by branches unless overridden</td></tr>
+          <tr><td><span class="col-name">createdAt</span></td><td><span class="col-type">TIMESTAMPTZ</span></td><td><span class="badge-nn">NOT NULL</span></td><td></td></tr>
+          <tr><td><span class="col-name">deletedAt</span></td><td><span class="col-type">TIMESTAMPTZ</span></td><td></td><td class="col-notes">Soft delete</td></tr>
+        </table>
+        <div class="index-block">
+          <div class="ib-title">Indexes</div>
+          <div class="index-row"><span class="idx-code">INDEX (tenantId, deletedAt)</span><span class="idx-note">— Active brands per tenant</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- BRANCHES -->
+    <div class="table-card" id="tc-branches">
+      <div class="tc-header" onclick="toggleTable('tc-branches')">
+        <span class="tc-name">branches</span><span class="tc-desc">— Physical hotel properties</span>
+        <div class="tc-meta"><span class="tc-pill pill-rls">RLS SCOPE</span></div>
+        <span class="tc-chevron">▼</span>
+      </div>
+      <div class="tc-body">
+        <table class="col-table">
+          <tr><th>Column</th><th>Type</th><th>Constraints</th><th>Notes</th></tr>
+          <tr class="col-pk"><td><span class="col-name">id</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-pk">PK</span></td><td></td></tr>
+          <tr class="col-fk"><td><span class="col-name">tenantId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span> <span class="badge-nn">NOT NULL</span></td><td class="col-notes">→ tenants.id</td></tr>
+          <tr class="col-fk"><td><span class="col-name">brandId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span> <span class="badge-nn">NOT NULL</span></td><td class="col-notes">→ brands.id ON DELETE RESTRICT</td></tr>
+          <tr><td><span class="col-name">name</span></td><td><span class="col-type">VARCHAR(200)</span></td><td><span class="badge-nn">NOT NULL</span></td><td></td></tr>
+          <tr><td><span class="col-name">address</span></td><td><span class="col-type">JSONB</span></td><td><span class="badge-nn">NOT NULL</span></td><td class="col-notes">{street, city, state, country, zip}</td></tr>
+          <tr><td><span class="col-name">timezone</span></td><td><span class="col-type">VARCHAR(50)</span></td><td><span class="badge-nn">NOT NULL</span></td><td class="col-notes">IANA tz: Africa/Lagos</td></tr>
+          <tr><td><span class="col-name">currency</span></td><td><span class="col-type">CHAR(3)</span></td><td><span class="badge-nn">NOT NULL</span></td><td class="col-notes">ISO 4217: NGN, USD, GBP</td></tr>
+          <tr><td><span class="col-name">checkInTime</span></td><td><span class="col-type">TIME</span></td><td><span class="badge-nn">NOT NULL</span></td><td class="col-notes">DEFAULT '14:00'</td></tr>
+          <tr><td><span class="col-name">checkOutTime</span></td><td><span class="col-type">TIME</span></td><td><span class="badge-nn">NOT NULL</span></td><td class="col-notes">DEFAULT '11:00'</td></tr>
+          <tr><td><span class="col-name">category</span></td><td><span class="col-type">VARCHAR(30)</span></td><td></td><td class="col-notes">hotel | resort | motel | boutique | hostel</td></tr>
+          <tr><td><span class="col-name">policies</span></td><td><span class="col-type">JSONB</span></td><td></td><td class="col-notes">Overrides brand defaultPolicies. Merged at read time.</td></tr>
+          <tr><td><span class="col-name">noShowPolicy</span></td><td><span class="col-type">JSONB</span></td><td></td><td class="col-notes">{cutoffTime, defaultPenalty, autoMark, notifyMinutesBefore}</td></tr>
+          <tr><td><span class="col-name">regCardTemplate</span></td><td><span class="col-type">JSONB</span></td><td></td><td class="col-notes">{logoUrl, houseRules, requiredFields, showRate, language}</td></tr>
+          <tr><td><span class="col-name">createdAt</span></td><td><span class="col-type">TIMESTAMPTZ</span></td><td><span class="badge-nn">NOT NULL</span></td><td></td></tr>
+          <tr><td><span class="col-name">deletedAt</span></td><td><span class="col-type">TIMESTAMPTZ</span></td><td></td><td class="col-notes">Soft delete</td></tr>
+        </table>
+        <div class="index-block">
+          <div class="ib-title">Indexes</div>
+          <div class="index-row"><span class="idx-code">INDEX (tenantId, brandId)</span><span class="idx-note">— Branches per brand</span></div>
+          <div class="index-row"><span class="idx-code">INDEX (tenantId, deletedAt)</span><span class="idx-note">— Active branches</span></div>
+        </div>
+        <div class="cascade-block">
+          <div class="cb-title">Cascade Rules</div>
+          <div class="cascade-row"><span class="cr-rel">branches.brandId → brands.id</span><span class="cr-action">Delete brand:</span><span class="cr-type cr-restrict">RESTRICT</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ROOM_TYPES -->
+    <div class="table-card" id="tc-roomtypes">
+      <div class="tc-header" onclick="toggleTable('tc-roomtypes')">
+        <span class="tc-name">room_types</span><span class="tc-desc">— Room category templates (Deluxe King, Suite, etc.)</span>
+        <span class="tc-chevron">▼</span>
+      </div>
+      <div class="tc-body">
+        <table class="col-table">
+          <tr><th>Column</th><th>Type</th><th>Constraints</th><th>Notes</th></tr>
+          <tr class="col-pk"><td><span class="col-name">id</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-pk">PK</span></td><td></td></tr>
+          <tr class="col-fk"><td><span class="col-name">tenantId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span> <span class="badge-nn">NOT NULL</span></td><td></td></tr>
+          <tr class="col-fk"><td><span class="col-name">branchId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span> <span class="badge-nn">NOT NULL</span></td><td class="col-notes">→ branches.id ON DELETE RESTRICT</td></tr>
+          <tr><td><span class="col-name">name</span></td><td><span class="col-type">VARCHAR(100)</span></td><td><span class="badge-nn">NOT NULL</span></td><td></td></tr>
+          <tr><td><span class="col-name">baseRate</span></td><td><span class="col-type">NUMERIC(12,2)</span></td><td><span class="badge-nn">NOT NULL</span></td><td class="col-notes">Starting point for Rate Resolver. Always > 0.</td></tr>
+          <tr><td><span class="col-name">capacity</span></td><td><span class="col-type">JSONB</span></td><td><span class="badge-nn">NOT NULL</span></td><td class="col-notes">{adults: int, children: int}</td></tr>
+          <tr><td><span class="col-name">bedType</span></td><td><span class="col-type">VARCHAR(50)</span></td><td></td><td></td></tr>
+          <tr><td><span class="col-name">sizeM2</span></td><td><span class="col-type">NUMERIC(6,1)</span></td><td></td><td></td></tr>
+          <tr><td><span class="col-name">amenities</span></td><td><span class="col-type">TEXT[]</span></td><td></td><td class="col-notes">Array of strings. No FK — free-form tags.</td></tr>
+          <tr><td><span class="col-name">photoUrls</span></td><td><span class="col-type">TEXT[]</span></td><td></td><td></td></tr>
+          <tr><td><span class="col-name">sortOrder</span></td><td><span class="col-type">INTEGER</span></td><td></td><td class="col-notes">Display ordering</td></tr>
+          <tr><td><span class="col-name">deletedAt</span></td><td><span class="col-type">TIMESTAMPTZ</span></td><td></td><td class="col-notes">Soft delete — existing rooms still reference this</td></tr>
+        </table>
+        <div class="index-block">
+          <div class="ib-title">Indexes</div>
+          <div class="index-row"><span class="idx-code">INDEX (branchId, deletedAt)</span><span class="idx-note">— Room types for a branch</span></div>
+          <div class="index-row"><span class="idx-code">GIN INDEX (amenities)</span><span class="idx-note">— Filter rooms by amenity</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ROOMS -->
+    <div class="table-card" id="tc-rooms">
+      <div class="tc-header" onclick="toggleTable('tc-rooms')">
+        <span class="tc-name">rooms</span><span class="tc-desc">— Physical room instances</span>
+        <div class="tc-meta"><span class="tc-pill pill-audit">STATUS AUDIT</span></div>
+        <span class="tc-chevron">▼</span>
+      </div>
+      <div class="tc-body">
+        <table class="col-table">
+          <tr><th>Column</th><th>Type</th><th>Constraints</th><th>Notes</th></tr>
+          <tr class="col-pk"><td><span class="col-name">id</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-pk">PK</span></td><td></td></tr>
+          <tr class="col-fk"><td><span class="col-name">tenantId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span> <span class="badge-nn">NOT NULL</span></td><td></td></tr>
+          <tr class="col-fk"><td><span class="col-name">branchId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span> <span class="badge-nn">NOT NULL</span></td><td class="col-notes">→ branches.id ON DELETE RESTRICT</td></tr>
+          <tr class="col-fk"><td><span class="col-name">roomTypeId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span> <span class="badge-nn">NOT NULL</span></td><td class="col-notes">→ room_types.id ON DELETE RESTRICT</td></tr>
+          <tr class="col-fk"><td><span class="col-name">floorId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span> <span class="badge-nn">NOT NULL</span></td><td class="col-notes">→ floors.id ON DELETE RESTRICT</td></tr>
+          <tr><td><span class="col-name">number</span></td><td><span class="col-type">VARCHAR(20)</span></td><td><span class="badge-nn">NOT NULL</span></td><td class="col-notes">e.g. "101", "PH-A". Unique per branch.</td></tr>
+          <tr><td><span class="col-name">status</span></td><td><span class="col-type">room_status_enum</span></td><td><span class="badge-nn">NOT NULL</span></td><td class="col-notes">DEFAULT 'vacant'</td></tr>
+          <tr><td><span class="col-name">view</span></td><td><span class="col-type">VARCHAR(50)</span></td><td></td><td class="col-notes">pool | garden | sea | city | courtyard</td></tr>
+          <tr><td><span class="col-name">notes</span></td><td><span class="col-type">TEXT</span></td><td></td><td class="col-notes">Internal notes (e.g. "noisy pipes on east wall")</td></tr>
+          <tr><td><span class="col-name">statusChangedAt</span></td><td><span class="col-type">TIMESTAMPTZ</span></td><td></td><td class="col-notes">Updated whenever status changes</td></tr>
+          <tr class="col-fk"><td><span class="col-name">statusChangedBy</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span></td><td class="col-notes">→ users.id. NULL = system trigger.</td></tr>
+        </table>
+        <div class="index-block">
+          <div class="ib-title">Indexes</div>
+          <div class="index-row"><span class="idx-code">UNIQUE (branchId, number)</span><span class="idx-note">— Room numbers unique per branch</span></div>
+          <div class="index-row"><span class="idx-code">INDEX (branchId, occupancyStatus, cleanlinessStatus)</span><span class="idx-note">— Status board query: full room state in one scan</span></div>
+          <div class="index-row"><span class="idx-code">INDEX (branchId, roomTypeId, occupancyStatus) WHERE heldStatus IS NULL</span><span class="idx-note">— Availability engine: vacant rooms of given type not held</span></div>
+          <div class="index-row"><span class="idx-code">INDEX (branchId, cleanlinessStatus)</span><span class="idx-note">— Housekeeping: all dirty/clean rooms regardless of occupancy</span></div>
+          <div class="index-row"><span class="idx-code">INDEX (floorId, cleanlinessStatus)</span><span class="idx-note">— Housekeeping floor view</span></div>
+        </div>
+        <div class="enum-grid">
+          <div class="enum-item"><div class="enum-name">occupancy_status_enum</div><div class="enum-vals"><span class="enum-val">vacant</span><span class="enum-val">occupied</span></div></div>
+        <div class="enum-item"><div class="enum-name">cleaning_status_enum</div><div class="enum-vals"><span class="enum-val">dirty</span><span class="enum-val">cleaning</span><span class="enum-val">clean</span><span class="enum-val">inspected</span></div></div>
+        <div class="enum-item"><div class="enum-name">held_status_enum</div><div class="enum-vals"><span class="enum-val">NULL (normal)</span><span class="enum-val">out_of_order</span><span class="enum-val">blocked</span></div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Buildings and Floors condensed -->
+    <div class="table-card" id="tc-buildings">
+      <div class="tc-header" onclick="toggleTable('tc-buildings')">
+        <span class="tc-name">buildings</span><span class="tc-desc"> & </span><span class="tc-name">floors</span><span class="tc-desc">— Physical structure hierarchy</span>
+        <span class="tc-chevron">▼</span>
+      </div>
+      <div class="tc-body">
+        <div style="padding:10px 16px;font-size:12px;color:var(--ink3);border-bottom:1px solid var(--rule)">buildings</div>
+        <table class="col-table">
+          <tr><th>Column</th><th>Type</th><th>Constraints</th><th>Notes</th></tr>
+          <tr class="col-pk"><td><span class="col-name">id</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-pk">PK</span></td><td></td></tr>
+          <tr class="col-fk"><td><span class="col-name">tenantId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span> <span class="badge-nn">NOT NULL</span></td><td></td></tr>
+          <tr class="col-fk"><td><span class="col-name">branchId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span> <span class="badge-nn">NOT NULL</span></td><td class="col-notes">→ branches.id ON DELETE CASCADE</td></tr>
+          <tr><td><span class="col-name">name</span></td><td><span class="col-type">VARCHAR(100)</span></td><td><span class="badge-nn">NOT NULL</span></td><td class="col-notes">e.g. "Main Tower", "Annex"</td></tr>
+        </table>
+        <div style="padding:10px 16px;font-size:12px;color:var(--ink3);border-bottom:1px solid var(--rule);border-top:1px solid var(--rule)">floors</div>
+        <table class="col-table">
+          <tr><th>Column</th><th>Type</th><th>Constraints</th><th>Notes</th></tr>
+          <tr class="col-pk"><td><span class="col-name">id</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-pk">PK</span></td><td></td></tr>
+          <tr class="col-fk"><td><span class="col-name">tenantId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span> <span class="badge-nn">NOT NULL</span></td><td></td></tr>
+          <tr class="col-fk"><td><span class="col-name">buildingId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span> <span class="badge-nn">NOT NULL</span></td><td class="col-notes">→ buildings.id ON DELETE CASCADE</td></tr>
+          <tr><td><span class="col-name">floorNumber</span></td><td><span class="col-type">INTEGER</span></td><td><span class="badge-nn">NOT NULL</span></td><td class="col-notes">0 = ground floor</td></tr>
+          <tr><td><span class="col-name">label</span></td><td><span class="col-type">VARCHAR(30)</span></td><td></td><td class="col-notes">e.g. "Ground", "Mezzanine"</td></tr>
+        </table>
+        <div class="cascade-block">
+          <div class="cb-title">Cascade Rules</div>
+          <div class="cascade-row"><span class="cr-rel">buildings → branches</span><span class="cr-action">Delete branch:</span><span class="cr-type cr-softdel">SOFT DELETE branch first</span></div>
+          <div class="cascade-row"><span class="cr-rel">floors → buildings</span><span class="cr-action">Delete building:</span><span class="cr-type cr-restrict">RESTRICT if rooms exist</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ROOM_BLOCKS -->
+    <div class="table-card" id="tc-roomblocks">
+      <div class="tc-header" onclick="toggleTable('tc-roomblocks')">
+        <span class="tc-name">room_blocks</span><span class="tc-desc">— Maintenance holds and VIP blocks</span>
+        <span class="tc-chevron">▼</span>
+      </div>
+      <div class="tc-body">
+        <table class="col-table">
+          <tr><th>Column</th><th>Type</th><th>Constraints</th><th>Notes</th></tr>
+          <tr class="col-pk"><td><span class="col-name">id</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-pk">PK</span></td><td></td></tr>
+          <tr class="col-fk"><td><span class="col-name">tenantId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span> <span class="badge-nn">NOT NULL</span></td><td></td></tr>
+          <tr class="col-fk"><td><span class="col-name">roomId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span> <span class="badge-nn">NOT NULL</span></td><td class="col-notes">→ rooms.id ON DELETE CASCADE</td></tr>
+          <tr><td><span class="col-name">reason</span></td><td><span class="col-type">block_reason_enum</span></td><td><span class="badge-nn">NOT NULL</span></td><td class="col-notes">maintenance | renovation | vip_hold | other</td></tr>
+          <tr><td><span class="col-name">fromDate</span></td><td><span class="col-type">DATE</span></td><td><span class="badge-nn">NOT NULL</span></td><td></td></tr>
+          <tr><td><span class="col-name">toDate</span></td><td><span class="col-type">DATE</span></td><td><span class="badge-nn">NOT NULL</span></td><td></td></tr>
+          <tr><td><span class="col-name">notes</span></td><td><span class="col-type">TEXT</span></td><td></td><td></td></tr>
+          <tr class="col-fk"><td><span class="col-name">createdBy</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span></td><td class="col-notes">→ users.id</td></tr>
+          <tr><td><span class="col-name">createdAt</span></td><td><span class="col-type">TIMESTAMPTZ</span></td><td><span class="badge-nn">NOT NULL</span></td><td></td></tr>
+        </table>
+        <div class="index-block">
+          <div class="ib-title">Indexes</div>
+          <div class="index-row"><span class="idx-code">INDEX (roomId, fromDate, toDate)</span><span class="idx-note">— Availability check: is this room blocked on these dates?</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  </div>
+
+  <!-- ═══ RESERVATIONS ═══ -->
+  <div class="page" id="page-reservations">
+  <div class="page-inner">
+    <div class="page-hero">
+      <div class="domain-badge" style="background:#f5edeb;color:#6b3a2d"><span class="db-dot" style="background:#a84a38"></span>Reservations Domain</div>
+      <h1>Reservations</h1>
+      <p>6 tables. The reservation is the central entity of the PMS — almost every other table has a foreign key relationship to it. Guest profiles are tenant-scoped (not reservation-scoped) so they accumulate history across stays.</p>
+    </div>
+
+    <!-- GUEST_PROFILES -->
+    <div class="table-card" id="tc-guests">
+      <div class="tc-header" onclick="toggleTable('tc-guests')">
+        <span class="tc-name">guest_profiles</span><span class="tc-desc">— Persistent guest identity</span>
+        <div class="tc-meta"><span class="tc-pill pill-softdel">SOFT DELETE</span><span class="tc-pill pill-rls">RLS</span></div>
+        <span class="tc-chevron">▼</span>
+      </div>
+      <div class="tc-body">
+        <table class="col-table">
+          <tr><th>Column</th><th>Type</th><th>Constraints</th><th>Notes</th></tr>
+          <tr class="col-pk"><td><span class="col-name">id</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-pk">PK</span></td><td></td></tr>
+          <tr class="col-fk"><td><span class="col-name">tenantId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span> <span class="badge-nn">NOT NULL</span></td><td></td></tr>
+          <tr><td><span class="col-name">name</span></td><td><span class="col-type">VARCHAR(200)</span></td><td><span class="badge-nn">NOT NULL</span></td><td></td></tr>
+          <tr><td><span class="col-name">email</span></td><td><span class="col-type">VARCHAR(320)</span></td><td></td><td class="col-notes">Optional — walk-in guests may not provide</td></tr>
+          <tr><td><span class="col-name">phone</span></td><td><span class="col-type">VARCHAR(20)</span></td><td></td><td></td></tr>
+          <tr><td><span class="col-name">nationality</span></td><td><span class="col-type">CHAR(2)</span></td><td></td><td class="col-notes">ISO 3166-1 alpha-2</td></tr>
+          <tr><td><span class="col-name">idDocType</span></td><td><span class="col-type">VARCHAR(30)</span></td><td></td><td class="col-notes">passport | national_id | drivers_license</td></tr>
+          <tr><td><span class="col-name">idDocNumber</span></td><td><span class="col-type">TEXT</span></td><td></td><td class="col-notes">Encrypted at application layer (AES-256). Never stored plaintext.</td></tr>
+          <tr><td><span class="col-name">idDocUrl</span></td><td><span class="col-type">TEXT</span></td><td></td><td class="col-notes">S3 URL. Encrypted bucket. Access-controlled.</td></tr>
+          <tr><td><span class="col-name">idDocExpiryDate</span></td><td><span class="col-type">DATE</span></td><td></td><td class="col-notes">Expiry date of the stored ID document. NULL = not captured or unknown. Used by check-in flow to determine which ID state to show: first visit (no ID), returning-valid (expiry in future), returning-expired (expiry in past). Drives the conditional UI without any manual logic.</td></tr>
+          <tr><td><span class="col-name">preferences</span></td><td><span class="col-type">JSONB</span></td><td></td><td class="col-notes">{bedType, floor, view, pillow, temp, dietaryRestrictions[]}</td></tr>
+          <tr><td><span class="col-name">vipLevel</span></td><td><span class="col-type">SMALLINT</span></td><td></td><td class="col-notes">0–5. 0 = standard, 5 = VVIP.</td></tr>
+          <tr><td><span class="col-name">tags</span></td><td><span class="col-type">TEXT[]</span></td><td></td><td class="col-notes">e.g. ['repeat_guest','corporate','allergies']</td></tr>
+          <tr><td><span class="col-name">notes</span></td><td><span class="col-type">TEXT</span></td><td></td><td class="col-notes">Staff notes. Not visible to guest.</td></tr>
+          <tr><td><span class="col-name">loyaltyTier</span></td><td><span class="col-type">VARCHAR(30)</span></td><td></td><td class="col-notes">silver | gold | platinum</td></tr>
+          <tr><td><span class="col-name">loyaltyPoints</span></td><td><span class="col-type">INTEGER</span></td><td></td><td class="col-notes">DEFAULT 0</td></tr>
+          <tr><td><span class="col-name">createdAt</span></td><td><span class="col-type">TIMESTAMPTZ</span></td><td><span class="badge-nn">NOT NULL</span></td><td></td></tr>
+          <tr><td><span class="col-name">deletedAt</span></td><td><span class="col-type">TIMESTAMPTZ</span></td><td></td><td class="col-notes">GDPR erasure sets deletedAt + nullifies PII fields</td></tr>
+        </table>
+        <div class="index-block">
+          <div class="ib-title">Indexes</div>
+          <div class="index-row"><span class="idx-code">INDEX (tenantId, email)</span><span class="idx-note">— Guest search by email</span></div>
+          <div class="index-row"><span class="idx-code">INDEX (tenantId, name text_pattern_ops)</span><span class="idx-note">— Guest name prefix search</span></div>
+          <div class="index-row"><span class="idx-code">INDEX (tenantId, vipLevel) WHERE vipLevel > 0</span><span class="idx-note">— VIP guest lookups</span></div>
+          <div class="index-row"><span class="idx-code">GIN INDEX (tags)</span><span class="idx-note">— Filter by guest tag</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- RESERVATIONS -->
+    <div class="table-card" id="tc-reservations">
+      <div class="tc-header" onclick="toggleTable('tc-reservations')">
+        <span class="tc-name">reservations</span><span class="tc-desc">— The central entity</span>
+        <div class="tc-meta"><span class="tc-pill pill-softdel">SOFT DELETE</span><span class="tc-pill pill-rls">RLS</span></div>
+        <span class="tc-chevron">▼</span>
+      </div>
+      <div class="tc-body">
+        <table class="col-table">
+          <tr><th>Column</th><th>Type</th><th>Constraints</th><th>Notes</th></tr>
+          <tr class="col-pk"><td><span class="col-name">id</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-pk">PK</span></td><td></td></tr>
+          <tr><td><span class="col-name">confirmationNumber</span></td><td><span class="col-type">VARCHAR(20)</span></td><td><span class="badge-uk">UNIQUE</span> <span class="badge-nn">NOT NULL</span></td><td class="col-notes">Human-readable: RES-2024-00001. Sequence per branch.</td></tr>
+          <tr class="col-fk"><td><span class="col-name">tenantId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span> <span class="badge-nn">NOT NULL</span></td><td></td></tr>
+          <tr class="col-fk"><td><span class="col-name">branchId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span> <span class="badge-nn">NOT NULL</span></td><td class="col-notes">→ branches.id ON DELETE RESTRICT</td></tr>
+          <tr class="col-fk"><td><span class="col-name">guestId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span> <span class="badge-nn">NOT NULL</span></td><td class="col-notes">→ guest_profiles.id ON DELETE RESTRICT</td></tr>
+          <tr class="col-fk"><td><span class="col-name">roomTypeId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span> <span class="badge-nn">NOT NULL</span></td><td class="col-notes">→ room_types.id ON DELETE RESTRICT</td></tr>
+          <tr class="col-fk"><td><span class="col-name">roomId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span></td><td class="col-notes">→ rooms.id. NULL until check-in (or assignment).</td></tr>
+          <tr class="col-fk"><td><span class="col-name">ratePlanId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span></td><td class="col-notes">→ rate_plans.id. The plan that won at booking time.</td></tr>
+          <tr><td><span class="col-name">confirmedRate</span></td><td><span class="col-type">NUMERIC(12,2)</span></td><td><span class="badge-nn">NOT NULL</span></td><td class="col-notes">Snapshot of nightly rate at booking time. Never changes even if rate plan changes later.</td></tr>
+          <tr><td><span class="col-name">status</span></td><td><span class="col-type">reservation_status_enum</span></td><td><span class="badge-nn">NOT NULL</span></td><td class="col-notes">DEFAULT 'confirmed'</td></tr>
+          <tr><td><span class="col-name">channel</span></td><td><span class="col-type">VARCHAR(30)</span></td><td><span class="badge-nn">NOT NULL</span></td><td class="col-notes">direct | walkin | booking_com | expedia | agoda | airbnb</td></tr>
+          <tr><td><span class="col-name">checkInDate</span></td><td><span class="col-type">DATE</span></td><td><span class="badge-nn">NOT NULL</span></td><td></td></tr>
+          <tr><td><span class="col-name">checkOutDate</span></td><td><span class="col-type">DATE</span></td><td><span class="badge-nn">NOT NULL</span></td><td></td></tr>
+          <tr><td><span class="col-name">actualCheckIn</span></td><td><span class="col-type">TIMESTAMPTZ</span></td><td></td><td class="col-notes">Set on check-in action</td></tr>
+          <tr><td><span class="col-name">actualCheckOut</span></td><td><span class="col-type">TIMESTAMPTZ</span></td><td></td><td class="col-notes">Set on check-out action</td></tr>
+          <tr><td><span class="col-name">adults</span></td><td><span class="col-type">SMALLINT</span></td><td><span class="badge-nn">NOT NULL</span></td><td></td></tr>
+          <tr><td><span class="col-name">children</span></td><td><span class="col-type">SMALLINT</span></td><td></td><td class="col-notes">DEFAULT 0</td></tr>
+          <tr><td><span class="col-name">specialRequests</span></td><td><span class="col-type">TEXT</span></td><td></td><td></td></tr>
+          <tr><td><span class="col-name">depositAmount</span></td><td><span class="col-type">NUMERIC(12,2)</span></td><td></td><td class="col-notes">Amount held/paid at booking</td></tr>
+          <tr class="col-fk"><td><span class="col-name">createdBy</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span></td><td class="col-notes">→ users.id. NULL = online booking.</td></tr>
+          <tr><td><span class="col-name">createdAt</span></td><td><span class="col-type">TIMESTAMPTZ</span></td><td><span class="badge-nn">NOT NULL</span></td><td></td></tr>
+          <tr><td><span class="col-name">deletedAt</span></td><td><span class="col-type">TIMESTAMPTZ</span></td><td></td><td class="col-notes">Soft delete only. Cancelled reservations stay in DB.</td></tr>
+        </table>
+        <div class="index-block">
+          <div class="ib-title">Indexes</div>
+          <div class="index-row"><span class="idx-code">INDEX (branchId, checkInDate, status)</span><span class="idx-note">— Arrivals list (runs on every front desk load)</span></div>
+          <div class="index-row"><span class="idx-code">INDEX (branchId, checkOutDate, status)</span><span class="idx-note">— Departures list</span></div>
+          <div class="index-row"><span class="idx-code">INDEX (roomId, checkInDate, checkOutDate)</span><span class="idx-note">— Availability check: is room booked on these dates?</span></div>
+          <div class="index-row"><span class="idx-code">INDEX (guestId)</span><span class="idx-note">— Guest stay history</span></div>
+          <div class="index-row"><span class="idx-code">INDEX (branchId, status, checkInDate) WHERE status = 'confirmed'</span><span class="idx-note">— Partial index for no-show dashboard</span></div>
+          <div class="index-row"><span class="idx-code">UNIQUE (confirmationNumber)</span><span class="idx-note">— Human-readable lookup</span></div>
+        </div>
+        <div class="enum-grid">
+          <div class="enum-item"><div class="enum-name">reservation_status_enum</div><div class="enum-vals"><span class="enum-val">pending</span><span class="enum-val">confirmed</span><span class="enum-val">checked_in</span><span class="enum-val">checked_out</span><span class="enum-val">cancelled</span><span class="enum-val">no_show</span><span class="enum-val">waitlisted</span><span class="enum-val">walked</span></div></div>
+        </div>
+        <div class="cascade-block">
+          <div class="cb-title">Cascade Rules — Why RESTRICT on most FKs</div>
+          <div class="cascade-row"><span class="cr-rel">reservations.guestId → guest_profiles</span><span class="cr-action">Delete guest:</span><span class="cr-type cr-restrict">RESTRICT</span><span style="font-size:11px;color:var(--ink3);margin-left:8px">— Soft delete + anonymize instead (GDPR)</span></div>
+          <div class="cascade-row"><span class="cr-rel">reservations.roomId → rooms</span><span class="cr-action">Delete room:</span><span class="cr-type cr-setnull">SET NULL</span><span style="font-size:11px;color:var(--ink3);margin-left:8px">— Historical record preserved</span></div>
+          <div class="cascade-row"><span class="cr-rel">reservations.roomTypeId → room_types</span><span class="cr-action">Delete type:</span><span class="cr-type cr-restrict">RESTRICT</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- RATE_PLANS condensed -->
+    <div class="table-card" id="tc-rateplans">
+      <div class="tc-header" onclick="toggleTable('tc-rateplans')">
+        <span class="tc-name">rate_plans</span><span class="tc-desc"> & </span><span class="tc-name">rate_audit_log</span><span class="tc-desc">— Pricing rules and resolver trace</span>
+        <span class="tc-chevron">▼</span>
+      </div>
+      <div class="tc-body">
+        <div style="padding:8px 16px;font-size:12px;color:var(--ink3);border-bottom:1px solid var(--rule)">rate_plans</div>
+        <table class="col-table">
+          <tr><th>Column</th><th>Type</th><th>Constraints</th><th>Notes</th></tr>
+          <tr class="col-pk"><td><span class="col-name">id</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-pk">PK</span></td><td></td></tr>
+          <tr class="col-fk"><td><span class="col-name">tenantId / branchId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span></td><td></td></tr>
+          <tr class="col-fk"><td><span class="col-name">roomTypeId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span></td><td class="col-notes">→ room_types.id. NULL = applies to all types.</td></tr>
+          <tr><td><span class="col-name">type</span></td><td><span class="col-type">rate_type_enum</span></td><td><span class="badge-nn">NOT NULL</span></td><td class="col-notes">base | seasonal | weekend | corporate | negotiated | promotional. base/seasonal/weekend/corporate are CASCADE tiers (stack additively). negotiated/promotional are OVERRIDE types (replace the cascaded result entirely). "override" removed as a type — manager rate overrides are no longer rate_plans rows at all; see rate_overrides note below.</td></tr>
+          <tr><td><span class="col-name">amount</span></td><td><span class="col-type">NUMERIC(12,2)</span></td><td><span class="badge-nn">NOT NULL</span></td><td class="col-notes">For cascade tiers (seasonal/weekend/corporate): an adjustment applied on top of the running total from the tier above it — NOT on top of the original base rate. For override types (negotiated/promotional): an absolute replacement amount, ignoring the cascade entirely.</td></tr>
+          <tr><td><span class="col-name">adjustmentType</span></td><td><span class="col-type">VARCHAR(10)</span></td><td></td><td class="col-notes">fixed | percentage. NULL = absolute rate (used by override types only — base, negotiated, promotional). Cascade tiers (seasonal/weekend/corporate) always use fixed or percentage since they adjust a running total, never set it outright.</td></tr>
+          <tr><td><span class="col-name">cascadeTier</span></td><td><span class="col-type">SMALLINT</span></td><td><span class="badge-nn">NOT NULL</span></td><td class="col-notes">Replaces the old single-winner "priority" field. Only meaningful for cascade types (base/seasonal/weekend/corporate) — ignored for override types. 1=base (broadest, applied first), 2=seasonal, 3=weekend, 4=corporate (narrowest, applied last). Resolver applies tiers in ascending order, each adjusting the running total left by the tier before it — base → season → month/weekend → day-specific. Mirrors the parent→child hierarchy: season is a superset of month, month is a superset of day.</td></tr>
+          <tr><td><span class="col-name">isOverride</span></td><td><span class="col-type">BOOLEAN</span></td><td><span class="badge-nn">NOT NULL</span></td><td class="col-notes">DEFAULT FALSE. TRUE only for negotiated and promotional types. When TRUE, the Resolver skips the entire cascade calculation and uses this plan\'s amount as the absolute final rate. cascadeTier is ignored when this is TRUE.</td></tr>
+          <tr><td><span class="col-name">validFrom / validTo</span></td><td><span class="col-type">DATE</span></td><td></td><td class="col-notes">NULL = always valid</td></tr>
+          <tr><td><span class="col-name">minLOS</span></td><td><span class="col-type">SMALLINT</span></td><td></td><td class="col-notes">Minimum length of stay requirement</td></tr>
+          <tr><td><span class="col-name">promoCode</span></td><td><span class="col-type">VARCHAR(30)</span></td><td></td><td class="col-notes">NULL unless type = promotional</td></tr>
+          <tr><td><span class="col-name">isActive</span></td><td><span class="col-type">BOOLEAN</span></td><td><span class="badge-nn">NOT NULL</span></td><td class="col-notes">DEFAULT TRUE. Toggle instead of delete.</td></tr>
+          <tr class="col-fk"><td><span class="col-name">outletId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span></td><td class="col-notes">→ outlets.id. NULL for all room rate plans. Reserved for future F&B package and outlet-specific promotional pricing. Nullable so no migration needed when POS pricing is built.</td></tr>
+        </table>
+        <div style="padding:8px 16px;font-size:12px;color:var(--ink3);border-bottom:1px solid var(--rule);border-top:1px solid var(--rule)">rate_audit_log — append-only, never updated</div>
+        <table class="col-table">
+          <tr><th>Column</th><th>Type</th><th>Constraints</th><th>Notes</th></tr>
+          <tr class="col-pk"><td><span class="col-name">id</span></td><td><span class="col-type">BIGSERIAL</span></td><td><span class="badge-pk">PK</span></td><td class="col-notes">Sequential — efficient for append writes</td></tr>
+          <tr class="col-fk"><td><span class="col-name">tenantId / branchId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span></td><td></td></tr>
+          <tr class="col-fk"><td><span class="col-name">reservationId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span></td><td class="col-notes">→ reservations.id. NULL during pre-booking calculation.</td></tr>
+          <tr><td><span class="col-name">input</span></td><td><span class="col-type">JSONB</span></td><td><span class="badge-nn">NOT NULL</span></td><td class="col-notes">Full request payload sent to resolver</td></tr>
+          <tr><td><span class="col-name">result</span></td><td><span class="col-type">JSONB</span></td><td><span class="badge-nn">NOT NULL</span></td><td class="col-notes">Full cascade trace, not a single winning rule. Shape: { finalRate, isOverride: bool, overrideRatePlanId: uuid|null, cascade: [{ tier: "base", ratePlanId, amountBefore, adjustment, amountAfter }, { tier: "seasonal", ratePlanId, amountBefore, adjustment, amountAfter }, { tier: "weekend", ... }] }. Each cascade step shows the running total before and after that tier\'s adjustment — this is what powers the stacked rate tags ("Seasonal +25% · Weekend +5%") in the UI.</td></tr>
+          <tr><td><span class="col-name">triggeredBy</span></td><td><span class="col-type">VARCHAR(30)</span></td><td></td><td class="col-notes">checkin | booking_create | override | ota_import | walkin</td></tr>
+          <tr class="col-fk"><td><span class="col-name">userId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span></td><td class="col-notes">NULL = automated</td></tr>
+          <tr><td><span class="col-name">resolvedAt</span></td><td><span class="col-type">TIMESTAMPTZ</span></td><td><span class="badge-nn">NOT NULL</span></td><td></td></tr>
+        </table>
+        <div class="index-block">
+          <div class="ib-title">Key Indexes on rate_plans</div>
+          <div class="index-row"><span class="idx-code">INDEX (branchId, roomTypeId, isOverride, cascadeTier)</span><span class="idx-note">— Resolver fetches ALL matching cascade-tier plans in tier order (not a single winner), then separately checks for an active override</span></div>
+          <div class="index-row"><span class="idx-code">INDEX (branchId, validFrom, validTo) WHERE isActive = true</span><span class="idx-note">— Date-range filtering. Multiple rows can match simultaneously by design (e.g. a seasonal row AND a weekend row both valid for the same date)</span></div>
+          <div class="index-row"><span class="idx-code">INDEX (branchId, isOverride) WHERE isOverride = true AND isActive = true</span><span class="idx-note">— Fast lookup for negotiated/promotional plans, checked independently of the cascade</span></div>
+          <div class="index-row"><span class="idx-code">INDEX (rate_audit_log: reservationId)</span><span class="idx-note">— Retrieve rate history for a reservation</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- NO-SHOW + WALK RECORDS condensed -->
+    <div class="table-card" id="tc-noshow">
+      <div class="tc-header" onclick="toggleTable('tc-noshow')">
+        <span class="tc-name">no_show_records</span><span class="tc-desc"> & </span><span class="tc-name">walk_records</span>
+        <span class="tc-chevron">▼</span>
+      </div>
+      <div class="tc-body">
+        <div style="padding:8px 16px;font-size:12px;color:var(--ink3);border-bottom:1px solid var(--rule)">no_show_records — one record per no-show event</div>
+        <table class="col-table">
+          <tr><th>Column</th><th>Type</th><th>Notes</th></tr>
+          <tr class="col-pk"><td><span class="col-name">id</span></td><td><span class="col-type">UUID PK</span></td><td></td></tr>
+          <tr class="col-fk"><td><span class="col-name">tenantId / reservationId</span></td><td><span class="col-type">UUID FK</span></td><td class="col-notes">→ reservations.id ON DELETE RESTRICT</td></tr>
+          <tr><td><span class="col-name">penaltyType</span></td><td><span class="col-type">VARCHAR(20)</span></td><td class="col-notes">first_night | full_stay | flat_fee | none</td></tr>
+          <tr><td><span class="col-name">penaltyAmount</span></td><td><span class="col-type">NUMERIC(12,2)</span></td><td></td></tr>
+          <tr><td><span class="col-name">penaltyWaived</span></td><td><span class="col-type">BOOLEAN</span></td><td class="col-notes">DEFAULT FALSE</td></tr>
+          <tr class="col-fk"><td><span class="col-name">waivedBy</span></td><td><span class="col-type">UUID FK</span></td><td class="col-notes">→ users.id. Manager who waived it.</td></tr>
+          <tr><td><span class="col-name">refundAmount</span></td><td><span class="col-type">NUMERIC(12,2)</span></td><td></td></tr>
+          <tr><td><span class="col-name">markedAt</span></td><td><span class="col-type">TIMESTAMPTZ</span></td><td></td></tr>
+          <tr class="col-fk"><td><span class="col-name">markedBy</span></td><td><span class="col-type">UUID FK</span></td><td class="col-notes">→ users.id. NULL = auto-marked.</td></tr>
+        </table>
+        <div style="padding:8px 16px;font-size:12px;color:var(--ink3);border-top:1px solid var(--rule);border-bottom:1px solid var(--rule)">walk_records</div>
+        <table class="col-table">
+          <tr><th>Column</th><th>Type</th><th>Notes</th></tr>
+          <tr class="col-pk"><td><span class="col-name">id</span></td><td><span class="col-type">UUID PK</span></td><td></td></tr>
+          <tr class="col-fk"><td><span class="col-name">tenantId / reservationId</span></td><td><span class="col-type">UUID FK</span></td><td class="col-notes">→ reservations.id</td></tr>
+          <tr><td><span class="col-name">relocationProperty</span></td><td><span class="col-type">VARCHAR(200)</span></td><td class="col-notes">Name + address of sister property</td></tr>
+          <tr><td><span class="col-name">transportProvided</span></td><td><span class="col-type">BOOLEAN</span></td><td></td></tr>
+          <tr><td><span class="col-name">transportCost</span></td><td><span class="col-type">NUMERIC(12,2)</span></td><td></td></tr>
+          <tr><td><span class="col-name">compensationOffered</span></td><td><span class="col-type">TEXT</span></td><td class="col-notes">Free text description</td></tr>
+          <tr class="col-fk"><td><span class="col-name">approvedBy</span></td><td><span class="col-type">UUID FK</span></td><td class="col-notes">→ users.id. Manager approval required.</td></tr>
+          <tr><td><span class="col-name">walkedAt</span></td><td><span class="col-type">TIMESTAMPTZ</span></td><td></td></tr>
+        </table>
+      </div>
+    </div>
+  </div>
+  </div>
+
+  <!-- ═══ FINANCIAL ═══ -->
+  <div class="page" id="page-financial">
+  <div class="page-inner">
+    <div class="page-hero">
+      <div class="domain-badge" style="background:#f2edf8;color:#5a3a6b"><span class="db-dot" style="background:#7a4a9a"></span>Financial Domain</div>
+      <h1>Financial</h1>
+      <p>6 tables. Folios are the financial container for a reservation. Line items and payments never get hard-deleted. The folio transfer table creates an immutable audit chain between folios.</p>
+    </div>
+
+    <div class="info-box warn">
+      <div class="info-box-title">Critical: Immutability Rules</div>
+      <p>Line items and payments are <strong>append-only</strong>. To correct a charge, post a new line item with a negative amount (a credit). Never UPDATE or DELETE a line item or payment row. This preserves the complete financial ledger for audit and dispute purposes. The <code>deletedAt</code> column on line_items is used only for display suppression, never for financial calculation.</p>
+    </div>
+
+    <!-- FOLIOS -->
+    <div class="table-card" id="tc-folios">
+      <div class="tc-header" onclick="toggleTable('tc-folios')">
+        <span class="tc-name">folios</span><span class="tc-desc">— Financial containers per reservation</span>
+        <div class="tc-meta"><span class="tc-pill pill-softdel">SOFT DELETE</span></div>
+        <span class="tc-chevron">▼</span>
+      </div>
+      <div class="tc-body">
+        <table class="col-table">
+          <tr><th>Column</th><th>Type</th><th>Constraints</th><th>Notes</th></tr>
+          <tr class="col-pk"><td><span class="col-name">id</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-pk">PK</span></td><td></td></tr>
+          <tr class="col-fk"><td><span class="col-name">tenantId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span> <span class="badge-nn">NOT NULL</span></td><td></td></tr>
+          <tr class="col-fk"><td><span class="col-name">reservationId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span> <span class="badge-nn">NOT NULL</span></td><td class="col-notes">→ reservations.id ON DELETE RESTRICT</td></tr>
+          <tr class="col-fk"><td><span class="col-name">guestId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span> <span class="badge-nn">NOT NULL</span></td><td class="col-notes">→ guest_profiles.id</td></tr>
+          <tr><td><span class="col-name">label</span></td><td><span class="col-type">VARCHAR(100)</span></td><td></td><td class="col-notes">NULL = primary folio. "Business" | "Personal" = secondary.</td></tr>
+          <tr><td><span class="col-name">status</span></td><td><span class="col-type">folio_status_enum</span></td><td><span class="badge-nn">NOT NULL</span></td><td class="col-notes">DEFAULT 'pending'</td></tr>
+          <tr><td><span class="col-name">payerName</span></td><td><span class="col-type">VARCHAR(200)</span></td><td></td><td class="col-notes">Override payer name for secondary folios</td></tr>
+          <tr><td><span class="col-name">payerEmail</span></td><td><span class="col-type">VARCHAR(320)</span></td><td></td><td class="col-notes">For invoice delivery</td></tr>
+          <tr class="col-fk"><td><span class="col-name">corporateAccountId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span></td><td class="col-notes">→ corporate_accounts.id. NULL = individual folio.</td></tr>
+          <tr><td><span class="col-name">openedAt</span></td><td><span class="col-type">TIMESTAMPTZ</span></td><td></td><td class="col-notes">Set on check-in</td></tr>
+          <tr><td><span class="col-name">closedAt</span></td><td><span class="col-type">TIMESTAMPTZ</span></td><td></td><td class="col-notes">Set on check-out or manual close</td></tr>
+          <tr><td><span class="col-name">createdAt</span></td><td><span class="col-type">TIMESTAMPTZ</span></td><td><span class="badge-nn">NOT NULL</span></td><td></td></tr>
+        </table>
+        <div class="index-block">
+          <div class="ib-title">Indexes</div>
+          <div class="index-row"><span class="idx-code">INDEX (reservationId)</span><span class="idx-note">— All folios for a reservation</span></div>
+          <div class="index-row"><span class="idx-code">INDEX (branchId, status) WHERE status = 'open'</span><span class="idx-note">— Open folios for night audit</span></div>
+        </div>
+        <div class="enum-grid">
+          <div class="enum-item"><div class="enum-name">folio_status_enum</div><div class="enum-vals"><span class="enum-val">pending</span><span class="enum-val">open</span><span class="enum-val">closed</span><span class="enum-val">disputed</span></div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- LINE ITEMS -->
+    <div class="table-card" id="tc-lineitems">
+      <div class="tc-header" onclick="toggleTable('tc-lineitems')">
+        <span class="tc-name">line_items</span><span class="tc-desc">— Individual charges on a folio (append-only)</span>
+        <span class="tc-chevron">▼</span>
+      </div>
+      <div class="tc-body">
+        <table class="col-table">
+          <tr><th>Column</th><th>Type</th><th>Constraints</th><th>Notes</th></tr>
+          <tr class="col-pk"><td><span class="col-name">id</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-pk">PK</span></td><td></td></tr>
+          <tr class="col-fk"><td><span class="col-name">tenantId / folioId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span> <span class="badge-nn">NOT NULL</span></td><td class="col-notes">→ folios.id ON DELETE RESTRICT</td></tr>
+          <tr><td><span class="col-name">description</span></td><td><span class="col-type">VARCHAR(300)</span></td><td><span class="badge-nn">NOT NULL</span></td><td></td></tr>
+          <tr><td><span class="col-name">amount</span></td><td><span class="col-type">NUMERIC(12,2)</span></td><td><span class="badge-nn">NOT NULL</span></td><td class="col-notes">Can be negative (credit/correction). CHECK (amount != 0).</td></tr>
+          <tr><td><span class="col-name">taxAmount</span></td><td><span class="col-type">NUMERIC(12,2)</span></td><td><span class="badge-nn">NOT NULL</span></td><td class="col-notes">DEFAULT 0</td></tr>
+          <tr><td><span class="col-name">chargeType</span></td><td><span class="col-type">charge_type_enum</span></td><td><span class="badge-nn">NOT NULL</span></td><td class="col-notes">tax = VAT/service charge rows posted alongside charges. deposit removed — deposits are payment records, not charges.</td></tr>
+          <tr class="col-fk"><td><span class="col-name">outletId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span></td><td class="col-notes">→ outlets.id. NULL for room charges and night audit posts. Set automatically when a POS terminal posts a charge — inherited from the outlet the staff member is assigned to. Powers per-outlet revenue reporting.</td></tr>
+          <tr><td><span class="col-name">taxRuleIds</span></td><td><span class="col-type">UUID[]</span></td><td></td><td class="col-notes">Array of tax_rules applied to this line item</td></tr>
+          <tr><td><span class="col-name">serviceDate</span></td><td><span class="col-type">DATE</span></td><td></td><td class="col-notes">Date the service occurred (e.g. room night date)</td></tr>
+          <tr class="col-fk"><td><span class="col-name">postedBy</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span></td><td class="col-notes">→ users.id. NULL = system-posted (night audit).</td></tr>
+          <tr><td><span class="col-name">postedAt</span></td><td><span class="col-type">TIMESTAMPTZ</span></td><td><span class="badge-nn">NOT NULL</span></td><td></td></tr>
+          <tr><td><span class="col-name">isVoid</span></td><td><span class="col-type">BOOLEAN</span></td><td></td><td class="col-notes">TRUE = voided but retained in ledger. Not deleted.</td></tr>
+          <tr><td><span class="col-name">voidedAt / voidedBy</span></td><td><span class="col-type">TIMESTAMPTZ / UUID</span></td><td></td><td></td></tr>
+        </table>
+        <div class="index-block">
+          <div class="ib-title">Indexes</div>
+          <div class="index-row"><span class="idx-code">INDEX (folioId, postedAt)</span><span class="idx-note">— Folio line items in order</span></div>
+          <div class="index-row"><span class="idx-code">INDEX (folioId, chargeType)</span><span class="idx-note">— Filter charges by type for split billing</span></div>
+        </div>
+        <div class="enum-grid">
+          <div class="enum-item"><div class="enum-name">charge_type_enum</div><div class="enum-vals"><span class="enum-val">room</span><span class="enum-val">fnb</span><span class="enum-val">spa</span><span class="enum-val">laundry</span><span class="enum-val">minibar</span><span class="enum-val">transport</span><span class="enum-val">tax</span><span class="enum-val">penalty</span><span class="enum-val">correction</span><span class="enum-val">misc</span></div></div>
+        <div class="enum-item"><div class="enum-name">outlet_category_enum</div><div class="enum-vals"><span class="enum-val">restaurant</span><span class="enum-val">bar</span><span class="enum-val">spa</span><span class="enum-val">laundry</span><span class="enum-val">retail</span><span class="enum-val">room_service</span></div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- FOLIO_TRANSFERS -->
+    <div class="table-card" id="tc-foliotx">
+      <div class="tc-header" onclick="toggleTable('tc-foliotx')">
+        <span class="tc-name">folio_transfers</span><span class="tc-desc">— Immutable audit chain of inter-folio charge movements</span>
+        <span class="tc-chevron">▼</span>
+      </div>
+      <div class="tc-body">
+        <table class="col-table">
+          <tr><th>Column</th><th>Type</th><th>Constraints</th><th>Notes</th></tr>
+          <tr class="col-pk"><td><span class="col-name">id</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-pk">PK</span></td><td></td></tr>
+          <tr class="col-fk"><td><span class="col-name">tenantId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span></td><td></td></tr>
+          <tr class="col-fk"><td><span class="col-name">sourceFolioId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span> <span class="badge-nn">NOT NULL</span></td><td class="col-notes">→ folios.id ON DELETE RESTRICT</td></tr>
+          <tr class="col-fk"><td><span class="col-name">targetFolioId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span> <span class="badge-nn">NOT NULL</span></td><td class="col-notes">→ folios.id ON DELETE RESTRICT</td></tr>
+          <tr><td><span class="col-name">lineItemIds</span></td><td><span class="col-type">UUID[]</span></td><td><span class="badge-nn">NOT NULL</span></td><td class="col-notes">Snapshot of which line items were transferred</td></tr>
+          <tr><td><span class="col-name">amount</span></td><td><span class="col-type">NUMERIC(12,2)</span></td><td><span class="badge-nn">NOT NULL</span></td><td class="col-notes">Total transferred</td></tr>
+          <tr><td><span class="col-name">reason</span></td><td><span class="col-type">TEXT</span></td><td><span class="badge-nn">NOT NULL</span></td><td class="col-notes">Required for audit</td></tr>
+          <tr class="col-fk"><td><span class="col-name">approvedBy</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span></td><td class="col-notes">→ users.id. NULL if below threshold.</td></tr>
+          <tr><td><span class="col-name">reversedAt</span></td><td><span class="col-type">TIMESTAMPTZ</span></td><td></td><td class="col-notes">NULL = not reversed. Set within 24h window.</td></tr>
+          <tr class="col-fk"><td><span class="col-name">reversedBy</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span></td><td class="col-notes">Manager only</td></tr>
+          <tr><td><span class="col-name">createdAt</span></td><td><span class="col-type">TIMESTAMPTZ</span></td><td><span class="badge-nn">NOT NULL</span></td><td></td></tr>
+        </table>
+        <div class="index-block">
+          <div class="ib-title">Indexes</div>
+          <div class="index-row"><span class="idx-code">INDEX (sourceFolioId)</span><span class="idx-note">— Transfer history on source folio</span></div>
+          <div class="index-row"><span class="idx-code">INDEX (targetFolioId)</span><span class="idx-note">— What was transferred into this folio</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- PAYMENTS condensed -->
+    <div class="table-card" id="tc-payments">
+      <div class="tc-header" onclick="toggleTable('tc-payments')">
+        <span class="tc-name">payments</span><span class="tc-desc"> & </span><span class="tc-name">tax_rules</span>
+        <span class="tc-chevron">▼</span>
+      </div>
+      <div class="tc-body">
+        <div style="padding:8px 16px;font-size:12px;color:var(--ink3);border-bottom:1px solid var(--rule)">payments — append-only</div>
+        <table class="col-table">
+          <tr><th>Column</th><th>Type</th><th>Notes</th></tr>
+          <tr class="col-pk"><td><span class="col-name">id</span></td><td><span class="col-type">UUID PK</span></td><td></td></tr>
+          <tr class="col-fk"><td><span class="col-name">tenantId / folioId</span></td><td><span class="col-type">UUID FK</span></td><td class="col-notes">→ folios.id ON DELETE RESTRICT</td></tr>
+          <tr><td><span class="col-name">method</span></td><td><span class="col-type">payment_method_enum</span></td><td class="col-notes">cash | card | bank_transfer | voucher | loyalty_points</td></tr>
+          <tr><td><span class="col-name">amount</span></td><td><span class="col-type">NUMERIC(12,2)</span></td><td class="col-notes">Positive = payment. Negative = refund.</td></tr>
+          <tr><td><span class="col-name">currency</span></td><td><span class="col-type">CHAR(3)</span></td><td class="col-notes">ISO 4217</td></tr>
+          <tr><td><span class="col-name">reference</span></td><td><span class="col-type">VARCHAR(100)</span></td><td class="col-notes">Card authorization code, bank ref, etc.</td></tr>
+          <tr><td><span class="col-name">shiftId</span></td><td><span class="col-type">UUID FK</span></td><td class="col-notes">→ shifts.id. Links payment to cash shift.</td></tr>
+          <tr><td><span class="col-name">paymentPurpose</span></td><td><span class="col-type">VARCHAR(25)</span></td><td><span class="badge-nn">NOT NULL</span></td><td class="col-notes">payment | deposit | deposit_application. DEFAULT 'payment'. deposit = advance payment received at booking. deposit_application = deposit applied at check-out (references original deposit via reference field). Separates liability tracking from revenue.</td></tr>
+          <tr><td><span class="col-name">isVoid</span></td><td><span class="col-type">BOOLEAN</span></td><td class="col-notes">Never deleted — voided only</td></tr>
+          <tr><td><span class="col-name">recordedAt / recordedBy</span></td><td><span class="col-type">TIMESTAMPTZ / UUID FK</span></td><td></td></tr>
+        </table>
+        <div style="padding:8px 16px;font-size:12px;color:var(--ink3);border-top:1px solid var(--rule);border-bottom:1px solid var(--rule)">tax_rules</div>
+        <table class="col-table">
+          <tr><th>Column</th><th>Type</th><th>Notes</th></tr>
+          <tr class="col-pk"><td><span class="col-name">id</span></td><td><span class="col-type">UUID PK</span></td><td></td></tr>
+          <tr class="col-fk"><td><span class="col-name">tenantId / branchId</span></td><td><span class="col-type">UUID FK</span></td><td></td></tr>
+          <tr><td><span class="col-name">name</span></td><td><span class="col-type">VARCHAR(100)</span></td><td class="col-notes">e.g. "VAT", "Service Charge", "City Tax"</td></tr>
+          <tr><td><span class="col-name">rate</span></td><td><span class="col-type">NUMERIC(6,4)</span></td><td class="col-notes">e.g. 0.075 = 7.5%</td></tr>
+          <tr><td><span class="col-name">type</span></td><td><span class="col-type">VARCHAR(10)</span></td><td class="col-notes">percentage | fixed</td></tr>
+          <tr><td><span class="col-name">appliesToChargeTypes</span></td><td><span class="col-type">charge_type_enum[]</span></td><td class="col-notes">NULL = applies to all</td></tr>
+          <tr><td><span class="col-name">isActive</span></td><td><span class="col-type">BOOLEAN</span></td><td class="col-notes">DEFAULT TRUE</td></tr>
+        </table>
+      </div>
+    </div>
+  </div>
+  </div>
+
+  <!-- ═══ OPERATIONS ═══ -->
+  <div class="page" id="page-operations">
+  <div class="page-inner">
+    <div class="page-hero">
+      <div class="domain-badge" style="background:#f8f3ed;color:#6b5a2d"><span class="db-dot" style="background:#9a7a38"></span>Operations Domain</div>
+      <h1>Operations</h1>
+      <p>7 tables. Covers the daily running of the hotel: housekeeping, shifts, maintenance, guest registration cards, and overbooking configuration.</p>
+    </div>
+
+    <!-- HOUSEKEEPING_TASKS -->
+    <div class="table-card" id="tc-hktasks">
+      <div class="tc-header" onclick="toggleTable('tc-hktasks')">
+        <span class="tc-name">housekeeping_tasks</span><span class="tc-desc">— Room cleaning assignments</span>
+        <span class="tc-chevron">▼</span>
+      </div>
+      <div class="tc-body">
+        <table class="col-table">
+          <tr><th>Column</th><th>Type</th><th>Constraints</th><th>Notes</th></tr>
+          <tr class="col-pk"><td><span class="col-name">id</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-pk">PK</span></td><td></td></tr>
+          <tr class="col-fk"><td><span class="col-name">tenantId / branchId / roomId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span> <span class="badge-nn">NOT NULL</span></td><td class="col-notes">roomId → rooms.id ON DELETE CASCADE</td></tr>
+          <tr class="col-fk"><td><span class="col-name">assigneeId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span></td><td class="col-notes">→ users.id. NULL = unassigned.</td></tr>
+          <tr><td><span class="col-name">taskDate</span></td><td><span class="col-type">DATE</span></td><td><span class="badge-nn">NOT NULL</span></td><td></td></tr>
+          <tr><td><span class="col-name">status</span></td><td><span class="col-type">hk_status_enum</span></td><td><span class="badge-nn">NOT NULL</span></td><td class="col-notes">pending | in_progress | done | skipped</td></tr>
+          <tr><td><span class="col-name">priority</span></td><td><span class="col-type">SMALLINT</span></td><td></td><td class="col-notes">1 = urgent (guest arriving soon), 3 = normal</td></tr>
+          <tr><td><span class="col-name">triggerEvent</span></td><td><span class="col-type">VARCHAR(30)</span></td><td></td><td class="col-notes">checkout | scheduled | walkin | manual</td></tr>
+          <tr class="col-fk"><td><span class="col-name">triggeredByReservationId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span></td><td class="col-notes">Which checkout triggered this task</td></tr>
+          <tr><td><span class="col-name">notes</span></td><td><span class="col-type">TEXT</span></td><td></td><td></td></tr>
+          <tr><td><span class="col-name">completedAt / completedBy</span></td><td><span class="col-type">TIMESTAMPTZ / UUID FK</span></td><td></td><td></td></tr>
+          <tr><td><span class="col-name">createdAt</span></td><td><span class="col-type">TIMESTAMPTZ</span></td><td><span class="badge-nn">NOT NULL</span></td><td></td></tr>
+        </table>
+        <div class="index-block">
+          <div class="ib-title">Indexes</div>
+          <div class="index-row"><span class="idx-code">INDEX (branchId, taskDate, status)</span><span class="idx-note">— Today's task board</span></div>
+          <div class="index-row"><span class="idx-code">INDEX (assigneeId, taskDate, status)</span><span class="idx-note">— My tasks (housekeeper view)</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- SHIFTS + SHIFT_ISSUES -->
+    <div class="table-card" id="tc-shifts">
+      <div class="tc-header" onclick="toggleTable('tc-shifts')">
+        <span class="tc-name">shifts</span><span class="tc-desc"> & </span><span class="tc-name">shift_issues</span>
+        <span class="tc-chevron">▼</span>
+      </div>
+      <div class="tc-body">
+        <div style="padding:8px 16px;font-size:12px;color:var(--ink3);border-bottom:1px solid var(--rule)">shifts</div>
+        <table class="col-table">
+          <tr><th>Column</th><th>Type</th><th>Notes</th></tr>
+          <tr class="col-pk"><td><span class="col-name">id</span></td><td><span class="col-type">UUID PK</span></td><td></td></tr>
+          <tr class="col-fk"><td><span class="col-name">tenantId / branchId / agentId</span></td><td><span class="col-type">UUID FK</span></td><td class="col-notes">agentId → users.id</td></tr>
+          <tr><td><span class="col-name">shiftType</span></td><td><span class="col-type">shift_type_enum</span></td><td class="col-notes">morning | evening | night</td></tr>
+          <tr><td><span class="col-name">openedAt / closedAt</span></td><td><span class="col-type">TIMESTAMPTZ</span></td><td class="col-notes">closedAt NULL = shift still open</td></tr>
+          <tr><td><span class="col-name">openingFloat</span></td><td><span class="col-type">NUMERIC(12,2)</span></td><td class="col-notes">Declared at shift open</td></tr>
+          <tr><td><span class="col-name">openingBreakdown</span></td><td><span class="col-type">JSONB</span></td><td class="col-notes">[{denomination, count}]</td></tr>
+          <tr><td><span class="col-name">systemCashTotal</span></td><td><span class="col-type">NUMERIC(12,2)</span></td><td class="col-notes">Calculated on close: sum of cash payments in this shift</td></tr>
+          <tr><td><span class="col-name">closingCashCounted</span></td><td><span class="col-type">NUMERIC(12,2)</span></td><td class="col-notes">Actual cash counted by agent</td></tr>
+          <tr><td><span class="col-name">closingBreakdown</span></td><td><span class="col-type">JSONB</span></td><td class="col-notes">[{denomination, count}]</td></tr>
+          <tr><td><span class="col-name">variance</span></td><td><span class="col-type">NUMERIC(12,2)</span></td><td class="col-notes">closingCashCounted − systemCashTotal</td></tr>
+          <tr><td><span class="col-name">varianceExplanation</span></td><td><span class="col-type">TEXT</span></td><td class="col-notes">Required if ABS(variance) > branch threshold</td></tr>
+          <tr><td><span class="col-name">handoverNotes</span></td><td><span class="col-type">TEXT</span></td><td></td></tr>
+        </table>
+        <div style="padding:8px 16px;font-size:12px;color:var(--ink3);border-top:1px solid var(--rule);border-bottom:1px solid var(--rule)">shift_issues</div>
+        <table class="col-table">
+          <tr><th>Column</th><th>Type</th><th>Notes</th></tr>
+          <tr class="col-pk"><td><span class="col-name">id</span></td><td><span class="col-type">UUID PK</span></td><td></td></tr>
+          <tr class="col-fk"><td><span class="col-name">tenantId / shiftId</span></td><td><span class="col-type">UUID FK</span></td><td class="col-notes">→ shifts.id ON DELETE CASCADE</td></tr>
+          <tr><td><span class="col-name">description</span></td><td><span class="col-type">TEXT</span></td><td class="col-notes">NOT NULL</td></tr>
+          <tr><td><span class="col-name">priority</span></td><td><span class="col-type">issue_priority_enum</span></td><td class="col-notes">low | medium | high | urgent</td></tr>
+          <tr><td><span class="col-name">status</span></td><td><span class="col-type">issue_status_enum</span></td><td class="col-notes">open | resolved | carried_over</td></tr>
+          <tr><td><span class="col-name">resolution</span></td><td><span class="col-type">TEXT</span></td><td></td></tr>
+          <tr class="col-fk"><td><span class="col-name">resolvedBy</span></td><td><span class="col-type">UUID FK</span></td><td></td></tr>
+          <tr><td><span class="col-name">createdAt / resolvedAt</span></td><td><span class="col-type">TIMESTAMPTZ</span></td><td></td></tr>
+        </table>
+        <div class="index-block">
+          <div class="ib-title">Indexes</div>
+          <div class="index-row"><span class="idx-code">INDEX (branchId, closedAt) WHERE closedAt IS NULL</span><span class="idx-note">— Current open shift</span></div>
+          <div class="index-row"><span class="idx-code">INDEX (branchId, openedAt DESC)</span><span class="idx-note">— Shift history</span></div>
+          <div class="index-row"><span class="idx-code">INDEX (shift_issues: shiftId, status)</span><span class="idx-note">— Open issues for handover</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- REGISTRATION_CARDS -->
+    <div class="table-card" id="tc-regcards">
+      <div class="tc-header" onclick="toggleTable('tc-regcards')">
+        <span class="tc-name">registration_cards</span><span class="tc-desc">— Legal check-in documents with signatures</span>
+        <span class="tc-chevron">▼</span>
+      </div>
+      <div class="tc-body">
+        <table class="col-table">
+          <tr><th>Column</th><th>Type</th><th>Constraints</th><th>Notes</th></tr>
+          <tr class="col-pk"><td><span class="col-name">id</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-pk">PK</span></td><td></td></tr>
+          <tr class="col-fk"><td><span class="col-name">tenantId / branchId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span> <span class="badge-nn">NOT NULL</span></td><td></td></tr>
+          <tr class="col-fk"><td><span class="col-name">reservationId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span> <span class="badge-nn">NOT NULL</span></td><td class="col-notes">→ reservations.id ON DELETE RESTRICT</td></tr>
+          <tr class="col-fk"><td><span class="col-name">guestId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span> <span class="badge-nn">NOT NULL</span></td><td class="col-notes">→ guest_profiles.id</td></tr>
+          <tr><td><span class="col-name">fields</span></td><td><span class="col-type">JSONB</span></td><td><span class="badge-nn">NOT NULL</span></td><td class="col-notes">Snapshot of guest data at check-in: {name, idNumber_encrypted, nationality, address, roomNumber, confirmedRate, checkInDate, checkOutDate, houseRules}</td></tr>
+          <tr><td><span class="col-name">signatureData</span></td><td><span class="col-type">TEXT</span></td><td></td><td class="col-notes">Base64 SVG/PNG from signature pad. NULL = unsigned.</td></tr>
+          <tr><td><span class="col-name">signedAt</span></td><td><span class="col-type">TIMESTAMPTZ</span></td><td></td><td></td></tr>
+          <tr class="col-fk"><td><span class="col-name">witnessedBy</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span></td><td class="col-notes">→ users.id (front desk agent)</td></tr>
+          <tr><td><span class="col-name">documentUrl</span></td><td><span class="col-type">TEXT</span></td><td></td><td class="col-notes">S3 URL of generated PDF. Encrypted bucket. Set after PDF generation.</td></tr>
+          <tr><td><span class="col-name">generatedAt</span></td><td><span class="col-type">TIMESTAMPTZ</span></td><td><span class="badge-nn">NOT NULL</span></td><td></td></tr>
+          <tr><td><span class="col-name">retainUntil</span></td><td><span class="col-type">DATE</span></td><td></td><td class="col-notes">Regulatory retention end date. Set from branch policy at generation time.</td></tr>
+        </table>
+        <div class="index-block">
+          <div class="ib-title">Indexes</div>
+          <div class="index-row"><span class="idx-code">INDEX (reservationId)</span><span class="idx-note">— Card for this reservation</span></div>
+          <div class="index-row"><span class="idx-code">INDEX (guestId, generatedAt DESC)</span><span class="idx-note">— Guest card history</span></div>
+          <div class="index-row"><span class="idx-code">INDEX (branchId, retainUntil) WHERE signedAt IS NOT NULL</span><span class="idx-note">— Compliance export and expiry processing</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- OVERBOOKING_CONFIG condensed -->
+    <div class="table-card" id="tc-ob">
+      <div class="tc-header" onclick="toggleTable('tc-ob')">
+        <span class="tc-name">overbooking_config</span><span class="tc-desc">— Per-room-type overbook thresholds</span>
+        <span class="tc-chevron">▼</span>
+      </div>
+      <div class="tc-body">
+        <table class="col-table">
+          <tr><th>Column</th><th>Type</th><th>Notes</th></tr>
+          <tr class="col-pk"><td><span class="col-name">id</span></td><td><span class="col-type">UUID PK</span></td><td></td></tr>
+          <tr class="col-fk"><td><span class="col-name">tenantId / branchId / roomTypeId</span></td><td><span class="col-type">UUID FK</span></td><td class="col-notes">roomTypeId NULL = applies to all types</td></tr>
+          <tr><td><span class="col-name">globalEnabled</span></td><td><span class="col-type">BOOLEAN</span></td><td class="col-notes">Branch-level master switch. DEFAULT FALSE.</td></tr>
+          <tr><td><span class="col-name">maxOverbookPct</span></td><td><span class="col-type">NUMERIC(5,2)</span></td><td class="col-notes">e.g. 10.00 = allow 10% over capacity</td></tr>
+          <tr><td><span class="col-name">alertAtPct</span></td><td><span class="col-type">NUMERIC(5,2)</span></td><td class="col-notes">Alert revenue manager when X% of threshold consumed</td></tr>
+          <tr><td><span class="col-name">validFrom / validTo</span></td><td><span class="col-type">DATE</span></td><td class="col-notes">NULL = always active</td></tr>
+          <tr><td><span class="col-name">updatedAt / updatedBy</span></td><td><span class="col-type">TIMESTAMPTZ / UUID FK</span></td><td></td></tr>
+        </table>
+      </div>
+    </div>
+
+    <!-- OUTLETS -->
+    <div class="table-card" id="tc-outlets">
+      <div class="tc-header" onclick="toggleTable('tc-outlets')">
+        <span class="tc-name">outlets</span><span class="tc-desc">— Hotel facilities that generate POS charges</span>
+        <div class="tc-meta"><span class="tc-pill pill-rls">RLS</span></div>
+        <span class="tc-chevron">▼</span>
+      </div>
+      <div class="tc-body">
+        <div class="info-box tip" style="margin:12px 16px 0">
+          <div class="info-box-title">Why this table exists</div>
+          <p>Outlets are the named facilities that can post charges to a guest folio: Main Restaurant, Poolside Bar, Zen Spa, Laundry, etc. Each outlet has a <code>chargeType</code> that is automatically stamped on every line item the outlet produces — no staff member manually selects the charge type. The outlet also defines the <code>category</code> used for per-outlet revenue breakdowns in management reports.</p>
+        </div>
+        <table class="col-table" style="margin-top:8px">
+          <tr><th>Column</th><th>Type</th><th>Constraints</th><th>Notes</th></tr>
+          <tr class="col-pk"><td><span class="col-name">id</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-pk">PK</span></td><td></td></tr>
+          <tr class="col-fk"><td><span class="col-name">tenantId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span> <span class="badge-nn">NOT NULL</span></td><td class="col-notes">→ tenants.id</td></tr>
+          <tr class="col-fk"><td><span class="col-name">branchId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span> <span class="badge-nn">NOT NULL</span></td><td class="col-notes">→ branches.id ON DELETE CASCADE</td></tr>
+          <tr><td><span class="col-name">name</span></td><td><span class="col-type">VARCHAR(150)</span></td><td><span class="badge-nn">NOT NULL</span></td><td class="col-notes">e.g. "Main Restaurant", "Poolside Bar", "Zen Spa". Displayed in POS terminal header and on folio line item descriptions.</td></tr>
+          <tr><td><span class="col-name">category</span></td><td><span class="col-type">outlet_category_enum</span></td><td><span class="badge-nn">NOT NULL</span></td><td class="col-notes">restaurant | bar | spa | laundry | retail | room_service. Used for grouping in management reports. Multiple outlets can share the same category (e.g. two bars) while remaining distinct in revenue breakdowns.</td></tr>
+          <tr><td><span class="col-name">chargeType</span></td><td><span class="col-type">charge_type_enum</span></td><td><span class="badge-nn">NOT NULL</span></td><td class="col-notes">Inherited by all line_items posted from this outlet. restaurant/bar/room_service → fnb. spa → spa. laundry → laundry. retail → misc. Set once at outlet creation — drives automatic charge type stamping on every POS post.</td></tr>
+          <tr><td><span class="col-name">isActive</span></td><td><span class="col-type">BOOLEAN</span></td><td><span class="badge-nn">NOT NULL</span></td><td class="col-notes">DEFAULT TRUE. Inactive outlets are hidden from the POS terminal selector but retained for historical line item references.</td></tr>
+          <tr><td><span class="col-name">sortOrder</span></td><td><span class="col-type">INTEGER</span></td><td></td><td class="col-notes">Display ordering in POS outlet selector and reports. Lower number appears first.</td></tr>
+          <tr><td><span class="col-name">createdAt</span></td><td><span class="col-type">TIMESTAMPTZ</span></td><td><span class="badge-nn">NOT NULL</span></td><td></td></tr>
+        </table>
+        <div class="index-block">
+          <div class="ib-title">Indexes</div>
+          <div class="index-row"><span class="idx-code">INDEX (branchId, isActive)</span><span class="idx-note">— Active outlets for a branch (POS selector, staff assignment)</span></div>
+          <div class="index-row"><span class="idx-code">INDEX (branchId, category)</span><span class="idx-note">— Revenue report grouping by outlet category</span></div>
+        </div>
+        <div class="enum-grid">
+          <div class="enum-item"><div class="enum-name">outlet_category_enum</div><div class="enum-vals"><span class="enum-val">restaurant</span><span class="enum-val">bar</span><span class="enum-val">spa</span><span class="enum-val">laundry</span><span class="enum-val">retail</span><span class="enum-val">room_service</span></div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- USER_OUTLETS -->
+    <div class="table-card" id="tc-user-outlets">
+      <div class="tc-header" onclick="toggleTable('tc-user-outlets')">
+        <span class="tc-name">user_outlets</span><span class="tc-desc">— Maps staff members to the outlets they work at</span>
+        <span class="tc-chevron">▼</span>
+      </div>
+      <div class="tc-body">
+        <div class="info-box tip" style="margin:12px 16px 0">
+          <div class="info-box-title">How this drives automatic charge attribution</div>
+          <p>When a staff member opens the POS terminal, the system reads their <code>user_outlets</code> entries for the current branch. If they have one outlet: that outlet is auto-selected and its <code>chargeType</code> and name stamp every charge they post. If they have multiple outlets: a session-start dropdown asks which outlet they are working at today — their answer persists for the session. No bartender or waiter ever manually selects a charge type.</p>
+        </div>
+        <table class="col-table" style="margin-top:8px">
+          <tr><th>Column</th><th>Type</th><th>Constraints</th><th>Notes</th></tr>
+          <tr class="col-pk"><td><span class="col-name">id</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-pk">PK</span></td><td></td></tr>
+          <tr class="col-fk"><td><span class="col-name">tenantId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span> <span class="badge-nn">NOT NULL</span></td><td></td></tr>
+          <tr class="col-fk"><td><span class="col-name">userId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span> <span class="badge-nn">NOT NULL</span></td><td class="col-notes">→ users.id ON DELETE CASCADE. Removing a staff member also removes their outlet assignments.</td></tr>
+          <tr class="col-fk"><td><span class="col-name">outletId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span> <span class="badge-nn">NOT NULL</span></td><td class="col-notes">→ outlets.id ON DELETE CASCADE. Removing an outlet removes all staff assignments to it.</td></tr>
+          <tr class="col-fk"><td><span class="col-name">branchId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span> <span class="badge-nn">NOT NULL</span></td><td class="col-notes">→ branches.id. Denormalised for efficient RLS and query filtering by branch.</td></tr>
+          <tr class="col-fk"><td><span class="col-name">assignedBy</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span></td><td class="col-notes">→ users.id. Manager who created the assignment. Stored for audit purposes.</td></tr>
+          <tr><td><span class="col-name">assignedAt</span></td><td><span class="col-type">TIMESTAMPTZ</span></td><td><span class="badge-nn">NOT NULL</span></td><td></td></tr>
+        </table>
+        <div class="index-block">
+          <div class="ib-title">Indexes</div>
+          <div class="index-row"><span class="idx-code">UNIQUE (userId, outletId)</span><span class="idx-note">— No duplicate staff-outlet assignments</span></div>
+          <div class="index-row"><span class="idx-code">INDEX (userId, branchId)</span><span class="idx-note">— POS login: fetch all outlets for this staff member at this branch</span></div>
+          <div class="index-row"><span class="idx-code">INDEX (outletId)</span><span class="idx-note">— Find all staff assigned to a given outlet</span></div>
+        </div>
+        <div class="cascade-block">
+          <div class="cb-title">Cascade Rules</div>
+          <div class="cascade-row"><span class="cr-rel">user_outlets.userId → users.id</span><span class="cr-action">Delete user:</span><span class="cr-type cr-cascade">CASCADE</span></div>
+          <div class="cascade-row"><span class="cr-rel">user_outlets.outletId → outlets.id</span><span class="cr-action">Delete outlet:</span><span class="cr-type cr-cascade">CASCADE</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- NIGHT_AUDIT_LOG -->
+    <div class="table-card" id="tc-night-audit-log">
+      <div class="tc-header" onclick="toggleTable('tc-night-audit-log')">
+        <span class="tc-name">night_audit_log</span><span class="tc-desc">— Audit run history per branch per night</span>
+        <div class="tc-meta"><span class="tc-pill pill-audit">APPEND-ONLY</span></div>
+        <span class="tc-chevron">▼</span>
+      </div>
+      <div class="tc-body">
+        <div class="info-box tip" style="margin:12px 16px 0">
+          <div class="info-box-title">Why this table exists</div>
+          <p>Without this table, there is no record of whether the night audit ran, what it processed, or what failed. If a room charge is missing from a guest's folio, there is no way to distinguish between "the audit ran and skipped this folio" vs "the audit never ran that night". This table creates an unambiguous, per-night audit trail. The <code>UNIQUE (branchId, auditDate)</code> constraint also prevents the audit from running twice on the same night.</p>
+        </div>
+        <table class="col-table" style="margin-top:8px">
+          <tr><th>Column</th><th>Type</th><th>Constraints</th><th>Notes</th></tr>
+          <tr class="col-pk"><td><span class="col-name">id</span></td><td><span class="col-type">BIGSERIAL</span></td><td><span class="badge-pk">PK</span></td><td class="col-notes">Sequential integer — efficient for append writes. Not UUID.</td></tr>
+          <tr class="col-fk"><td><span class="col-name">tenantId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span> <span class="badge-nn">NOT NULL</span></td><td></td></tr>
+          <tr class="col-fk"><td><span class="col-name">branchId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span> <span class="badge-nn">NOT NULL</span></td><td class="col-notes">→ branches.id</td></tr>
+          <tr><td><span class="col-name">auditDate</span></td><td><span class="col-type">DATE</span></td><td><span class="badge-nn">NOT NULL</span></td><td class="col-notes">The calendar date being closed. e.g. if the audit runs at 00:01 on Jan 15, auditDate = Jan 14 (the day just ended).</td></tr>
+          <tr class="col-fk"><td><span class="col-name">triggeredBy</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span></td><td class="col-notes">→ users.id. Manager who manually triggered the audit. NULL = scheduled automatic run.</td></tr>
+          <tr><td><span class="col-name">triggeredAt</span></td><td><span class="col-type">TIMESTAMPTZ</span></td><td><span class="badge-nn">NOT NULL</span></td><td></td></tr>
+          <tr><td><span class="col-name">status</span></td><td><span class="col-type">VARCHAR(20)</span></td><td><span class="badge-nn">NOT NULL</span></td><td class="col-notes">running | completed | failed. A stuck "running" status older than 10 minutes signals a crashed audit process.</td></tr>
+          <tr><td><span class="col-name">foliosProcessed</span></td><td><span class="col-type">INTEGER</span></td><td></td><td class="col-notes">Count of open folios that had room charges posted during this audit run.</td></tr>
+          <tr><td><span class="col-name">chargesPosted</span></td><td><span class="col-type">INTEGER</span></td><td></td><td class="col-notes">Total line_items rows created. Should equal foliosProcessed for a clean run (one charge per folio per night). A mismatch flags an anomaly.</td></tr>
+          <tr><td><span class="col-name">totalAmountPosted</span></td><td><span class="col-type">NUMERIC(14,2)</span></td><td></td><td class="col-notes">Sum of all room night charges posted. Cross-referenced against the daily revenue report to detect discrepancies.</td></tr>
+          <tr><td><span class="col-name">errors</span></td><td><span class="col-type">JSONB</span></td><td></td><td class="col-notes">Array of any folios that failed to post, with folioId and error reason. NULL = clean run. e.g. [{"folioId": "...", "reason": "Rate Resolver returned null for roomTypeId X"}]</td></tr>
+          <tr><td><span class="col-name">completedAt</span></td><td><span class="col-type">TIMESTAMPTZ</span></td><td></td><td class="col-notes">NULL until status = completed or failed.</td></tr>
+        </table>
+        <div class="index-block">
+          <div class="ib-title">Indexes</div>
+          <div class="index-row"><span class="idx-code">UNIQUE (branchId, auditDate)</span><span class="idx-note">— Prevents double-running the audit for the same night. The DB enforces this, not just application code.</span></div>
+          <div class="index-row"><span class="idx-code">INDEX (branchId, auditDate DESC)</span><span class="idx-note">— Fetch audit history for a branch, most recent first</span></div>
+          <div class="index-row"><span class="idx-code">INDEX (status) WHERE status = 'running'</span><span class="idx-note">— Detect stuck audit processes quickly</span></div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+  </div>
+
+  <!-- ═══ COMMS ═══ -->
+  <div class="page" id="page-comms">
+  <div class="page-inner">
+    <div class="page-hero">
+      <div class="domain-badge" style="background:#edf8f8;color:#2d6b6b"><span class="db-dot" style="background:#388a8a"></span>Comms & Compliance Domain</div>
+      <h1>Communications & Compliance</h1>
+      <p>3 tables. The communication log is append-only — every message ever sent is preserved. The audit log uses BIGSERIAL for high-throughput sequential writes. GDPR request tracking is mandatory for EU/UK guests.</p>
+    </div>
+
+    <!-- COMMUNICATION_LOG -->
+    <div class="table-card" id="tc-commlog">
+      <div class="tc-header" onclick="toggleTable('tc-commlog')">
+        <span class="tc-name">communication_log</span><span class="tc-desc">— All guest communications, append-only</span>
+        <span class="tc-chevron">▼</span>
+      </div>
+      <div class="tc-body">
+        <table class="col-table">
+          <tr><th>Column</th><th>Type</th><th>Constraints</th><th>Notes</th></tr>
+          <tr class="col-pk"><td><span class="col-name">id</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-pk">PK</span></td><td></td></tr>
+          <tr class="col-fk"><td><span class="col-name">tenantId / branchId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span> <span class="badge-nn">NOT NULL</span></td><td></td></tr>
+          <tr class="col-fk"><td><span class="col-name">reservationId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span></td><td class="col-notes">→ reservations.id. NULL = marketing (no specific reservation).</td></tr>
+          <tr class="col-fk"><td><span class="col-name">guestId</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span> <span class="badge-nn">NOT NULL</span></td><td class="col-notes">→ guest_profiles.id ON DELETE RESTRICT</td></tr>
+          <tr><td><span class="col-name">channel</span></td><td><span class="col-type">comms_channel_enum</span></td><td><span class="badge-nn">NOT NULL</span></td><td class="col-notes">email | sms | push | in_app_chat</td></tr>
+          <tr><td><span class="col-name">subject</span></td><td><span class="col-type">VARCHAR(500)</span></td><td></td><td class="col-notes">Email only</td></tr>
+          <tr><td><span class="col-name">body</span></td><td><span class="col-type">TEXT</span></td><td><span class="badge-nn">NOT NULL</span></td><td class="col-notes">Full message content</td></tr>
+          <tr><td><span class="col-name">trigger</span></td><td><span class="col-type">VARCHAR(50)</span></td><td><span class="badge-nn">NOT NULL</span></td><td class="col-notes">booking_confirmation | pre_arrival | checkin_receipt | invoice | post_stay | no_show_notice | cancellation | manual</td></tr>
+          <tr><td><span class="col-name">deliveryStatus</span></td><td><span class="col-type">delivery_status_enum</span></td><td><span class="badge-nn">NOT NULL</span></td><td class="col-notes">sent | delivered | failed | opened | bounced</td></tr>
+          <tr><td><span class="col-name">externalMessageId</span></td><td><span class="col-type">VARCHAR(200)</span></td><td></td><td class="col-notes">ID from email provider (SendGrid, etc.)</td></tr>
+          <tr class="col-fk"><td><span class="col-name">sentBy</span></td><td><span class="col-type">UUID</span></td><td><span class="badge-fk">FK</span></td><td class="col-notes">→ users.id. NULL = automated system send.</td></tr>
+          <tr><td><span class="col-name">sentAt</span></td><td><span class="col-type">TIMESTAMPTZ</span></td><td><span class="badge-nn">NOT NULL</span></td><td></td></tr>
+          <tr><td><span class="col-name">deliveredAt</span></td><td><span class="col-type">TIMESTAMPTZ</span></td><td></td><td class="col-notes">Set by delivery webhook from provider</td></tr>
+        </table>
+        <div class="index-block">
+          <div class="ib-title">Indexes</div>
+          <div class="index-row"><span class="idx-code">INDEX (reservationId, sentAt DESC)</span><span class="idx-note">— Comms timeline for a reservation</span></div>
+          <div class="index-row"><span class="idx-code">INDEX (guestId, sentAt DESC)</span><span class="idx-note">— Full guest comms history</span></div>
+          <div class="index-row"><span class="idx-code">INDEX (branchId, deliveryStatus, sentAt)</span><span class="idx-note">— Failed messages requiring resend</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- AUDIT_LOG -->
+    <div class="table-card" id="tc-auditlog">
+      <div class="tc-header" onclick="toggleTable('tc-auditlog')">
+        <span class="tc-name">audit_log</span><span class="tc-desc">— Append-only staff action ledger</span>
+        <span class="tc-chevron">▼</span>
+      </div>
+      <div class="tc-body">
+        <div class="info-box tip" style="margin:12px 16px 0">
+          <div class="info-box-title">Why BIGSERIAL not UUID?</div>
+          <p>The audit log is write-heavy (every state change writes a row). BIGSERIAL gives us sequential disk writes, efficient range scans by time, and compresses better than UUID. We never need to reference audit log rows from other tables.</p>
+        </div>
+        <table class="col-table" style="margin-top:8px">
+          <tr><th>Column</th><th>Type</th><th>Notes</th></tr>
+          <tr class="col-pk"><td><span class="col-name">id</span></td><td><span class="col-type">BIGSERIAL</span></td><td class="col-notes">Sequential. Not a UUID.</td></tr>
+          <tr class="col-fk"><td><span class="col-name">tenantId / branchId</span></td><td><span class="col-type">UUID FK</span></td><td></td></tr>
+          <tr class="col-fk"><td><span class="col-name">userId</span></td><td><span class="col-type">UUID FK</span></td><td class="col-notes">→ users.id. NULL = system action.</td></tr>
+          <tr><td><span class="col-name">action</span></td><td><span class="col-type">VARCHAR(100)</span></td><td class="col-notes">e.g. reservation.check_in | folio.charge_posted | room.status_changed</td></tr>
+          <tr><td><span class="col-name">entityType</span></td><td><span class="col-type">VARCHAR(50)</span></td><td class="col-notes">Table name: reservation | folio | room | guest_profile</td></tr>
+          <tr><td><span class="col-name">entityId</span></td><td><span class="col-type">UUID</span></td><td class="col-notes">ID of the affected record</td></tr>
+          <tr><td><span class="col-name">before</span></td><td><span class="col-type">JSONB</span></td><td class="col-notes">State before action. NULL for CREATE actions.</td></tr>
+          <tr><td><span class="col-name">after</span></td><td><span class="col-type">JSONB</span></td><td class="col-notes">State after action. NULL for DELETE actions.</td></tr>
+          <tr><td><span class="col-name">ipAddress</span></td><td><span class="col-type">INET</span></td><td></td></tr>
+          <tr><td><span class="col-name">userAgent</span></td><td><span class="col-type">TEXT</span></td><td class="col-notes">Truncated to 500 chars</td></tr>
+          <tr><td><span class="col-name">timestamp</span></td><td><span class="col-type">TIMESTAMPTZ</span></td><td class="col-notes">DEFAULT NOW(). Partitioned by month.</td></tr>
+        </table>
+        <div class="index-block">
+          <div class="ib-title">Indexes</div>
+          <div class="index-row"><span class="idx-code">INDEX (tenantId, timestamp DESC)</span><span class="idx-note">— Admin audit viewer</span></div>
+          <div class="index-row"><span class="idx-code">INDEX (entityType, entityId)</span><span class="idx-note">— History for a specific record</span></div>
+          <div class="index-row"><span class="idx-code">INDEX (userId, timestamp DESC)</span><span class="idx-note">— Actions by a specific staff member</span></div>
+          <div class="index-row"><span class="idx-code">RANGE PARTITION BY MONTH (timestamp)</span><span class="idx-note">— Drop old partitions for retention management</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- GDPR_REQUESTS condensed -->
+    <div class="table-card" id="tc-gdpr">
+      <div class="tc-header" onclick="toggleTable('tc-gdpr')">
+        <span class="tc-name">gdpr_requests</span><span class="tc-desc">— Data access, erasure, and portability requests</span>
+        <span class="tc-chevron">▼</span>
+      </div>
+      <div class="tc-body">
+        <table class="col-table">
+          <tr><th>Column</th><th>Type</th><th>Notes</th></tr>
+          <tr class="col-pk"><td><span class="col-name">id</span></td><td><span class="col-type">UUID PK</span></td><td></td></tr>
+          <tr class="col-fk"><td><span class="col-name">tenantId / guestId</span></td><td><span class="col-type">UUID FK</span></td><td></td></tr>
+          <tr><td><span class="col-name">type</span></td><td><span class="col-type">gdpr_type_enum</span></td><td class="col-notes">access | erasure | portability</td></tr>
+          <tr><td><span class="col-name">status</span></td><td><span class="col-type">gdpr_status_enum</span></td><td class="col-notes">pending | in_progress | completed | rejected</td></tr>
+          <tr><td><span class="col-name">requestedBy</span></td><td><span class="col-type">VARCHAR(320)</span></td><td class="col-notes">Email of requester (may not be a system user)</td></tr>
+          <tr><td><span class="col-name">deadline</span></td><td><span class="col-type">DATE</span></td><td class="col-notes">Legal deadline: requestedAt + 30 days</td></tr>
+          <tr><td><span class="col-name">completedAt</span></td><td><span class="col-type">TIMESTAMPTZ</span></td><td></td></tr>
+          <tr><td><span class="col-name">exportUrl</span></td><td><span class="col-type">TEXT</span></td><td class="col-notes">Signed S3 URL for data export. Expires after 7 days.</td></tr>
+          <tr><td><span class="col-name">notes</span></td><td><span class="col-type">TEXT</span></td><td class="col-notes">Internal notes on handling</td></tr>
+        </table>
+      </div>
+    </div>
+  </div>
+  </div>
+
+  <!-- ═══ SYSTEM ═══ -->
+  <div class="page" id="page-system">
+  <div class="page-inner">
+    <div class="page-hero">
+      <div class="domain-badge" style="background:#f0f0ee;color:#3a3a3a"><span class="db-dot" style="background:#606060"></span>System Domain</div>
+      <h1>System</h1>
+      <p>2 tables. Minimal system-level records — feature flags and backup tracking. These live in the same database but are only accessible to sysadmin roles.</p>
+    </div>
+
+    <div class="table-card" id="tc-flags">
+      <div class="tc-header" onclick="toggleTable('tc-flags')">
+        <span class="tc-name">feature_flags</span><span class="tc-desc"> & </span><span class="tc-name">backup_records</span>
+        <span class="tc-chevron">▼</span>
+      </div>
+      <div class="tc-body">
+        <div style="padding:8px 16px;font-size:12px;color:var(--ink3);border-bottom:1px solid var(--rule)">feature_flags</div>
+        <table class="col-table">
+          <tr><th>Column</th><th>Type</th><th>Notes</th></tr>
+          <tr class="col-pk"><td><span class="col-name">id</span></td><td><span class="col-type">UUID PK</span></td><td></td></tr>
+          <tr><td><span class="col-name">name</span></td><td><span class="col-type">VARCHAR(100) UNIQUE</span></td><td class="col-notes">e.g. loyalty_module | overbooking_engine</td></tr>
+          <tr><td><span class="col-name">enabledGlobally</span></td><td><span class="col-type">BOOLEAN</span></td><td class="col-notes">DEFAULT FALSE</td></tr>
+          <tr><td><span class="col-name">enabledForTenants</span></td><td><span class="col-type">UUID[]</span></td><td class="col-notes">Tenant-specific overrides. Empty = use global.</td></tr>
+          <tr><td><span class="col-name">rolloutPct</span></td><td><span class="col-type">SMALLINT</span></td><td class="col-notes">0–100. Percentage-based rollout.</td></tr>
+          <tr><td><span class="col-name">updatedAt / updatedBy</span></td><td><span class="col-type">TIMESTAMPTZ / VARCHAR</span></td><td></td></tr>
+        </table>
+        <div style="padding:8px 16px;font-size:12px;color:var(--ink3);border-top:1px solid var(--rule);border-bottom:1px solid var(--rule)">backup_records</div>
+        <table class="col-table">
+          <tr><th>Column</th><th>Type</th><th>Notes</th></tr>
+          <tr class="col-pk"><td><span class="col-name">id</span></td><td><span class="col-type">UUID PK</span></td><td></td></tr>
+          <tr class="col-fk"><td><span class="col-name">tenantId</span></td><td><span class="col-type">UUID FK</span></td><td class="col-notes">NULL = full-system backup</td></tr>
+          <tr><td><span class="col-name">type</span></td><td><span class="col-type">VARCHAR(20)</span></td><td class="col-notes">full | incremental | schema_only</td></tr>
+          <tr><td><span class="col-name">status</span></td><td><span class="col-type">VARCHAR(20)</span></td><td class="col-notes">running | completed | failed</td></tr>
+          <tr><td><span class="col-name">storageUrl</span></td><td><span class="col-type">TEXT</span></td><td class="col-notes">S3 path</td></tr>
+          <tr><td><span class="col-name">sizeBytes</span></td><td><span class="col-type">BIGINT</span></td><td></td></tr>
+          <tr><td><span class="col-name">startedAt / completedAt</span></td><td><span class="col-type">TIMESTAMPTZ</span></td><td></td></tr>
+          <tr><td><span class="col-name">retainUntil</span></td><td><span class="col-type">DATE</span></td><td class="col-notes">Auto-delete after retention period</td></tr>
+        </table>
+      </div>
+    </div>
+  </div>
+  </div>
+
+  <!-- ═══ PATTERNS & RULES ═══ -->
+  <div class="page" id="page-patterns">
+  <div class="page-inner">
+    <div class="page-hero">
+      <div class="domain-badge" style="background:#fdf0f0;color:#a03030"><span class="db-dot" style="background:#c04040"></span>Cross-Cutting Patterns</div>
+      <h1>Patterns & Rules</h1>
+      <p>Conventions that apply across the entire schema. Following these consistently from day one prevents the most common migration headaches in PMS systems.</p>
+    </div>
+
+    <div class="sdiv">Naming Conventions</div>
+    <div class="table-card" id="tc-naming">
+      <div class="tc-header" onclick="toggleTable('tc-naming')">
+        <span class="tc-name">Naming & Type Conventions</span>
+        <span class="tc-chevron">▼</span>
+      </div>
+      <div class="tc-body">
+        <table class="col-table">
+          <tr><th>Pattern</th><th>Convention</th><th>Example</th></tr>
+          <tr><td>Table names</td><td>snake_case, plural</td><td><code style="font-family:IBM Plex Mono;font-size:11px">guest_profiles</code>, <code style="font-family:IBM Plex Mono;font-size:11px">line_items</code></td></tr>
+          <tr><td>Column names</td><td>camelCase in TypeORM, maps to snake_case in DB</td><td><code style="font-family:IBM Plex Mono;font-size:11px">checkInDate</code> → <code style="font-family:IBM Plex Mono;font-size:11px">check_in_date</code></td></tr>
+          <tr><td>Primary keys</td><td>Always <code style="font-family:IBM Plex Mono;font-size:11px">id UUID DEFAULT gen_random_uuid()</code></td><td></td></tr>
+          <tr><td>Foreign keys</td><td><code style="font-family:IBM Plex Mono;font-size:11px">[tableName]Id</code></td><td><code style="font-family:IBM Plex Mono;font-size:11px">reservationId</code>, <code style="font-family:IBM Plex Mono;font-size:11px">guestId</code></td></tr>
+          <tr><td>Enum types</td><td><code style="font-family:IBM Plex Mono;font-size:11px">[table]_[column]_enum</code></td><td><code style="font-family:IBM Plex Mono;font-size:11px">reservation_status_enum</code></td></tr>
+          <tr><td>Timestamps</td><td>Always <code style="font-family:IBM Plex Mono;font-size:11px">TIMESTAMPTZ</code> (UTC). Never <code style="font-family:IBM Plex Mono;font-size:11px">TIMESTAMP</code> without TZ.</td><td></td></tr>
+          <tr><td>Dates (no time)</td><td><code style="font-family:IBM Plex Mono;font-size:11px">DATE</code> for check-in, check-out, task dates</td><td></td></tr>
+          <tr><td>Money</td><td><code style="font-family:IBM Plex Mono;font-size:11px">NUMERIC(12,2)</code>. Never FLOAT. Never store cents as integers.</td><td></td></tr>
+          <tr><td>Soft delete</td><td><code style="font-family:IBM Plex Mono;font-size:11px">deletedAt TIMESTAMPTZ NULL</code>. All queries append <code style="font-family:IBM Plex Mono;font-size:11px">WHERE "deletedAt" IS NULL</code>.</td><td></td></tr>
+          <tr><td>Audit columns</td><td>Every mutable table has <code style="font-family:IBM Plex Mono;font-size:11px">createdAt</code> + <code style="font-family:IBM Plex Mono;font-size:11px">updatedAt</code> via TypeORM <code style="font-family:IBM Plex Mono;font-size:11px">@CreateDateColumn</code> / <code style="font-family:IBM Plex Mono;font-size:11px">@UpdateDateColumn</code></td><td></td></tr>
+          <tr><td>JSON/JSONB</td><td>Use <code style="font-family:IBM Plex Mono;font-size:11px">JSONB</code> (binary, indexed) not <code style="font-family:IBM Plex Mono;font-size:11px">JSON</code> for queryable objects. Reserve for flexible/variable structures only.</td><td></td></tr>
+          <tr><td>Arrays</td><td>PostgreSQL native arrays (<code style="font-family:IBM Plex Mono;font-size:11px">TEXT[]</code>, <code style="font-family:IBM Plex Mono;font-size:11px">UUID[]</code>) for simple lists with GIN indexes. Use junction tables for many-to-many with attributes.</td><td></td></tr>
+        </table>
+      </div>
+    </div>
+
+    <div class="sdiv">Cascade Rules Summary</div>
+    <div class="table-card" id="tc-cascades">
+      <div class="tc-header" onclick="toggleTable('tc-cascades')">
+        <span class="tc-name">All FK Cascade Rules</span><span class="tc-desc">— What happens when parent records are deleted</span>
+        <span class="tc-chevron">▼</span>
+      </div>
+      <div class="tc-body">
+        <div class="cascade-block" style="border-top:none">
+          <div class="cb-title">RESTRICT — Block delete if children exist (most common)</div>
+          <div class="cascade-row"><span class="cr-rel">reservations → branches</span><span class="cr-action">Cannot delete an active branch</span><span class="cr-type cr-restrict">RESTRICT</span></div>
+          <div class="cascade-row"><span class="cr-rel">reservations → guest_profiles</span><span class="cr-action">Cannot delete guest with bookings</span><span class="cr-type cr-restrict">RESTRICT</span></div>
+          <div class="cascade-row"><span class="cr-rel">reservations → room_types</span><span class="cr-action">Cannot delete type with history</span><span class="cr-type cr-restrict">RESTRICT</span></div>
+          <div class="cascade-row"><span class="cr-rel">folios → reservations</span><span class="cr-action">Cannot delete reservation with financial records</span><span class="cr-type cr-restrict">RESTRICT</span></div>
+          <div class="cascade-row"><span class="cr-rel">line_items → folios</span><span class="cr-action">Cannot delete folio with charges</span><span class="cr-type cr-restrict">RESTRICT</span></div>
+          <div class="cascade-row"><span class="cr-rel">payments → folios</span><span class="cr-action">Cannot delete folio with payments</span><span class="cr-type cr-restrict">RESTRICT</span></div>
+          <div class="cascade-row"><span class="cr-rel">branches → brands</span><span class="cr-action">Cannot delete brand with properties</span><span class="cr-type cr-restrict">RESTRICT</span></div>
+          <div class="cascade-row"><span class="cr-rel">rooms → floors</span><span class="cr-action">Cannot delete floor with rooms</span><span class="cr-type cr-restrict">RESTRICT</span></div>
+          <div class="cascade-row"><span class="cr-rel">folio_transfers → folios</span><span class="cr-action">Preserve transfer history always</span><span class="cr-type cr-restrict">RESTRICT</span></div>
+          <div class="cascade-row"><span class="cr-rel">line_items.outletId → outlets</span><span class="cr-action">Delete outlet: restrict if charges exist</span><span class="cr-type cr-restrict">RESTRICT</span></div>
+          <div class="cascade-row" style="margin-top:12px"><span class="cr-rel">CASCADE — Child deleted with parent</span></div>
+          <div class="cascade-row"><span class="cr-rel">brands → tenants</span><span class="cr-action">Tenant delete removes brands</span><span class="cr-type cr-cascade">CASCADE</span></div>
+          <div class="cascade-row"><span class="cr-rel">buildings → branches (if no rooms)</span><span class="cr-action">Branch delete cascades</span><span class="cr-type cr-cascade">CASCADE</span></div>
+          <div class="cascade-row"><span class="cr-rel">floors → buildings</span><span class="cr-action">Building delete cascades to floors</span><span class="cr-type cr-cascade">CASCADE</span></div>
+          <div class="cascade-row"><span class="cr-rel">housekeeping_tasks → rooms</span><span class="cr-action">Room delete cascades tasks</span><span class="cr-type cr-cascade">CASCADE</span></div>
+          <div class="cascade-row"><span class="cr-rel">shift_issues → shifts</span><span class="cr-action">Shift delete cascades issues</span><span class="cr-type cr-cascade">CASCADE</span></div>
+          <div class="cascade-row"><span class="cr-rel">invite_tokens → users</span><span class="cr-action">User delete cascades invites</span><span class="cr-type cr-cascade">CASCADE</span></div>
+          <div class="cascade-row"><span class="cr-rel">user_outlets → users</span><span class="cr-action">User delete cascades outlet assignments</span><span class="cr-type cr-cascade">CASCADE</span></div>
+          <div class="cascade-row"><span class="cr-rel">user_outlets → outlets</span><span class="cr-action">Outlet delete cascades assignments</span><span class="cr-type cr-cascade">CASCADE</span></div>
+          <div class="cascade-row"><span class="cr-rel">outlets → branches</span><span class="cr-action">Delete branch: outlets cascade</span><span class="cr-type cr-cascade">CASCADE</span></div>
+          <div class="cascade-row" style="margin-top:12px"><span class="cr-rel">SET NULL — Preserve record, null the FK</span></div>
+          <div class="cascade-row"><span class="cr-rel">reservations.roomId → rooms</span><span class="cr-action">Room delete: historical reservations kept</span><span class="cr-type cr-setnull">SET NULL</span></div>
+          <div class="cascade-row"><span class="cr-rel">audit_log.userId → users</span><span class="cr-action">User delete: audit trail preserved without userId</span><span class="cr-type cr-setnull">SET NULL</span></div>
+          <div class="cascade-row" style="margin-top:12px"><span class="cr-rel">SOFT DELETE instead of hard delete</span></div>
+          <div class="cascade-row"><span class="cr-rel">guest_profiles (GDPR erasure)</span><span class="cr-action">Set deletedAt + null PII fields. Records stay.</span><span class="cr-type cr-softdel">SOFT + ANONYMIZE</span></div>
+          <div class="cascade-row"><span class="cr-rel">reservations, folios, users</span><span class="cr-action">Set deletedAt. Never hard-deleted.</span><span class="cr-type cr-softdel">SOFT DELETE</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="sdiv">Critical Queries & Their Index Justification</div>
+    <div class="table-card" id="tc-queries">
+      <div class="tc-header" onclick="toggleTable('tc-queries')">
+        <span class="tc-name">High-Frequency Query Patterns</span><span class="tc-desc">— Every index exists to serve one of these</span>
+        <span class="tc-chevron">▼</span>
+      </div>
+      <div class="tc-body">
+        <table class="col-table">
+          <tr><th>Query</th><th>Frequency</th><th>Index Required</th></tr>
+          <tr><td class="col-notes">Today's arrivals for a branch</td><td><span style="color:#a05030;font-size:11px">Every front desk load</span></td><td><code style="font-family:IBM Plex Mono;font-size:10px">reservations (branchId, checkInDate, status)</code></td></tr>
+          <tr><td class="col-notes">Available rooms for given type + dates</td><td><span style="color:#a05030;font-size:11px">Every booking create</span></td><td><code style="font-family:IBM Plex Mono;font-size:10px">reservations (roomId, checkInDate, checkOutDate)</code><br><code style="font-family:IBM Plex Mono;font-size:10px">rooms (branchId, roomTypeId, status)</code></td></tr>
+          <tr><td class="col-notes">Room status board</td><td><span style="color:#a05030;font-size:11px">Polled every 10s</span></td><td><code style="font-family:IBM Plex Mono;font-size:10px">rooms (branchId, status)</code></td></tr>
+          <tr><td class="col-notes">Active rate plans for resolver</td><td><span style="color:#a05030;font-size:11px">Every rate calculation</span></td><td><code style="font-family:IBM Plex Mono;font-size:10px">rate_plans (branchId, roomTypeId, type, isActive)</code></td></tr>
+          <tr><td class="col-notes">Folio with all line items</td><td><span style="color:#a05030;font-size:11px">Every folio open</span></td><td><code style="font-family:IBM Plex Mono;font-size:10px">line_items (folioId, postedAt)</code></td></tr>
+          <tr><td class="col-notes">Today's housekeeping tasks for an agent</td><td><span style="color:#806020;font-size:11px">On hk app open</span></td><td><code style="font-family:IBM Plex Mono;font-size:10px">housekeeping_tasks (assigneeId, taskDate, status)</code></td></tr>
+          <tr><td class="col-notes">Guest search by name or email</td><td><span style="color:#806020;font-size:11px">Every booking create</span></td><td><code style="font-family:IBM Plex Mono;font-size:10px">guest_profiles (tenantId, name text_pattern_ops)</code><br><code style="font-family:IBM Plex Mono;font-size:10px">guest_profiles (tenantId, email)</code></td></tr>
+          <tr><td class="col-notes">No-show pending list</td><td><span style="color:#406020;font-size:11px">Nightly, on demand</span></td><td><code style="font-family:IBM Plex Mono;font-size:10px">reservations (branchId, status, checkInDate) PARTIAL WHERE status='confirmed'</code></td></tr>
+          <tr><td class="col-notes">Current open shift</td><td><span style="color:#406020;font-size:11px">Per agent login</span></td><td><code style="font-family:IBM Plex Mono;font-size:10px">shifts (branchId, closedAt) WHERE closedAt IS NULL</code></td></tr>
+          <tr><td class="col-notes">Rate audit for a reservation</td><td><span style="color:#406020;font-size:11px">On dispute</span></td><td><code style="font-family:IBM Plex Mono;font-size:10px">rate_audit_log (reservationId)</code></td></tr>
+          <tr><td class="col-notes">Guest comms history</td><td><span style="color:#406020;font-size:11px">On reservation view</span></td><td><code style="font-family:IBM Plex Mono;font-size:10px">communication_log (reservationId, sentAt DESC)</code></td></tr>
+          <tr><td class="col-notes">Audit log for admin review</td><td><span style="color:#406020;font-size:11px">On demand</span></td><td><code style="font-family:IBM Plex Mono;font-size:10px">audit_log (tenantId, timestamp DESC)</code></td></tr>
+          <tr><td class="col-notes">All dirty rooms regardless of occupancy (housekeeping)</td><td><span style="color:#a05030;font-size:11px">Every hk board load</span></td><td><code style="font-family:IBM Plex Mono;font-size:10px">rooms (branchId, cleanlinessStatus) WHERE cleanlinessStatus = 'dirty'</code></td></tr>
+          <tr><td class="col-notes">All occupied rooms (night audit folio loop)</td><td><span style="color:#a05030;font-size:11px">Nightly</span></td><td><code style="font-family:IBM Plex Mono;font-size:10px">rooms (branchId, occupancyStatus) WHERE occupancyStatus = 'occupied' AND heldStatus IS NULL</code></td></tr>
+          <tr><td class="col-notes">Outlets for a staff member at login (POS)</td><td><span style="color:#a05030;font-size:11px">Every POS login</span></td><td><code style="font-family:IBM Plex Mono;font-size:10px">user_outlets (userId, branchId)</code></td></tr>
+          <tr><td class="col-notes">Revenue by outlet for management report</td><td><span style="color:#806020;font-size:11px">On report load</span></td><td><code style="font-family:IBM Plex Mono;font-size:10px">line_items (outletId) JOIN outlets (branchId, category)</code></td></tr>
+          <tr><td class="col-notes">Night audit run history for a branch</td><td><span style="color:#406020;font-size:11px">On demand</span></td><td><code style="font-family:IBM Plex Mono;font-size:10px">night_audit_log (branchId, auditDate DESC)</code></td></tr>
+          <tr><td class="col-notes">Detect stuck running audit</td><td><span style="color:#a05030;font-size:11px">Health monitor</span></td><td><code style="font-family:IBM Plex Mono;font-size:10px">night_audit_log (status) WHERE status = 'running' PARTIAL INDEX</code></td></tr>
+          <tr><td class="col-notes">Check-in ID state (new / valid / expired)</td><td><span style="color:#a05030;font-size:11px">Every check-in load</span></td><td><code style="font-family:IBM Plex Mono;font-size:10px">guest_profiles (id) — compare idDocExpiryDate to NOW()</code></td></tr>
+          <tr><td class="col-notes">Deposits held vs applied (folio settlement)</td><td><span style="color:#a05030;font-size:11px">Every check-out</span></td><td><code style="font-family:IBM Plex Mono;font-size:10px">payments (folioId, paymentPurpose) WHERE paymentPurpose IN ('deposit','deposit_application')</code></td></tr>
+        </table>
+      </div>
+    </div>
+
+    <div class="sdiv">Migration Approach</div>
+    <div class="table-card" id="tc-migrations">
+      <div class="tc-header" onclick="toggleTable('tc-migrations')">
+        <span class="tc-name">Migration Strategy</span>
+        <span class="tc-chevron">▼</span>
+      </div>
+      <div class="tc-body">
+        <table class="col-table">
+          <tr><th>Rule</th><th>Detail</th></tr>
+          <tr><td><span class="col-name">Never rename columns</span></td><td class="col-notes">Add a new column with the new name, migrate data, deprecate old column, drop in a later migration. Renaming breaks TypeORM mappings silently.</td></tr>
+          <tr><td><span class="col-name">Add columns as nullable first</span></td><td class="col-notes">Adding a NOT NULL column to a large table locks it. Add as nullable, backfill, then add the constraint in a separate migration.</td></tr>
+          <tr><td><span class="col-name">Never change enum values</span></td><td class="col-notes">PostgreSQL enum ALTER requires a table rewrite. Instead: add a new enum type, migrate the column, drop the old type.</td></tr>
+          <tr><td><span class="col-name">Index creation is CONCURRENT</span></td><td class="col-notes">Always use <code style="font-family:IBM Plex Mono;font-size:11px">CREATE INDEX CONCURRENTLY</code> on tables with existing data. Regular index creation locks the table.</td></tr>
+          <tr><td><span class="col-name">All migrations are transactional</span></td><td class="col-notes">Wrap in BEGIN/COMMIT. If a migration fails mid-way, it rolls back cleanly. Exception: CONCURRENT index creation cannot run inside a transaction.</td></tr>
+          <tr><td><span class="col-name">Version tracking</span></td><td class="col-notes">TypeORM migrations table (<code style="font-family:IBM Plex Mono;font-size:11px">migrations</code>) tracks what's been applied per environment. Never manually edit this table.</td></tr>
+          <tr><td><span class="col-name">Seeding</span></td><td class="col-notes">Seed scripts run after migrations in non-production environments. Default roles, room type templates, and tax rule templates are seeded per new tenant on signup — not via migration.</td></tr>
+        </table>
+      </div>
+    </div>
+
+    <div class="sdiv">Schema Changelog</div>
+    <div class="table-card" id="tc-changelog">
+      <div class="tc-header" onclick="toggleTable('tc-changelog')">
+        <span class="tc-name">Revision History</span><span class="tc-desc">— Changes applied after initial architecture draft</span>
+        <span class="tc-chevron">▼</span>
+      </div>
+      <div class="tc-body">
+        <table class="col-table">
+          <tr><th>Version</th><th>Change</th><th>Reason</th></tr>
+          <tr>
+            <td style="font-family:IBM Plex Mono;font-size:11px;white-space:nowrap">v1.1</td>
+            <td class="col-notes"><strong>rooms:</strong> Split single <code style="font-family:IBM Plex Mono;font-size:10px">status</code> enum into three columns: <code style="font-family:IBM Plex Mono;font-size:10px">occupancyStatus</code>, <code style="font-family:IBM Plex Mono;font-size:10px">cleanlinessStatus</code>, <code style="font-family:IBM Plex Mono;font-size:10px">heldStatus</code></td>
+            <td class="col-notes">A room can be simultaneously occupied AND dirty. The combined enum made this state unrepresentable and required double conditions on every housekeeping and availability query.</td>
+          </tr>
+          <tr>
+            <td style="font-family:IBM Plex Mono;font-size:11px;white-space:nowrap">v1.1</td>
+            <td class="col-notes"><strong>charge_type_enum:</strong> Removed <code style="font-family:IBM Plex Mono;font-size:10px">deposit</code>, added <code style="font-family:IBM Plex Mono;font-size:10px">tax</code></td>
+            <td class="col-notes">Deposits are payment records (liabilities), not charges. Tax rows (VAT, service charge) need their own type so they can be filtered out of revenue calculations and summed independently for tax reporting.</td>
+          </tr>
+          <tr>
+            <td style="font-family:IBM Plex Mono;font-size:11px;white-space:nowrap">v1.1</td>
+            <td class="col-notes"><strong>line_items:</strong> Added <code style="font-family:IBM Plex Mono;font-size:10px">outletId FK → outlets.id</code></td>
+            <td class="col-notes">Links each charge to its source facility. Required for per-outlet revenue breakdown in management reports. Without it, all F&B revenue is a single lump sum.</td>
+          </tr>
+          <tr>
+            <td style="font-family:IBM Plex Mono;font-size:11px;white-space:nowrap">v1.1</td>
+            <td class="col-notes"><strong>payments:</strong> Added <code style="font-family:IBM Plex Mono;font-size:10px">paymentPurpose VARCHAR(25)</code> — payment | deposit | deposit_application</td>
+            <td class="col-notes">Deposits received at booking are liabilities, not revenue. This field allows the system to distinguish advance deposits from regular payments, and track when a deposit is applied at check-out vs still held.</td>
+          </tr>
+          <tr>
+            <td style="font-family:IBM Plex Mono;font-size:11px;white-space:nowrap">v1.1</td>
+            <td class="col-notes"><strong>rate_plans:</strong> Added nullable <code style="font-family:IBM Plex Mono;font-size:10px">outletId FK → outlets.id</code></td>
+            <td class="col-notes">Placeholder for future F&B package pricing and outlet-specific promotional rates. NULL for all current room rate plans.</td>
+          </tr>
+          <tr>
+            <td style="font-family:IBM Plex Mono;font-size:11px;white-space:nowrap">v1.1</td>
+            <td class="col-notes"><strong>guest_profiles:</strong> Added <code style="font-family:IBM Plex Mono;font-size:10px">idDocExpiryDate DATE</code></td>
+            <td class="col-notes">Drives the check-in flow ID state logic: first visit (no ID on file), returning-valid (expiry in future), returning-expired (expiry in past). Without this field the UI has no way to determine which state to render without manual receptionist input.</td>
+          </tr>
+          <tr>
+            <td style="font-family:IBM Plex Mono;font-size:11px;white-space:nowrap">v1.1</td>
+            <td class="col-notes"><strong>New table: outlets</strong> — hotel facilities that generate POS charges with chargeType and category</td>
+            <td class="col-notes">Staff members are mapped to outlets, not charge types. The outlet's chargeType is automatically stamped on every line item posted — no bartender or waiter manually selects a charge type.</td>
+          </tr>
+          <tr>
+            <td style="font-family:IBM Plex Mono;font-size:11px;white-space:nowrap">v1.1</td>
+            <td class="col-notes"><strong>New table: user_outlets</strong> — junction table mapping staff to their assigned outlets</td>
+            <td class="col-notes">Enables automatic charge attribution at POS. One outlet = auto-selected. Multiple outlets = session-start dropdown. Drives the outlet name appearing in line item descriptions automatically.</td>
+          </tr>
+          <tr>
+            <td style="font-family:IBM Plex Mono;font-size:11px;white-space:nowrap">v1.1</td>
+            <td class="col-notes"><strong>New table: night_audit_log</strong> — per-branch per-night audit run history</td>
+            <td class="col-notes">Without this, there is no way to determine whether missing room charges are due to a failed audit or an audit that never ran. UNIQUE (branchId, auditDate) also prevents double-running the audit.</td>
+          </tr>
+          <tr>
+            <td style="font-family:IBM Plex Mono;font-size:11px;white-space:nowrap">v1.2</td>
+            <td class="col-notes"><strong>rate_plans:</strong> Replaced single-winner <code style="font-family:IBM Plex Mono;font-size:10px">priority SMALLINT</code> with <code style="font-family:IBM Plex Mono;font-size:10px">cascadeTier SMALLINT</code> + <code style="font-family:IBM Plex Mono;font-size:10px">isOverride BOOLEAN</code></td>
+            <td class="col-notes">Rate rules no longer pick one winner. Cascade tiers (base → seasonal → weekend → corporate) stack additively in parent→child order — a December Saturday applies the seasonal adjustment first, then the weekend adjustment on top of that running total. Negotiated and promotional rates are true overrides that bypass the cascade and set an absolute final rate.</td>
+          </tr>
+          <tr>
+            <td style="font-family:IBM Plex Mono;font-size:11px;white-space:nowrap">v1.2</td>
+            <td class="col-notes"><strong>rate_type_enum:</strong> Removed <code style="font-family:IBM Plex Mono;font-size:10px">override</code> as a type</td>
+            <td class="col-notes">Manager rate overrides were never a rate_plans row conceptually — they're a separate audited action via the Manager Rate Override flow, not a plan a receptionist selects from a dropdown. Removing it avoids the type being confused with the new isOverride flag, which means something different (negotiated/promotional bypass, not a manager action).</td>
+          </tr>
+          <tr>
+            <td style="font-family:IBM Plex Mono;font-size:11px;white-space:nowrap">v1.2</td>
+            <td class="col-notes"><strong>rate_audit_log.result:</strong> Restructured from a single <code style="font-family:IBM Plex Mono;font-size:10px">ruleApplied</code> field to a <code style="font-family:IBM Plex Mono;font-size:10px">cascade[]</code> array</td>
+            <td class="col-notes">Each cascade step now stores its own before/after running total, so the UI can render stacked rate tags ("Seasonal +25% · Weekend +5%") instead of a single rule badge. Required because multiple tiers can be active simultaneously by design.</td>
+          </tr>
+        </table>
+      </div>
+    </div>
+
+  </div>
+  </div>
+
+</main>
+</div><!-- /body-wrap -->
+
+<script>
+const pages = ['overview','identity','property','reservations','financial','operations','comms','system','patterns'];
+const sidebarData = {
+  identity:     ['tenants','users','roles','user_branch_roles','invite_tokens'],
+  property:     ['brands','branches','room_types','rooms','buildings & floors','room_blocks'],
+  reservations: ['guest_profiles','reservations','rate_plans & rate_audit_log','no_show_records & walk_records'],
+  financial:    ['folios','line_items','folio_transfers','payments & tax_rules'],
+  operations:   ['housekeeping_tasks','shifts & shift_issues','registration_cards','overbooking_config','outlets','user_outlets','night_audit_log'],
+  comms:        ['communication_log','audit_log','gdpr_requests'],
+  system:       ['feature_flags & backup_records'],
+  patterns:     ['Naming Conventions','All FK Cascade Rules','High-Frequency Queries','Migration Strategy'],
+};
+
+function showPage(id) {
+  pages.forEach(p => {
+    document.getElementById('page-'+p).classList.toggle('active', p === id);
+  });
+  document.querySelectorAll('.ntab').forEach(t => t.classList.remove('active'));
+  event.currentTarget.classList.add('active');
+  buildSidebar(id);
+}
+
+function buildSidebar(page) {
+  const sb = document.getElementById('sb-contents');
+  sb.innerHTML = '';
+  if (page === 'overview') {
+    sb.innerHTML = '<div class="sb-section"><div class="sb-section-label">Navigate</div></div>' +
+      ['identity','property','reservations','financial','operations','comms','system','patterns'].map(p =>
+        `<button class="sb-item" onclick="showPage('${p}');event.stopPropagation()"><span class="sb-dot" style="background:${domainColor(p)}"></span>${p.charAt(0).toUpperCase()+p.slice(1)}<span class="sb-count">${sidebarData[p]?.length||0}</span></button>`
+      ).join('');
+    return;
+  }
+  const tables = sidebarData[page] || [];
+  sb.innerHTML = `<div class="sb-section"><div class="sb-section-label">Tables — ${page}</div></div>` +
+    tables.map(t => `<button class="sb-item" style="font-family:'IBM Plex Mono',monospace;font-size:11px">${t}</button>`).join('');
+}
+
+function domainColor(p) {
+  return {identity:'#4a7ab8',property:'#4a8a4a',reservations:'#a84a38',financial:'#7a4a9a',operations:'#9a7a38',comms:'#388a8a',system:'#606060',patterns:'#c04040'}[p]||'#888';
+}
+
+function toggleTable(id) {
+  document.getElementById(id).classList.toggle('open');
+}
+
+buildSidebar('overview');
+
+// Open all tables on the current page when tab is clicked (first open = expand first table)
+document.querySelectorAll('.ntab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    setTimeout(() => {
+      const activePage = document.querySelector('.page.active');
+      if (activePage) {
+        const firstCard = activePage.querySelector('.table-card:not(.open)');
+        if (firstCard) firstCard.classList.add('open');
+      }
+    }, 100);
+  });
+});
+</script>
+</body>
+</html>

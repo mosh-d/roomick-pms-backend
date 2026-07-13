@@ -1,0 +1,1491 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PMS MVP — 6-Month Development Timeline</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
+
+:root {
+  --bg:       #0c0c0a;
+  --bg2:      #141412;
+  --bg3:      #1b1b18;
+  --bg4:      #222220;
+  --bg5:      #2a2a26;
+  --border:   rgba(255,255,255,0.07);
+  --border2:  rgba(255,255,255,0.13);
+  --text:     #edeae0;
+  --text2:    #9c9a90;
+  --text3:    #5c5a52;
+  --m1: #4a90c4; --m1b: rgba(74,144,196,0.12); --m1d: rgba(74,144,196,0.25);
+  --m2: #52a882; --m2b: rgba(82,168,130,0.12); --m2d: rgba(82,168,130,0.25);
+  --m3: #c46a42; --m3b: rgba(196,106,66,0.12); --m3d: rgba(196,106,66,0.25);
+  --m4: #9a6fc4; --m4b: rgba(154,111,196,0.12); --m4d: rgba(154,111,196,0.25);
+  --m5: #c4a442; --m5b: rgba(196,164,66,0.12); --m5d: rgba(196,164,66,0.25);
+  --m6: #c44a52; --m6b: rgba(196,74,82,0.12);  --m6d: rgba(196,74,82,0.25);
+  --tag-be:  #0d2010; --tag-be-t: #5daa72;
+  --tag-fe:  #0d1624; --tag-fe-t: #5d96bb;
+  --tag-db:  #1e1608; --tag-db-t: #b89642;
+  --tag-new: #1a0d20; --tag-new-t: #c46fd4;
+}
+
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Syne', sans-serif;
+  font-size: 14px;
+  line-height: 1.6;
+  min-height: 100vh;
+}
+
+/* ── TOP CHROME ── */
+.chrome {
+  position: sticky; top: 0; z-index: 100;
+  background: rgba(12,12,10,0.92);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--border);
+  padding: 0 32px;
+  display: flex; align-items: center; gap: 0;
+  height: 52px;
+}
+.chrome-logo {
+  font-size: 15px; font-weight: 700; color: var(--text);
+  letter-spacing: -0.01em; margin-right: 32px; white-space: nowrap;
+}
+.chrome-logo span { color: var(--m5); }
+.month-tabs { display: flex; gap: 2px; overflow-x: auto; flex: 1; }
+.month-tabs::-webkit-scrollbar { display: none; }
+.mtab {
+  padding: 6px 16px;
+  border-radius: 6px;
+  font-size: 12px; font-weight: 600;
+  cursor: pointer; border: none; background: none;
+  color: var(--text3);
+  transition: all 0.15s; white-space: nowrap;
+  font-family: 'Syne', sans-serif;
+  letter-spacing: 0.02em;
+}
+.mtab:hover { background: var(--bg3); color: var(--text2); }
+.mtab.active { color: #fff; }
+
+.chrome-right {
+  margin-left: auto; display: flex; align-items: center; gap: 10px;
+  padding-left: 24px; border-left: 1px solid var(--border); flex-shrink: 0;
+}
+.progress-label { font-size: 11px; color: var(--text3); font-family: 'JetBrains Mono', monospace; }
+.progress-bar-wrap { width: 120px; height: 4px; background: var(--bg4); border-radius: 2px; overflow: hidden; }
+.progress-bar-fill { height: 100%; border-radius: 2px; transition: width 0.4s; }
+
+/* ── LAYOUT ── */
+.wrap { max-width: 1100px; margin: 0 auto; padding: 40px 32px 80px; }
+
+/* ── HERO ── */
+.hero { margin-bottom: 48px; }
+.hero-kicker {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px; color: var(--text3);
+  letter-spacing: 0.14em; text-transform: uppercase;
+  margin-bottom: 12px;
+}
+.hero h1 {
+  font-size: 42px; font-weight: 800;
+  line-height: 1.05; letter-spacing: -0.03em;
+  color: var(--text); margin-bottom: 14px;
+}
+.hero h1 em { font-style: normal; color: var(--m5); }
+.hero-sub { color: var(--text2); font-size: 15px; max-width: 560px; line-height: 1.7; }
+
+/* ── SUMMARY BAR ── */
+.summary-bar {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 10px; margin-bottom: 48px;
+}
+.sum-card {
+  background: var(--bg2); border: 1px solid var(--border);
+  border-radius: 10px; padding: 14px 16px;
+}
+.sum-card .sc-num {
+  font-size: 28px; font-weight: 800;
+  letter-spacing: -0.04em; line-height: 1;
+  margin-bottom: 4px;
+}
+.sum-card .sc-label {
+  font-size: 11px; color: var(--text3);
+  font-family: 'JetBrains Mono', monospace;
+  text-transform: uppercase; letter-spacing: 0.06em;
+}
+
+/* ── TIMELINE RULER ── */
+.ruler {
+  display: flex; gap: 3px; margin-bottom: 32px;
+  border-radius: 8px; overflow: hidden;
+}
+.ruler-seg {
+  flex: 1; height: 8px; cursor: pointer;
+  transition: filter 0.15s;
+}
+.ruler-seg:hover { filter: brightness(1.3); }
+
+/* ── PHASE SECTION ── */
+.phase-section { margin-bottom: 48px; scroll-margin-top: 64px; }
+
+.phase-header {
+  display: flex; align-items: flex-start; gap: 18px;
+  margin-bottom: 20px;
+}
+.phase-num {
+  width: 44px; height: 44px; border-radius: 10px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 15px; font-weight: 800;
+  flex-shrink: 0; letter-spacing: -0.02em;
+}
+.phase-meta { flex: 1; }
+.phase-title {
+  font-size: 22px; font-weight: 700;
+  letter-spacing: -0.02em; line-height: 1.2;
+  margin-bottom: 4px;
+}
+.phase-dates {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px; color: var(--text3);
+  display: flex; align-items: center; gap: 12px;
+}
+.phase-dates .pd-dur {
+  padding: 2px 8px; border-radius: 10px;
+  font-size: 10px; font-weight: 500;
+  border: 1px solid;
+}
+.phase-desc { font-size: 13px; color: var(--text2); line-height: 1.7; max-width: 720px; margin-bottom: 20px; }
+
+/* ── MODULE GRID ── */
+.module-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(310px, 1fr));
+  gap: 12px; margin-bottom: 20px;
+}
+
+.module-card {
+  background: var(--bg2); border: 1px solid var(--border);
+  border-radius: 10px; overflow: hidden;
+  transition: border-color 0.18s;
+}
+.module-card:hover { border-color: var(--border2); }
+.module-card.open { border-color: var(--border2); }
+
+.mc-header {
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 14px; cursor: pointer; user-select: none;
+}
+.mc-icon {
+  width: 30px; height: 30px; border-radius: 7px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 14px; flex-shrink: 0;
+}
+.mc-text { flex: 1; min-width: 0; }
+.mc-title { font-size: 13px; font-weight: 600; color: var(--text); }
+.mc-sub { font-size: 11px; color: var(--text3); margin-top: 1px; }
+.mc-tags { display: flex; gap: 3px; margin-left: auto; align-items: center; flex-shrink: 0; }
+.tag {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px; font-weight: 500;
+  padding: 1px 5px; border-radius: 3px;
+  letter-spacing: 0.03em;
+}
+.tag-be { background: var(--tag-be); color: var(--tag-be-t); }
+.tag-fe { background: var(--tag-fe); color: var(--tag-fe-t); }
+.tag-db { background: var(--tag-db); color: var(--tag-db-t); }
+.tag-new { background: var(--tag-new); color: var(--tag-new-t); }
+.mc-chevron {
+  font-size: 10px; color: var(--text3);
+  transition: transform 0.18s; margin-left: 6px;
+  flex-shrink: 0;
+}
+.module-card.open .mc-chevron { transform: rotate(180deg); }
+
+.mc-body {
+  display: none; border-top: 1px solid var(--border);
+  padding: 12px 14px;
+}
+.module-card.open .mc-body { display: block; }
+
+/* tree inside card */
+.tree { margin-bottom: 8px; }
+.tree-group-label {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px; text-transform: uppercase;
+  letter-spacing: 0.1em; color: var(--text3);
+  margin: 10px 0 5px;
+}
+.tree-group-label:first-child { margin-top: 0; }
+.tree-branch {
+  border-left: 1.5px solid var(--border2);
+  padding-left: 10px; margin-left: 2px;
+}
+.tree-item {
+  font-size: 12px; color: var(--text2);
+  padding: 2px 0; display: flex;
+  align-items: flex-start; gap: 6px; line-height: 1.5;
+}
+.tree-item::before { content: '–'; color: var(--text3); flex-shrink: 0; font-size: 11px; margin-top: 1px; }
+.tree-item.new-item { color: var(--tag-new-t); }
+.tree-item.new-item::before { content: '★'; font-size: 9px; margin-top: 2px; color: var(--tag-new-t); }
+
+/* endpoints inside card */
+.ep {
+  border: 1px solid var(--border);
+  border-radius: 6px; overflow: hidden;
+  margin-bottom: 8px;
+}
+.ep-head {
+  display: flex; align-items: center; gap: 7px;
+  padding: 6px 10px; background: var(--bg3);
+}
+.method {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px; font-weight: 500;
+  padding: 1px 5px; border-radius: 3px;
+  flex-shrink: 0; letter-spacing: 0.04em;
+}
+.GET    { background: #0a1e12; color: #5daa72; }
+.POST   { background: #0a1220; color: #5d96bb; }
+.PATCH  { background: #1e1608; color: #b89642; }
+.DELETE { background: #1e0a0a; color: #bb5d5d; }
+.PUT    { background: #150a20; color: #9a5dbb; }
+.ep-path { font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--text2); }
+.ep-desc { font-size: 11px; color: var(--text3); padding: 6px 10px 4px; }
+
+/* deliverables box */
+.del-box {
+  background: var(--bg3); border-radius: 7px;
+  padding: 12px 14px; margin-top: 16px;
+}
+.del-box-title {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px; text-transform: uppercase;
+  letter-spacing: 0.1em; color: var(--text3);
+  margin-bottom: 8px;
+}
+.del-item {
+  font-size: 12px; color: var(--text2);
+  padding: 3px 0 3px 16px; position: relative; line-height: 1.5;
+}
+.del-item::before {
+  content: '✓'; position: absolute; left: 0;
+  font-size: 10px; color: var(--m2); top: 4px;
+}
+.del-item.new-del { color: var(--tag-new-t); }
+.del-item.new-del::before { content: '★'; color: var(--tag-new-t); font-size: 9px; }
+
+/* scalability hook */
+.scale-note {
+  font-size: 11px; color: var(--text3);
+  border-left: 2px solid var(--border2);
+  padding: 6px 10px; margin-top: 12px;
+  border-radius: 0 5px 5px 0;
+  background: var(--bg3); line-height: 1.6;
+}
+.scale-note strong { color: var(--text2); font-weight: 600; }
+
+/* phase divider */
+.phase-divider {
+  display: flex; align-items: center; gap: 12px;
+  margin: 40px 0 8px;
+}
+.phase-divider::before, .phase-divider::after {
+  content: ''; flex: 1; height: 1px; background: var(--border);
+}
+.phase-divider span {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px; color: var(--text3);
+  letter-spacing: 0.1em; text-transform: uppercase;
+  white-space: nowrap;
+}
+
+/* new badge */
+.new-badge {
+  display: inline-flex; align-items: center;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px; font-weight: 500;
+  padding: 1px 6px; border-radius: 10px;
+  background: var(--tag-new); color: var(--tag-new-t);
+  border: 1px solid rgba(196,111,212,0.25);
+  margin-left: 8px; vertical-align: middle;
+  letter-spacing: 0.04em;
+}
+
+/* LEGEND */
+.legend {
+  display: flex; flex-wrap: wrap; gap: 8px 20px;
+  margin-bottom: 32px;
+}
+.leg-item {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11px; color: var(--text3);
+  font-family: 'JetBrains Mono', monospace;
+}
+.leg-dot { width: 10px; height: 10px; border-radius: 3px; flex-shrink: 0; }
+
+/* scrollbar */
+::-webkit-scrollbar { width: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<!-- TOP CHROME -->
+<div class="chrome">
+  <div class="chrome-logo">Lodgix <span>PMS</span> — MVP Timeline</div>
+  <div class="month-tabs" id="month-tabs">
+    <button class="mtab active" onclick="scrollTo('m1')" style="color:#4a90c4">Month 1</button>
+    <button class="mtab" onclick="scrollTo('m2')" style="">Month 2</button>
+    <button class="mtab" onclick="scrollTo('m3')" style="">Month 3</button>
+    <button class="mtab" onclick="scrollTo('m4')" style="">Month 4</button>
+    <button class="mtab" onclick="scrollTo('m5')" style="">Month 5</button>
+    <button class="mtab" onclick="scrollTo('m6')" style="">Month 6</button>
+  </div>
+  <div class="chrome-right">
+    <span class="progress-label" id="progress-label">0% complete</span>
+    <div class="progress-bar-wrap">
+      <div class="progress-bar-fill" id="progress-fill" style="width:0%;background:var(--m1)"></div>
+    </div>
+  </div>
+</div>
+
+<div class="wrap">
+
+  <!-- HERO -->
+  <div class="hero">
+    <div class="hero-kicker">Next.js · NestJS · PostgreSQL · Multi-Tenant SaaS</div>
+    <h1>6-Month <em>MVP</em><br>Development Plan</h1>
+    <div class="hero-sub">Revised to include folio transfer, no-show handling, shift management, guest registration cards, communications log, overbooking management, and the rate resolver architecture rule. New additions are marked <span class="new-badge">NEW</span>.</div>
+  </div>
+
+  <!-- SUMMARY BAR -->
+  <div class="summary-bar">
+    <div class="sum-card">
+      <div class="sc-num" style="color:var(--m1)">6</div>
+      <div class="sc-label">Months</div>
+    </div>
+    <div class="sum-card">
+      <div class="sc-num" style="color:var(--m2)">24</div>
+      <div class="sc-label">Weeks</div>
+    </div>
+    <div class="sum-card">
+      <div class="sc-num" style="color:var(--m3)">38</div>
+      <div class="sc-label">Modules</div>
+    </div>
+    <div class="sum-card">
+      <div class="sc-num" style="color:var(--m4)">7</div>
+      <div class="sc-label">New Additions</div>
+    </div>
+    <div class="sum-card">
+      <div class="sc-num" style="color:var(--m5)">MVP</div>
+      <div class="sc-label">Scope</div>
+    </div>
+    <div class="sum-card">
+      <div class="sc-num" style="color:var(--m6)">∞</div>
+      <div class="sc-label">Scalable Hooks</div>
+    </div>
+  </div>
+
+  <!-- RULER -->
+  <div class="ruler" id="ruler">
+    <div class="ruler-seg" style="background:var(--m1)" onclick="scrollTo('m1')" title="Month 1"></div>
+    <div class="ruler-seg" style="background:var(--m2)" onclick="scrollTo('m2')" title="Month 2"></div>
+    <div class="ruler-seg" style="background:var(--m3)" onclick="scrollTo('m3')" title="Month 3"></div>
+    <div class="ruler-seg" style="background:var(--m4)" onclick="scrollTo('m4')" title="Month 4"></div>
+    <div class="ruler-seg" style="background:var(--m5)" onclick="scrollTo('m5')" title="Month 5"></div>
+    <div class="ruler-seg" style="background:var(--m6)" onclick="scrollTo('m6')" title="Month 6"></div>
+  </div>
+
+  <!-- LEGEND -->
+  <div class="legend">
+    <div class="leg-item"><div class="leg-dot" style="background:var(--tag-be-t)"></div>BE — NestJS backend</div>
+    <div class="leg-item"><div class="leg-dot" style="background:var(--tag-fe-t)"></div>FE — Next.js frontend</div>
+    <div class="leg-item"><div class="leg-dot" style="background:var(--tag-db-t)"></div>DB — PostgreSQL schema</div>
+    <div class="leg-item"><div class="leg-dot" style="background:var(--tag-new-t)"></div>★ New addition from architecture review</div>
+  </div>
+
+  <!-- ═══════════ MONTH 1 ═══════════ -->
+  <div class="phase-section" id="m1">
+    <div class="phase-header">
+      <div class="phase-num" style="background:var(--m1b);color:var(--m1)">M1</div>
+      <div class="phase-meta">
+        <div class="phase-title" style="color:var(--m1)">Foundation: Infrastructure, Auth & Property Management</div>
+        <div class="phase-dates">
+          Weeks 1–4
+          <span class="pd-dur" style="border-color:var(--m1);color:var(--m1)">4 weeks</span>
+        </div>
+      </div>
+    </div>
+    <div class="phase-desc">The entire system lives here. Multi-tenancy, auth, and the brand → branch → room hierarchy must be correct before anything else is built. Every subsequent module inherits the tenant context middleware established in this month.</div>
+
+    <div class="module-grid">
+
+      <!-- Project Scaffolding -->
+      <div class="module-card" id="card-scaffold">
+        <div class="mc-header" onclick="toggle('card-scaffold')">
+          <div class="mc-icon" style="background:var(--m1b)">⬡</div>
+          <div class="mc-text">
+            <div class="mc-title">Project Scaffolding</div>
+            <div class="mc-sub">Monorepo, tooling, environments</div>
+          </div>
+          <div class="mc-tags"><span class="tag tag-be">BE</span><span class="tag tag-fe">FE</span></div>
+          <span class="mc-chevron">▼</span>
+        </div>
+        <div class="mc-body">
+          <div class="tree">
+            <div class="tree-group-label">Next.js (Frontend)</div>
+            <div class="tree-branch">
+              <div class="tree-item">App Router + TypeScript strict config</div>
+              <div class="tree-item">TenantContext provider (tenantId, brandId, branchId, user, role)</div>
+              <div class="tree-item">Auth middleware — redirect unauthenticated to /login</div>
+              <div class="tree-item">Dynamic route segments: /[brand]/[branch]/[module]</div>
+              <div class="tree-item">ESLint, Prettier, Husky pre-commit hooks</div>
+            </div>
+            <div class="tree-group-label">NestJS (Backend)</div>
+            <div class="tree-branch">
+              <div class="tree-item">Module/Service/Controller/Repository layer structure</div>
+              <div class="tree-item">Global exception filter + request logger</div>
+              <div class="tree-item">Environment config (ConfigModule, .env per environment)</div>
+              <div class="tree-item">X-Tenant-ID header injection via middleware</div>
+            </div>
+            <div class="tree-group-label">PostgreSQL + ORM</div>
+            <div class="tree-branch">
+              <div class="tree-item">TypeORM / Prisma setup with migrations</div>
+              <div class="tree-item">Database seeding scripts (dev + test)</div>
+              <div class="tree-item">Connection pooling config (PgBouncer-ready)</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Multi-Tenant Architecture -->
+      <div class="module-card" id="card-mt">
+        <div class="mc-header" onclick="toggle('card-mt')">
+          <div class="mc-icon" style="background:var(--m1b)">⊛</div>
+          <div class="mc-text">
+            <div class="mc-title">Multi-Tenant Architecture</div>
+            <div class="mc-sub">Tenant isolation, provisioning, context</div>
+          </div>
+          <div class="mc-tags"><span class="tag tag-be">BE</span><span class="tag tag-db">DB</span></div>
+          <span class="mc-chevron">▼</span>
+        </div>
+        <div class="mc-body">
+          <div class="tree">
+            <div class="tree-group-label">Schema Design</div>
+            <div class="tree-branch">
+              <div class="tree-item">Tenant table (id, subdomain, mode: single_brand | multi_brand, status)</div>
+              <div class="tree-item">Row-Level Security (RLS) on all tables via tenantId FK</div>
+              <div class="tree-item">tenantId injected at ORM query level — not per-developer</div>
+            </div>
+            <div class="tree-group-label">API Endpoints</div>
+            <div class="tree-branch">
+              <div class="ep"><div class="ep-head"><span class="method POST">POST</span><span class="ep-path">/tenants</span></div><div class="ep-desc">Create tenant + provision schema + create owner account</div></div>
+              <div class="ep"><div class="ep-head"><span class="method POST">POST</span><span class="ep-path">/tenants/configure-mode</span></div><div class="ep-desc">Set single_brand or multi_brand, group name, first brand name</div></div>
+              <div class="ep"><div class="ep-head"><span class="method GET">GET</span><span class="ep-path">/tenants/:id/context</span></div><div class="ep-desc">Load full TenantContext for frontend provider</div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Auth System -->
+      <div class="module-card" id="card-auth">
+        <div class="mc-header" onclick="toggle('card-auth')">
+          <div class="mc-icon" style="background:var(--m1b)">◉</div>
+          <div class="mc-text">
+            <div class="mc-title">Auth System</div>
+            <div class="mc-sub">JWT, sessions, invite flow</div>
+          </div>
+          <div class="mc-tags"><span class="tag tag-be">BE</span><span class="tag tag-fe">FE</span></div>
+          <span class="mc-chevron">▼</span>
+        </div>
+        <div class="mc-body">
+          <div class="tree">
+            <div class="tree-branch">
+              <div class="tree-item">JWT access + refresh token pair (short/long lived)</div>
+              <div class="tree-item">NestJS Guards + Role decorators on every route</div>
+              <div class="tree-item">Password hashing (bcrypt), strength enforcement</div>
+              <div class="tree-item">Email verification via OTP on signup</div>
+              <div class="tree-item">Staff invite link system (token-based, 72h expiry)</div>
+              <div class="tree-item">Session timeout + idle logout</div>
+            </div>
+            <div class="tree-group-label">Endpoints</div>
+            <div class="tree-branch">
+              <div class="ep"><div class="ep-head"><span class="method POST">POST</span><span class="ep-path">/auth/register</span></div><div class="ep-desc">Owner registration → creates tenant + user + sends OTP</div></div>
+              <div class="ep"><div class="ep-head"><span class="method POST">POST</span><span class="ep-path">/auth/login</span></div><div class="ep-desc">Returns access + refresh token pair</div></div>
+              <div class="ep"><div class="ep-head"><span class="method POST">POST</span><span class="ep-path">/auth/refresh</span></div><div class="ep-desc">Rotates refresh token, issues new access token</div></div>
+              <div class="ep"><div class="ep-head"><span class="method POST">POST</span><span class="ep-path">/auth/verify-email</span></div><div class="ep-desc">Validate OTP sent after registration</div></div>
+              <div class="ep"><div class="ep-head"><span class="method POST">POST</span><span class="ep-path">/auth/accept-invite</span></div><div class="ep-desc">Staff accepts invite link, sets password</div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Property Hierarchy -->
+      <div class="module-card" id="card-prop">
+        <div class="mc-header" onclick="toggle('card-prop')">
+          <div class="mc-icon" style="background:var(--m1b)">⬢</div>
+          <div class="mc-text">
+            <div class="mc-title">Property Hierarchy</div>
+            <div class="mc-sub">Tenant → Brand → Branch → Building → Floor</div>
+          </div>
+          <div class="mc-tags"><span class="tag tag-be">BE</span><span class="tag tag-db">DB</span><span class="tag tag-fe">FE</span></div>
+          <span class="mc-chevron">▼</span>
+        </div>
+        <div class="mc-body">
+          <div class="tree">
+            <div class="tree-group-label">Schema</div>
+            <div class="tree-branch">
+              <div class="tree-item">Brand (id, tenantId, name, logo, color, mode)</div>
+              <div class="tree-item">Branch (id, brandId, name, address, timezone, currency, checkInTime, checkOutTime, category)</div>
+              <div class="tree-item">Building (id, branchId, name, floors: int)</div>
+              <div class="tree-item">Floor (id, buildingId, floorNumber, label)</div>
+            </div>
+            <div class="tree-group-label">Key Endpoints</div>
+            <div class="tree-branch">
+              <div class="ep"><div class="ep-head"><span class="method POST">POST</span><span class="ep-path">/brands</span></div><div class="ep-desc">Create brand under tenant (multi-brand mode)</div></div>
+              <div class="ep"><div class="ep-head"><span class="method POST">POST</span><span class="ep-path">/brands/:brandId/branches</span></div><div class="ep-desc">Register new property under a brand</div></div>
+              <div class="ep"><div class="ep-head"><span class="method POST">POST</span><span class="ep-path">/branches/:id/buildings</span></div><div class="ep-desc">Add building with floor count</div></div>
+              <div class="ep"><div class="ep-head"><span class="method GET">GET</span><span class="ep-path">/tenants/:id/hierarchy</span></div><div class="ep-desc">Full brand → branch → building → floor tree</div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Room & Inventory -->
+      <div class="module-card" id="card-rooms">
+        <div class="mc-header" onclick="toggle('card-rooms')">
+          <div class="mc-icon" style="background:var(--m1b)">◻</div>
+          <div class="mc-text">
+            <div class="mc-title">Room Types & Inventory</div>
+            <div class="mc-sub">Categories, attributes, status, blocking</div>
+          </div>
+          <div class="mc-tags"><span class="tag tag-be">BE</span><span class="tag tag-db">DB</span><span class="tag tag-fe">FE</span></div>
+          <span class="mc-chevron">▼</span>
+        </div>
+        <div class="mc-body">
+          <div class="tree">
+            <div class="tree-group-label">Schema</div>
+            <div class="tree-branch">
+              <div class="tree-item">RoomType (id, branchId, name, baseRate, capacity, bedType, sizeM2, amenities[])</div>
+              <div class="tree-item">Room (id, branchId, floorId, roomTypeId, number, view, status, notes)</div>
+              <div class="tree-item">Status enum: vacant | occupied | dirty | clean | inspected | out_of_order | blocked</div>
+              <div class="tree-item">RoomBlock (id, roomId, reason, from, to, notes)</div>
+            </div>
+            <div class="tree-group-label">Key Endpoints</div>
+            <div class="tree-branch">
+              <div class="ep"><div class="ep-head"><span class="method POST">POST</span><span class="ep-path">/branches/:id/room-types</span></div><div class="ep-desc">Create room type with base rate and amenities</div></div>
+              <div class="ep"><div class="ep-head"><span class="method POST">POST</span><span class="ep-path">/branches/:id/rooms/bulk</span></div><div class="ep-desc">Create multiple rooms at once with floor assignment</div></div>
+              <div class="ep"><div class="ep-head"><span class="method PATCH">PATCH</span><span class="ep-path">/rooms/:id/status</span></div><div class="ep-desc">Update room status + trigger downstream effects</div></div>
+              <div class="ep"><div class="ep-head"><span class="method POST">POST</span><span class="ep-path">/rooms/:id/block</span></div><div class="ep-desc">Block room from inventory with reason + date range</div></div>
+              <div class="ep"><div class="ep-head"><span class="method GET">GET</span><span class="ep-path">/branches/:id/rooms/status-board</span></div><div class="ep-desc">Live all-rooms grid with WebSocket support</div></div>
+            </div>
+            <div class="tree-group-label">Frontend</div>
+            <div class="tree-branch">
+              <div class="tree-item">Property setup wizard (signup flow)</div>
+              <div class="tree-item">Room type card builder with amenity multi-select</div>
+              <div class="tree-item">Bulk room number generator (101–115 etc.)</div>
+              <div class="tree-item">Floor/room assignment table</div>
+              <div class="tree-item">Status board (grid + floor-map toggle)</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div><!-- /module-grid -->
+
+    <div class="del-box">
+      <div class="del-box-title">Month 1 Deliverables</div>
+      <div class="del-item">Working auth — owner can register, verify email, log in</div>
+      <div class="del-item">Multi-tenant data isolation confirmed with row-level security</div>
+      <div class="del-item">Single-brand and multi-brand modes both supported from signup</div>
+      <div class="del-item">Hotel can register full hierarchy: brand → branch → buildings → floors → rooms</div>
+      <div class="del-item">Room types created with base rates and amenities</div>
+      <div class="del-item">Rooms can be created in bulk and have their status updated</div>
+      <div class="del-item">Room status board renders live with WebSocket updates</div>
+    </div>
+
+    <div class="scale-note">↗ <strong>Scalability hook:</strong> Tenant isolation and the brand→branch hierarchy power Phase 1 (multi-property management) and Phase 14 (enterprise multi-tenant). The WebSocket room status channel becomes the real-time backbone for housekeeping and front desk in later phases.</div>
+  </div>
+
+  <!-- ═══════════ MONTH 2 ═══════════ -->
+  <div class="phase-divider"><span>Month 2</span></div>
+  <div class="phase-section" id="m2">
+    <div class="phase-header">
+      <div class="phase-num" style="background:var(--m2b);color:var(--m2)">M2</div>
+      <div class="phase-meta">
+        <div class="phase-title" style="color:var(--m2)">Reservations, Rate Engine & Rate Resolver</div>
+        <div class="phase-dates">
+          Weeks 5–8
+          <span class="pd-dur" style="border-color:var(--m2);color:var(--m2)">4 weeks</span>
+          <span class="new-badge">Rate Resolver NEW</span>
+        </div>
+      </div>
+    </div>
+    <div class="phase-desc">The booking lifecycle and pricing engine. The Rate Resolver is built as an isolated NestJS service from day one — never replicated in the frontend. Every screen that shows a price calls it. This single architectural decision prevents rate drift and makes all pricing auditable from the start.</div>
+
+    <div class="module-grid">
+
+      <!-- Rate Resolver -->
+      <div class="module-card" id="card-rr">
+        <div class="mc-header" onclick="toggle('card-rr')">
+          <div class="mc-icon" style="background:rgba(196,164,66,0.15)">▣</div>
+          <div class="mc-text">
+            <div class="mc-title">Rate Resolver Service <span class="new-badge">NEW</span></div>
+            <div class="mc-sub">Backend-only — frontend never calculates rates</div>
+          </div>
+          <div class="mc-tags"><span class="tag tag-be">BE</span><span class="tag tag-db">DB</span></div>
+          <span class="mc-chevron">▼</span>
+        </div>
+        <div class="mc-body">
+          <div class="tree">
+            <div class="tree-group-label">Architecture Rule</div>
+            <div class="tree-branch">
+              <div class="tree-item new-item">RateResolverService in NestJS — pure, stateless, injectable</div>
+              <div class="tree-item new-item">Rule priority order: manual override → corporate → promo → negotiated → seasonal → weekend → base</div>
+              <div class="tree-item new-item">Every calculation auto-logged to RateAuditLog table</div>
+              <div class="tree-item new-item">Response always includes ruleApplied field (type, planName, adjustmentApplied)</div>
+              <div class="tree-item new-item">Frontend RatePreview component: calls endpoint on mount, re-fetches on prop change, never caches locally</div>
+            </div>
+            <div class="tree-group-label">Endpoints</div>
+            <div class="tree-branch">
+              <div class="ep"><div class="ep-head"><span class="method POST">POST</span><span class="ep-path">/rate-resolver/calculate</span></div><div class="ep-desc">Returns nightlyRate, totalWithTax, ruleApplied, per-night breakdown. Called by: reservation create, walk-in, folio post, check-in, reg card gen, RMS comparison</div></div>
+              <div class="ep"><div class="ep-head"><span class="method GET">GET</span><span class="ep-path">/rate-resolver/audit?reservationId=</span></div><div class="ep-desc">Full rule-resolution trace per reservation for dispute handling</div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Availability Engine -->
+      <div class="module-card" id="card-avail">
+        <div class="mc-header" onclick="toggle('card-avail')">
+          <div class="mc-icon" style="background:var(--m2b)">◈</div>
+          <div class="mc-text">
+            <div class="mc-title">Availability Engine</div>
+            <div class="mc-sub">Date-range queries, overbooking protection</div>
+          </div>
+          <div class="mc-tags"><span class="tag tag-be">BE</span><span class="tag tag-db">DB</span></div>
+          <span class="mc-chevron">▼</span>
+        </div>
+        <div class="mc-body">
+          <div class="tree">
+            <div class="tree-branch">
+              <div class="tree-item">Date-range availability query (rooms free for N nights per type)</div>
+              <div class="tree-item">Inventory lock on reservation create (pessimistic locking)</div>
+              <div class="tree-item">Overbooking protection: hard block by default; overbooking thresholds handled by Overbooking module (Month 4)</div>
+              <div class="tree-item">Earliest available date query per room type</div>
+            </div>
+            <div class="tree-group-label">Endpoints</div>
+            <div class="tree-branch">
+              <div class="ep"><div class="ep-head"><span class="method GET">GET</span><span class="ep-path">/branches/:id/availability?from=&to=&roomTypeId=</span></div><div class="ep-desc">Available rooms + occupancy % per date range</div></div>
+              <div class="ep"><div class="ep-head"><span class="method GET">GET</span><span class="ep-path">/branches/:id/rooms/earliest-available?roomTypeId=</span></div><div class="ep-desc">Next available date for a given room type</div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Reservation Lifecycle -->
+      <div class="module-card" id="card-res">
+        <div class="mc-header" onclick="toggle('card-res')">
+          <div class="mc-icon" style="background:var(--m2b)">◆</div>
+          <div class="mc-text">
+            <div class="mc-title">Reservation Lifecycle</div>
+            <div class="mc-sub">Create / modify / cancel / waitlist / walk-in</div>
+          </div>
+          <div class="mc-tags"><span class="tag tag-be">BE</span><span class="tag tag-db">DB</span><span class="tag tag-fe">FE</span></div>
+          <span class="mc-chevron">▼</span>
+        </div>
+        <div class="mc-body">
+          <div class="tree">
+            <div class="tree-group-label">Schema</div>
+            <div class="tree-branch">
+              <div class="tree-item">Reservation (id, branchId, guestId, status, checkIn, checkOut, roomTypeId, roomId, ratePlanId, channel, adults, children, specialRequests)</div>
+              <div class="tree-item">Status enum: pending | confirmed | checked_in | checked_out | cancelled | no_show | waitlisted</div>
+              <div class="tree-item">GuestProfile (id, tenantId, name, email, phone, idDocUrl, nationality, preferences{}, loyaltyTier)</div>
+            </div>
+            <div class="tree-group-label">Endpoints</div>
+            <div class="tree-branch">
+              <div class="ep"><div class="ep-head"><span class="method POST">POST</span><span class="ep-path">/branches/:id/reservations</span></div><div class="ep-desc">Create reservation — calls RateResolver internally before saving</div></div>
+              <div class="ep"><div class="ep-head"><span class="method POST">POST</span><span class="ep-path">/branches/:id/reservations/walk-in</span></div><div class="ep-desc">Create + check-in in one atomic operation</div></div>
+              <div class="ep"><div class="ep-head"><span class="method PATCH">PATCH</span><span class="ep-path">/reservations/:id</span></div><div class="ep-desc">Modify dates, room type, rate — recalculates via RateResolver</div></div>
+              <div class="ep"><div class="ep-head"><span class="method POST">POST</span><span class="ep-path">/reservations/:id/cancel</span></div><div class="ep-desc">Cancel with policy enforcement + optional manager penalty waive</div></div>
+              <div class="ep"><div class="ep-head"><span class="method GET">GET</span><span class="ep-path">/branches/:id/waitlist</span></div><div class="ep-desc">All waitlisted reservations in priority order</div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Rate Plans -->
+      <div class="module-card" id="card-rates">
+        <div class="mc-header" onclick="toggle('card-rates')">
+          <div class="mc-icon" style="background:var(--m2b)">◎</div>
+          <div class="mc-text">
+            <div class="mc-title">Rate Plan Management</div>
+            <div class="mc-sub">Base, seasonal, weekend, corporate, promo</div>
+          </div>
+          <div class="mc-tags"><span class="tag tag-be">BE</span><span class="tag tag-db">DB</span><span class="tag tag-fe">FE</span></div>
+          <span class="mc-chevron">▼</span>
+        </div>
+        <div class="mc-body">
+          <div class="tree">
+            <div class="tree-group-label">Schema</div>
+            <div class="tree-branch">
+              <div class="tree-item">RatePlan (id, branchId, roomTypeId, type, amount, adjustmentType, validFrom, validTo, minLOS, promoCode, priority)</div>
+              <div class="tree-item">Type enum: base | seasonal | weekend | corporate | negotiated | promotional | override</div>
+              <div class="tree-item">Priority column: RateResolver uses this to determine winning rule</div>
+            </div>
+            <div class="tree-group-label">Endpoints</div>
+            <div class="tree-branch">
+              <div class="ep"><div class="ep-head"><span class="method POST">POST</span><span class="ep-path">/branches/:id/rate-plans</span></div><div class="ep-desc">Create rate plan — auto-registered with RateResolver</div></div>
+              <div class="ep"><div class="ep-head"><span class="method PATCH">PATCH</span><span class="ep-path">/rate-plans/:id</span></div><div class="ep-desc">Edit rate plan amounts, dates, or scope</div></div>
+              <div class="ep"><div class="ep-head"><span class="method GET">GET</span><span class="ep-path">/branches/:id/rate-plans</span></div><div class="ep-desc">All rate plans with active/inactive status</div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <div class="del-box">
+      <div class="del-box-title">Month 2 Deliverables</div>
+      <div class="del-item">Receptionist can create, modify, and cancel reservations</div>
+      <div class="del-item">Walk-in booking creates and checks in atomically</div>
+      <div class="del-item">Overbooking is hard-blocked at the inventory lock layer</div>
+      <div class="del-item">Waitlist visible, earliest available date queryable</div>
+      <div class="del-item">Pricing auto-resolves through the rule hierarchy (base → seasonal → weekend → override)</div>
+      <div class="del-item new-del">Rate Resolver service built and all screens use it — frontend never calculates a price</div>
+      <div class="del-item new-del">Every rate calculation stored in RateAuditLog with ruleApplied field</div>
+    </div>
+
+    <div class="scale-note">↗ <strong>Scalability hook:</strong> The Rate Resolver and RatePlan schema are the foundation for Phase 2 (dynamic pricing, OTA packages), Phase 8 (RMS yield management), and Phase 9 (group negotiated pricing). The audit log enables dispute resolution at any future scale.</div>
+  </div>
+
+  <!-- ═══════════ MONTH 3 ═══════════ -->
+  <div class="phase-divider"><span>Month 3</span></div>
+  <div class="phase-section" id="m3">
+    <div class="phase-header">
+      <div class="phase-num" style="background:var(--m3b);color:var(--m3)">M3</div>
+      <div class="phase-meta">
+        <div class="phase-title" style="color:var(--m3)">Front Desk Operations: Check-In / Out, Registration Card & No-Show</div>
+        <div class="phase-dates">
+          Weeks 9–12
+          <span class="pd-dur" style="border-color:var(--m3);color:var(--m3)">4 weeks</span>
+          <span class="new-badge">Reg Card + No-Show NEW</span>
+        </div>
+      </div>
+    </div>
+    <div class="phase-desc">Wires the reservation into live hotel operations. The guest registration card is built here — it's a legal document, not an afterthought. The no-show handling flow is implemented as a first-class operational screen, preventing reservations from sitting in limbo.</div>
+
+    <div class="module-grid">
+
+      <!-- Check-In/Out Flow -->
+      <div class="module-card" id="card-checkin">
+        <div class="mc-header" onclick="toggle('card-checkin')">
+          <div class="mc-icon" style="background:var(--m3b)">◉</div>
+          <div class="mc-text">
+            <div class="mc-title">Check-In / Check-Out Flow</div>
+            <div class="mc-sub">ID capture, room assignment, folio activation</div>
+          </div>
+          <div class="mc-tags"><span class="tag tag-be">BE</span><span class="tag tag-fe">FE</span></div>
+          <span class="mc-chevron">▼</span>
+        </div>
+        <div class="mc-body">
+          <div class="tree">
+            <div class="tree-group-label">Check-In</div>
+            <div class="tree-branch">
+              <div class="tree-item">Validate reservation status + ID document capture (AES-256 encrypted storage)</div>
+              <div class="tree-item">Auto-assign room (clean → inspected → guest preference → loyalty → prior room)</div>
+              <div class="tree-item">Manual room override with reason (audit-logged)</div>
+              <div class="tree-item">Room upgrade / category switch (folio + reservation updated)</div>
+              <div class="tree-item">Split-stay handler (guest moves rooms mid-booking)</div>
+              <div class="tree-item">Early check-in: policy check + surcharge via Rate Resolver</div>
+              <div class="tree-item">Activate folio on successful check-in</div>
+            </div>
+            <div class="tree-group-label">Check-Out</div>
+            <div class="tree-branch">
+              <div class="tree-item">Late check-out: policy check + hourly surcharge</div>
+              <div class="tree-item">Folio review, final payment, close folio</div>
+              <div class="tree-item">Room auto-marked dirty → triggers housekeeping task</div>
+              <div class="tree-item">Guest log export for security compliance</div>
+            </div>
+            <div class="tree-group-label">Endpoints</div>
+            <div class="tree-branch">
+              <div class="ep"><div class="ep-head"><span class="method POST">POST</span><span class="ep-path">/reservations/:id/check-in</span></div><div class="ep-desc">roomId, idDocUrl, earlyCheckIn bool → activates folio</div></div>
+              <div class="ep"><div class="ep-head"><span class="method POST">POST</span><span class="ep-path">/reservations/:id/check-out</span></div><div class="ep-desc">finalPayment, lateCheckOut bool → closes folio, marks room dirty</div></div>
+              <div class="ep"><div class="ep-head"><span class="method PATCH">PATCH</span><span class="ep-path">/reservations/:id/assign-room</span></div><div class="ep-desc">Manual room override with reason</div></div>
+              <div class="ep"><div class="ep-head"><span class="method PATCH">PATCH</span><span class="ep-path">/reservations/:id/upgrade-room</span></div><div class="ep-desc">Room upgrade — RateResolver recalculates, folio adjusted</div></div>
+              <div class="ep"><div class="ep-head"><span class="method GET">GET</span><span class="ep-path">/branches/:id/arrivals?date=today</span></div><div class="ep-desc">Today's arrivals with room readiness + VIP flags</div></div>
+              <div class="ep"><div class="ep-head"><span class="method GET">GET</span><span class="ep-path">/branches/:id/departures?date=today</span></div><div class="ep-desc">Today's departures with folio balance status</div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Guest Registration Card -->
+      <div class="module-card" id="card-regcard">
+        <div class="mc-header" onclick="toggle('card-regcard')">
+          <div class="mc-icon" style="background:rgba(196,106,66,0.15)">✦</div>
+          <div class="mc-text">
+            <div class="mc-title">Guest Registration Card <span class="new-badge">NEW</span></div>
+            <div class="mc-sub">Legal check-in document with signature</div>
+          </div>
+          <div class="mc-tags"><span class="tag tag-be">BE</span><span class="tag tag-db">DB</span><span class="tag tag-fe">FE</span></div>
+          <span class="mc-chevron">▼</span>
+        </div>
+        <div class="mc-body">
+          <div class="tree">
+            <div class="tree-group-label">Schema</div>
+            <div class="tree-branch">
+              <div class="tree-item new-item">RegistrationCard (id, reservationId, guestId, fields{}, signatureData, signedAt, witnessedBy, documentUrl)</div>
+              <div class="tree-item new-item">RegCardTemplate per branch (logoUrl, houseRules, requiredFields, showRate, language)</div>
+            </div>
+            <div class="tree-group-label">Behavior</div>
+            <div class="tree-branch">
+              <div class="tree-item new-item">Auto-generated when check-in is triggered</div>
+              <div class="tree-item new-item">Pre-filled: guest name, ID, nationality, address, room, rate from RateResolver, dates, house rules</div>
+              <div class="tree-item new-item">Digital signature pad (touch/mouse/stylus)</div>
+              <div class="tree-item new-item">Signed PDF generated server-side with timestamp + agent witness</div>
+              <div class="tree-item new-item">Stored encrypted, retrievable per guest or per reservation</div>
+              <div class="tree-item new-item">Bulk export for regulatory compliance</div>
+            </div>
+            <div class="tree-group-label">Endpoints</div>
+            <div class="tree-branch">
+              <div class="ep"><div class="ep-head"><span class="method POST">POST</span><span class="ep-path">/reservations/:id/registration-card/generate</span></div><div class="ep-desc">Generate pre-filled card, returns cardId + preview URL</div></div>
+              <div class="ep"><div class="ep-head"><span class="method POST">POST</span><span class="ep-path">/registration-cards/:id/sign</span></div><div class="ep-desc">Capture signature data + witness userId</div></div>
+              <div class="ep"><div class="ep-head"><span class="method GET">GET</span><span class="ep-path">/registration-cards/:id/download</span></div><div class="ep-desc">Download signed PDF</div></div>
+              <div class="ep"><div class="ep-head"><span class="method PATCH">PATCH</span><span class="ep-path">/branches/:id/registration-card-template</span></div><div class="ep-desc">Update branch card template (logo, house rules, fields, language)</div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- No-Show Handling -->
+      <div class="module-card" id="card-noshow">
+        <div class="mc-header" onclick="toggle('card-noshow')">
+          <div class="mc-icon" style="background:rgba(196,106,66,0.15)">⊗</div>
+          <div class="mc-text">
+            <div class="mc-title">No-Show Handling <span class="new-badge">NEW</span></div>
+            <div class="mc-sub">Pending dashboard, penalty flow, reinstatement</div>
+          </div>
+          <div class="mc-tags"><span class="tag tag-be">BE</span><span class="tag tag-db">DB</span><span class="tag tag-fe">FE</span></div>
+          <span class="mc-chevron">▼</span>
+        </div>
+        <div class="mc-body">
+          <div class="tree">
+            <div class="tree-group-label">Schema</div>
+            <div class="tree-branch">
+              <div class="tree-item new-item">NoShowPolicy per branch (cutoffTime, defaultPenalty, autoMark, notifyBeforeMinutes)</div>
+              <div class="tree-item new-item">NoShowRecord (id, reservationId, penaltyType, penaltyAmount, waivedBy?, refundAmount)</div>
+            </div>
+            <div class="tree-group-label">Operational Flow</div>
+            <div class="tree-branch">
+              <div class="tree-item new-item">Dashboard: reservations past cutoff with no check-in</div>
+              <div class="tree-item new-item">Mark as no-show: atomic — penalty posted, room released, folio closed</div>
+              <div class="tree-item new-item">Manager can waive penalty (RBAC-gated)</div>
+              <div class="tree-item new-item">Late-arrival reinstatement with revised dates + optional penalty reversal</div>
+              <div class="tree-item new-item">Optional: auto-mark after cutoff (configurable)</div>
+            </div>
+            <div class="tree-group-label">Endpoints</div>
+            <div class="tree-branch">
+              <div class="ep"><div class="ep-head"><span class="method GET">GET</span><span class="ep-path">/branches/:id/no-shows/pending</span></div><div class="ep-desc">Reservations past cutoff with no check-in</div></div>
+              <div class="ep"><div class="ep-head"><span class="method POST">POST</span><span class="ep-path">/reservations/:id/no-show</span></div><div class="ep-desc">Atomic: mark no-show + apply penalty + release room</div></div>
+              <div class="ep"><div class="ep-head"><span class="method POST">POST</span><span class="ep-path">/reservations/:id/reinstate</span></div><div class="ep-desc">Reverse no-show, set new dates, optional penalty reversal</div></div>
+              <div class="ep"><div class="ep-head"><span class="method PATCH">PATCH</span><span class="ep-path">/branches/:id/policies/no-show</span></div><div class="ep-desc">Configure cutoff time, penalty type, auto-mark toggle</div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <div class="del-box">
+      <div class="del-box-title">Month 3 Deliverables</div>
+      <div class="del-item">Receptionist can check in — auto-assigns room, activates folio</div>
+      <div class="del-item">Manual room override and room upgrades reflected on folio + reservation</div>
+      <div class="del-item">Early/late charge policies enforced via Rate Resolver</div>
+      <div class="del-item">ID documents stored encrypted; guest log exportable</div>
+      <div class="del-item">Check-out closes folio, releases room, marks dirty for housekeeping</div>
+      <div class="del-item new-del">Guest registration card auto-generated at check-in, signed digitally, stored as encrypted PDF</div>
+      <div class="del-item new-del">No-show dashboard operational; mark-as-no-show atomically applies penalty + releases room</div>
+      <div class="del-item new-del">Late arrival reinstatement available with manager approval</div>
+    </div>
+
+    <div class="scale-note">↗ <strong>Scalability hook:</strong> Check-in/out connects Phase 3 (express check-in, pre-check-in, split stays) and Phase 15 (mobile check-in, digital keys). Reg card template system scales to multi-language (Phase 14 localization). No-show flow feeds into Phase 10 (no-show analytics, revenue impact reports).</div>
+  </div>
+
+  <!-- ═══════════ MONTH 4 ═══════════ -->
+  <div class="phase-divider"><span>Month 4</span></div>
+  <div class="phase-section" id="m4">
+    <div class="phase-header">
+      <div class="phase-num" style="background:var(--m4b);color:var(--m4)">M4</div>
+      <div class="phase-meta">
+        <div class="phase-title" style="color:var(--m4)">Billing, Payments, Folio Transfer & Housekeeping</div>
+        <div class="phase-dates">
+          Weeks 13–16
+          <span class="pd-dur" style="border-color:var(--m4);color:var(--m4)">4 weeks</span>
+          <span class="new-badge">Folio Transfer + Overbooking NEW</span>
+        </div>
+      </div>
+    </div>
+    <div class="phase-desc">The financial engine and operational backbone. Folio transfer is built here as a first-class feature — mid-stay charge routing is one of the most common requests at any hotel front desk. The overbooking management module (threshold config + walk flow) is also scaffolded now while inventory logic is fresh.</div>
+
+    <div class="module-grid">
+
+      <!-- Folio & Billing -->
+      <div class="module-card" id="card-folio">
+        <div class="mc-header" onclick="toggle('card-folio')">
+          <div class="mc-icon" style="background:var(--m4b)">◆</div>
+          <div class="mc-text">
+            <div class="mc-title">Folio & Billing Engine</div>
+            <div class="mc-sub">Charges, taxes, payments, invoices</div>
+          </div>
+          <div class="mc-tags"><span class="tag tag-be">BE</span><span class="tag tag-db">DB</span><span class="tag tag-fe">FE</span></div>
+          <span class="mc-chevron">▼</span>
+        </div>
+        <div class="mc-body">
+          <div class="tree">
+            <div class="tree-group-label">Schema</div>
+            <div class="tree-branch">
+              <div class="tree-item">Folio (id, reservationId, guestId, label, status: open|closed, balance)</div>
+              <div class="tree-item">LineItem (id, folioId, description, amount, chargeType, taxRuleIds[], postedAt, postedBy)</div>
+              <div class="tree-item">TaxRule (id, branchId, name, rate, type: percentage|fixed, appliesToRooms, appliesToAll)</div>
+              <div class="tree-item">Payment (id, folioId, method, amount, reference, recordedAt, recordedBy)</div>
+            </div>
+            <div class="tree-group-label">Endpoints</div>
+            <div class="tree-branch">
+              <div class="ep"><div class="ep-head"><span class="method POST">POST</span><span class="ep-path">/reservations/:id/folios</span></div><div class="ep-desc">Create secondary folio (personal / business / corporate)</div></div>
+              <div class="ep"><div class="ep-head"><span class="method POST">POST</span><span class="ep-path">/folios/:id/charges</span></div><div class="ep-desc">Post charge with automatic tax application</div></div>
+              <div class="ep"><div class="ep-head"><span class="method POST">POST</span><span class="ep-path">/folios/:id/payments</span></div><div class="ep-desc">Record payment (cash, card, bank transfer, voucher)</div></div>
+              <div class="ep"><div class="ep-head"><span class="method POST">POST</span><span class="ep-path">/folios/:id/refunds</span></div><div class="ep-desc">Refund charge — manager approval gate above threshold</div></div>
+              <div class="ep"><div class="ep-head"><span class="method GET">GET</span><span class="ep-path">/folios/:id</span></div><div class="ep-desc">Full folio with line items, tax breakdown, running balance</div></div>
+              <div class="ep"><div class="ep-head"><span class="method POST">POST</span><span class="ep-path">/branches/:id/night-audit</span></div><div class="ep-desc">Date rollover, auto-post room charges, generate audit report</div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Folio Transfer -->
+      <div class="module-card" id="card-ftransfer">
+        <div class="mc-header" onclick="toggle('card-ftransfer')">
+          <div class="mc-icon" style="background:rgba(154,111,196,0.15)">⇄</div>
+          <div class="mc-text">
+            <div class="mc-title">Folio Transfer <span class="new-badge">NEW</span></div>
+            <div class="mc-sub">Move charges between folios mid-stay</div>
+          </div>
+          <div class="mc-tags"><span class="tag tag-be">BE</span><span class="tag tag-db">DB</span><span class="tag tag-fe">FE</span></div>
+          <span class="mc-chevron">▼</span>
+        </div>
+        <div class="mc-body">
+          <div class="tree">
+            <div class="tree-group-label">Schema</div>
+            <div class="tree-branch">
+              <div class="tree-item new-item">FolioTransfer (id, sourceFolioId, targetFolioId, chargeIds[], amount, reason, approvedBy?, createdAt)</div>
+              <div class="tree-item new-item">Distinct from split billing — handles post-posting corrections</div>
+            </div>
+            <div class="tree-group-label">Use Cases</div>
+            <div class="tree-branch">
+              <div class="tree-item new-item">Room-to-room: guest A pays for guest B's room service</div>
+              <div class="tree-item new-item">Guest-to-corporate: route specific charges to master account</div>
+              <div class="tree-item new-item">Personal vs business split on a single reservation</div>
+              <div class="tree-item new-item">Reverse transfer (manager, within 24h window)</div>
+            </div>
+            <div class="tree-group-label">Endpoints</div>
+            <div class="tree-branch">
+              <div class="ep"><div class="ep-head"><span class="method POST">POST</span><span class="ep-path">/folios/:id/transfer</span></div><div class="ep-desc">Move selected chargeIds to targetFolioId with reason + optional manager approval</div></div>
+              <div class="ep"><div class="ep-head"><span class="method GET">GET</span><span class="ep-path">/folios/:id/transfer-history</span></div><div class="ep-desc">Full audit trail of all transfer events on this folio</div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Overbooking Management -->
+      <div class="module-card" id="card-ob">
+        <div class="mc-header" onclick="toggle('card-ob')">
+          <div class="mc-icon" style="background:rgba(154,111,196,0.15)">⊕</div>
+          <div class="mc-text">
+            <div class="mc-title">Overbooking Management <span class="new-badge">NEW</span></div>
+            <div class="mc-sub">Thresholds, walk flow, exposure dashboard</div>
+          </div>
+          <div class="mc-tags"><span class="tag tag-be">BE</span><span class="tag tag-db">DB</span><span class="tag tag-fe">FE</span></div>
+          <span class="mc-chevron">▼</span>
+        </div>
+        <div class="mc-body">
+          <div class="tree">
+            <div class="tree-group-label">Schema</div>
+            <div class="tree-branch">
+              <div class="tree-item new-item">OverbookingConfig (branchId, globalEnabled, rules[{roomTypeId, maxOverbookPct, validFrom, validTo, alertAtPct}])</div>
+              <div class="tree-item new-item">WalkRecord (id, reservationId, relocationProperty, transportCost, compensation, approvedBy, createdAt)</div>
+            </div>
+            <div class="tree-group-label">Behavior</div>
+            <div class="tree-branch">
+              <div class="tree-item new-item">By default overbooking is off (hard block) — manager must enable and set %</div>
+              <div class="tree-item new-item">Availability engine checks threshold before allowing overbooking acceptance</div>
+              <div class="tree-item new-item">Walk flow: records relocation, compensation, triggers auto-cancel + refund</div>
+              <div class="tree-item new-item">Walk management requires manager RBAC approval</div>
+            </div>
+            <div class="tree-group-label">Endpoints</div>
+            <div class="tree-branch">
+              <div class="ep"><div class="ep-head"><span class="method PATCH">PATCH</span><span class="ep-path">/branches/:id/overbooking-config</span></div><div class="ep-desc">Set per-room-type overbook %, alert threshold, date range</div></div>
+              <div class="ep"><div class="ep-head"><span class="method POST">POST</span><span class="ep-path">/reservations/:id/walk</span></div><div class="ep-desc">Record walk — relocation, compensation, auto-cancel + refund</div></div>
+              <div class="ep"><div class="ep-head"><span class="method GET">GET</span><span class="ep-path">/branches/:id/overbooking/exposure</span></div><div class="ep-desc">Heatmap data: confirmed vs capacity vs threshold per date</div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Housekeeping -->
+      <div class="module-card" id="card-hk">
+        <div class="mc-header" onclick="toggle('card-hk')">
+          <div class="mc-icon" style="background:var(--m4b)">⬡</div>
+          <div class="mc-text">
+            <div class="mc-title">Housekeeping Module</div>
+            <div class="mc-sub">Tasks, assignment, inspection, room blocking</div>
+          </div>
+          <div class="mc-tags"><span class="tag tag-be">BE</span><span class="tag tag-db">DB</span><span class="tag tag-fe">FE</span></div>
+          <span class="mc-chevron">▼</span>
+        </div>
+        <div class="mc-body">
+          <div class="tree">
+            <div class="tree-group-label">Schema</div>
+            <div class="tree-branch">
+              <div class="tree-item">HousekeepingTask (id, roomId, branchId, assigneeId, date, status: pending|in_progress|done, priority, notes)</div>
+              <div class="tree-item">Auto-create dirty task on check-out trigger</div>
+            </div>
+            <div class="tree-group-label">Endpoints</div>
+            <div class="tree-branch">
+              <div class="ep"><div class="ep-head"><span class="method GET">GET</span><span class="ep-path">/housekeeping/tasks?assigneeId=me&date=today</span></div><div class="ep-desc">My tasks for today (housekeeper view)</div></div>
+              <div class="ep"><div class="ep-head"><span class="method PATCH">PATCH</span><span class="ep-path">/rooms/:id/status</span></div><div class="ep-desc">Update room status: dirty→cleaning→clean→inspected</div></div>
+              <div class="ep"><div class="ep-head"><span class="method POST">POST</span><span class="ep-path">/housekeeping/assignments</span></div><div class="ep-desc">Supervisor assigns rooms to housekeeping staff</div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <div class="del-box">
+      <div class="del-box-title">Month 4 Deliverables</div>
+      <div class="del-item">Charges post to folio in real-time with automatic tax application</div>
+      <div class="del-item">Payments recorded (cash, card, bank transfer, voucher)</div>
+      <div class="del-item">Partial payments and balance tracking working</div>
+      <div class="del-item">Invoice/receipt downloadable as PDF</div>
+      <div class="del-item">Night audit triggers date rollover + auto room charge posting</div>
+      <div class="del-item">Room marked dirty on check-out, housekeeping task auto-created</div>
+      <div class="del-item">Housekeeping staff can update room status; supervisor can inspect and assign</div>
+      <div class="del-item new-del">Folio transfer: move charges between folios mid-stay with full audit trail</div>
+      <div class="del-item new-del">Secondary folios creatable per reservation (personal/business/corporate)</div>
+      <div class="del-item new-del">Overbooking config: revenue manager can set thresholds per room type</div>
+      <div class="del-item new-del">Walk management flow: manager records relocation + compensation, triggers auto-cancel + refund</div>
+    </div>
+
+    <div class="scale-note">↗ <strong>Scalability hook:</strong> Folio engine expands into Phase 6 (split billing, corporate master accounts, multi-currency, PCI card processing). Overbooking thresholds feed into Phase 8 (RMS yield management). Housekeeping module becomes Phase 5 (inspection workflows, linen tracking, preventive maintenance).</div>
+  </div>
+
+  <!-- ═══════════ MONTH 5 ═══════════ -->
+  <div class="phase-divider"><span>Month 5</span></div>
+  <div class="phase-section" id="m5">
+    <div class="phase-header">
+      <div class="phase-num" style="background:var(--m5b);color:var(--m5)">M5</div>
+      <div class="phase-meta">
+        <div class="phase-title" style="color:var(--m5)">Reports, Users, Shift Management & Guest Comms Log</div>
+        <div class="phase-dates">
+          Weeks 17–20
+          <span class="pd-dur" style="border-color:var(--m5);color:var(--m5)">4 weeks</span>
+          <span class="new-badge">Shift Mgmt + Comms Log NEW</span>
+        </div>
+      </div>
+    </div>
+    <div class="phase-desc">Built on top of real accumulated data. Reporting is delayed to Month 5 deliberately — running reports against dummy data gives false confidence. Shift management and the guest communications log are added here as they depend on the billing and reservation modules being stable.</div>
+
+    <div class="module-grid">
+
+      <!-- Reporting -->
+      <div class="module-card" id="card-reports">
+        <div class="mc-header" onclick="toggle('card-reports')">
+          <div class="mc-icon" style="background:var(--m5b)">⟡</div>
+          <div class="mc-text">
+            <div class="mc-title">Operational Reports</div>
+            <div class="mc-sub">Occupancy, ADR, RevPAR, revenue, outstanding balances</div>
+          </div>
+          <div class="mc-tags"><span class="tag tag-be">BE</span><span class="tag tag-db">DB</span><span class="tag tag-fe">FE</span></div>
+          <span class="mc-chevron">▼</span>
+        </div>
+        <div class="mc-body">
+          <div class="tree">
+            <div class="tree-group-label">Report Queries</div>
+            <div class="tree-branch">
+              <div class="tree-item">Materialized views for occupancy, revenue, arrivals (daily refresh)</div>
+              <div class="tree-item">All queries parameterized by date range + branchId (multi-branch ready)</div>
+            </div>
+            <div class="tree-group-label">Endpoints</div>
+            <div class="tree-branch">
+              <div class="ep"><div class="ep-head"><span class="method GET">GET</span><span class="ep-path">/reports/occupancy?branchId=&from=&to=&groupBy=</span></div><div class="ep-desc">Occupancy % by day/week/month with room type breakdown</div></div>
+              <div class="ep"><div class="ep-head"><span class="method GET">GET</span><span class="ep-path">/reports/adr?branchId=&from=&to=</span></div><div class="ep-desc">Average Daily Rate with segment breakdown</div></div>
+              <div class="ep"><div class="ep-head"><span class="method GET">GET</span><span class="ep-path">/reports/revpar?branchId=&from=&to=</span></div><div class="ep-desc">Revenue Per Available Room</div></div>
+              <div class="ep"><div class="ep-head"><span class="method GET">GET</span><span class="ep-path">/reports/revenue?branchId=&from=&to=&groupBy=dept</span></div><div class="ep-desc">Revenue by department + payment method distribution</div></div>
+              <div class="ep"><div class="ep-head"><span class="method GET">GET</span><span class="ep-path">/reports/arrivals-departures?branchId=&date=</span></div><div class="ep-desc">Day view: arrivals, departures, in-house count</div></div>
+              <div class="ep"><div class="ep-head"><span class="method GET">GET</span><span class="ep-path">/reports/outstanding-balances?branchId=</span></div><div class="ep-desc">Open folios with balance due</div></div>
+              <div class="ep"><div class="ep-head"><span class="method POST">POST</span><span class="ep-path">/reports/export</span></div><div class="ep-desc">CSV or PDF export for any report type</div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- RBAC -->
+      <div class="module-card" id="card-rbac">
+        <div class="mc-header" onclick="toggle('card-rbac')">
+          <div class="mc-icon" style="background:var(--m5b)">◈</div>
+          <div class="mc-text">
+            <div class="mc-title">Users & Roles (RBAC)</div>
+            <div class="mc-sub">Roles, permissions, audit logs</div>
+          </div>
+          <div class="mc-tags"><span class="tag tag-be">BE</span><span class="tag tag-db">DB</span><span class="tag tag-fe">FE</span></div>
+          <span class="mc-chevron">▼</span>
+        </div>
+        <div class="mc-body">
+          <div class="tree">
+            <div class="tree-group-label">Roles (MVP)</div>
+            <div class="tree-branch">
+              <div class="tree-item">owner — full access, billing, all branches</div>
+              <div class="tree-item">admin — property config, staff management, no billing override</div>
+              <div class="tree-item">manager — rate override, refunds, night audit, reports</div>
+              <div class="tree-item">front_desk — check-in/out, reservations, folios, walk-ins</div>
+              <div class="tree-item">housekeeper — room status updates only</div>
+              <div class="tree-item">accountant — folio read, reports, no rate edit</div>
+            </div>
+            <div class="tree-group-label">Audit Log</div>
+            <div class="tree-branch">
+              <div class="tree-item">AuditLog (id, tenantId, userId, action, entityType, entityId, before{}, after{}, ip, timestamp)</div>
+              <div class="tree-item">Written via NestJS interceptor on all state-changing actions</div>
+            </div>
+            <div class="tree-group-label">Endpoints</div>
+            <div class="tree-branch">
+              <div class="ep"><div class="ep-head"><span class="method GET">GET</span><span class="ep-path">/auth/roles</span></div><div class="ep-desc">All roles + permission sets for this tenant</div></div>
+              <div class="ep"><div class="ep-head"><span class="method PUT">PUT</span><span class="ep-path">/auth/roles/:id/permissions</span></div><div class="ep-desc">Update permission matrix for a role</div></div>
+              <div class="ep"><div class="ep-head"><span class="method GET">GET</span><span class="ep-path">/audit-logs?branchId=&userId=&from=&to=</span></div><div class="ep-desc">Searchable audit log with before/after diff</div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Shift Management -->
+      <div class="module-card" id="card-shift">
+        <div class="mc-header" onclick="toggle('card-shift')">
+          <div class="mc-icon" style="background:rgba(196,164,66,0.15)">⟡</div>
+          <div class="mc-text">
+            <div class="mc-title">Shift Management <span class="new-badge">NEW</span></div>
+            <div class="mc-sub">Open/close, cash reconciliation, handover</div>
+          </div>
+          <div class="mc-tags"><span class="tag tag-be">BE</span><span class="tag tag-db">DB</span><span class="tag tag-fe">FE</span></div>
+          <span class="mc-chevron">▼</span>
+        </div>
+        <div class="mc-body">
+          <div class="tree">
+            <div class="tree-group-label">Schema</div>
+            <div class="tree-branch">
+              <div class="tree-item new-item">Shift (id, branchId, agentId, type: morning|evening|night, openedAt, closedAt, openingFloat, closingCashCounted, systemCashTotal, variance, handoverNotes)</div>
+              <div class="tree-item new-item">ShiftIssue (id, shiftId, description, priority, status: open|resolved|carried_over, resolution)</div>
+            </div>
+            <div class="tree-group-label">Flow</div>
+            <div class="tree-branch">
+              <div class="tree-item new-item">Agent opens shift: declares opening float with denomination breakdown</div>
+              <div class="tree-item new-item">During shift: all cash transactions linked to shiftId</div>
+              <div class="tree-item new-item">Close shift: count actual cash, compare with system total, explain variance if above threshold</div>
+              <div class="tree-item new-item">Handover notes + unresolved issues passed to next shift</div>
+              <div class="tree-item new-item">Night audit can only run when a night shift is open (optional policy)</div>
+            </div>
+            <div class="tree-group-label">Endpoints</div>
+            <div class="tree-branch">
+              <div class="ep"><div class="ep-head"><span class="method POST">POST</span><span class="ep-path">/branches/:id/shifts/open</span></div><div class="ep-desc">Open shift with float + denomination breakdown</div></div>
+              <div class="ep"><div class="ep-head"><span class="method POST">POST</span><span class="ep-path">/shifts/:id/close</span></div><div class="ep-desc">Close shift: actual cash, variance, handover notes, issues</div></div>
+              <div class="ep"><div class="ep-head"><span class="method GET">GET</span><span class="ep-path">/shifts/:id/summary</span></div><div class="ep-desc">System cash total for current shift (for reconciliation)</div></div>
+              <div class="ep"><div class="ep-head"><span class="method GET">GET</span><span class="ep-path">/branches/:id/shifts?from=&to=</span></div><div class="ep-desc">Shift history with variance per shift (manager view)</div></div>
+              <div class="ep"><div class="ep-head"><span class="method PATCH">PATCH</span><span class="ep-path">/shift-issues/:id</span></div><div class="ep-desc">Resolve or carry over an issue to next shift</div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Comms Log -->
+      <div class="module-card" id="card-comms">
+        <div class="mc-header" onclick="toggle('card-comms')">
+          <div class="mc-icon" style="background:rgba(196,164,66,0.15)">◻</div>
+          <div class="mc-text">
+            <div class="mc-title">Guest Communications Log <span class="new-badge">NEW</span></div>
+            <div class="mc-sub">All messages sent, per reservation + guest profile</div>
+          </div>
+          <div class="mc-tags"><span class="tag tag-be">BE</span><span class="tag tag-db">DB</span><span class="tag tag-fe">FE</span></div>
+          <span class="mc-chevron">▼</span>
+        </div>
+        <div class="mc-body">
+          <div class="tree">
+            <div class="tree-group-label">Schema</div>
+            <div class="tree-branch">
+              <div class="tree-item new-item">CommunicationLog (id, reservationId, guestId, channel, subject, body, status: sent|delivered|failed|opened, trigger: automated|manual, sentBy?, sentAt)</div>
+              <div class="tree-item new-item">Auto-logged triggers: booking confirmation, pre-arrival, check-in receipt, invoice, post-stay survey, no-show notice, cancellation confirmation</div>
+            </div>
+            <div class="tree-group-label">Endpoints</div>
+            <div class="tree-branch">
+              <div class="ep"><div class="ep-head"><span class="method GET">GET</span><span class="ep-path">/reservations/:id/communications</span></div><div class="ep-desc">All messages for this reservation, chronological</div></div>
+              <div class="ep"><div class="ep-head"><span class="method GET">GET</span><span class="ep-path">/guests/:id/communications?from=&to=</span></div><div class="ep-desc">Full comms history for this guest across all stays</div></div>
+              <div class="ep"><div class="ep-head"><span class="method POST">POST</span><span class="ep-path">/reservations/:id/communications/send</span></div><div class="ep-desc">Manual one-off message (email or SMS) — auto-logged</div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <div class="del-box">
+      <div class="del-box-title">Month 5 Deliverables</div>
+      <div class="del-item">Occupancy, ADR, RevPAR, revenue, arrivals/departures, outstanding balances all visible</div>
+      <div class="del-item">CSV and PDF export working for all reports</div>
+      <div class="del-item">All 6 roles enforced via RBAC guards on every endpoint</div>
+      <div class="del-item">Every state-changing action logged with before/after + agent + timestamp</div>
+      <div class="del-item new-del">Front desk agents can open and close shifts with cash denomination counting</div>
+      <div class="del-item new-del">Variance reconciliation: system total vs actual counted cash</div>
+      <div class="del-item new-del">Shift handover notes and unresolved issues carry to next shift</div>
+      <div class="del-item new-del">Every automated and manual message logged per reservation and guest profile</div>
+      <div class="del-item new-del">Comms log surfaces in both reservation panel and guest profile for dispute resolution</div>
+    </div>
+
+    <div class="scale-note">↗ <strong>Scalability hook:</strong> Report query layer (materialized views) is the foundation for Phase 10 (advanced analytics, BI tool integration, KPI dashboards). RBAC becomes Phase 12 (fine-grained permissions, MFA, GDPR compliance, PCI-DSS). Comms log becomes the delivery backbone for Phase 11 (email/SMS/push campaign engine). Shift management feeds into Phase 6 (end-of-day reconciliation, cashier float management).</div>
+  </div>
+
+  <!-- ═══════════ MONTH 6 ═══════════ -->
+  <div class="phase-divider"><span>Month 6</span></div>
+  <div class="phase-section" id="m6">
+    <div class="phase-header">
+      <div class="phase-num" style="background:var(--m6b);color:var(--m6)">M6</div>
+      <div class="phase-meta">
+        <div class="phase-title" style="color:var(--m6)">Polish, SaaS Hardening & Production Readiness</div>
+        <div class="phase-dates">
+          Weeks 21–24
+          <span class="pd-dur" style="border-color:var(--m6);color:var(--m6)">4 weeks</span>
+        </div>
+      </div>
+    </div>
+    <div class="phase-desc">No new features. This month is entirely about making what's built reliable enough for a paying hotel to use every day. Automated backups, error monitoring, uptime alerts, comprehensive tests, and a self-service onboarding flow that works without a developer in the room.</div>
+
+    <div class="module-grid">
+
+      <!-- SaaS Reliability -->
+      <div class="module-card" id="card-saas">
+        <div class="mc-header" onclick="toggle('card-saas')">
+          <div class="mc-icon" style="background:var(--m6b)">⊕</div>
+          <div class="mc-text">
+            <div class="mc-title">SaaS Reliability & Backups</div>
+            <div class="mc-sub">Backups, monitoring, error tracking, uptime</div>
+          </div>
+          <div class="mc-tags"><span class="tag tag-be">BE</span></div>
+          <span class="mc-chevron">▼</span>
+        </div>
+        <div class="mc-body">
+          <div class="tree">
+            <div class="tree-branch">
+              <div class="tree-item">Scheduled PostgreSQL pg_dump per tenant (daily, retention: 30 days rolling)</div>
+              <div class="tree-item">Backup storage: S3 or equivalent with encryption at rest</div>
+              <div class="tree-item">Backup restore test procedure (documented + run monthly)</div>
+              <div class="tree-item">Sentry integration (frontend + backend — separate DSNs)</div>
+              <div class="tree-item">GET /health endpoint (DB ping, Redis ping, queue depth)</div>
+              <div class="tree-item">Uptime monitoring (UptimeRobot / Better Uptime) with on-call alert</div>
+              <div class="tree-item">Rate limiting on all public endpoints (NestJS throttler)</div>
+              <div class="tree-item">Helmet.js + strict CORS config on NestJS</div>
+              <div class="tree-item">Input validation (class-validator / Zod on every DTO)</div>
+              <div class="tree-item">Slow query identification + index optimization pass</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Test Suite -->
+      <div class="module-card" id="card-tests">
+        <div class="mc-header" onclick="toggle('card-tests')">
+          <div class="mc-icon" style="background:var(--m6b)">✓</div>
+          <div class="mc-text">
+            <div class="mc-title">Integration & E2E Test Suite</div>
+            <div class="mc-sub">Jest + Playwright covering all critical paths</div>
+          </div>
+          <div class="mc-tags"><span class="tag tag-be">BE</span><span class="tag tag-fe">FE</span></div>
+          <span class="mc-chevron">▼</span>
+        </div>
+        <div class="mc-body">
+          <div class="tree">
+            <div class="tree-group-label">Jest Integration Tests (NestJS)</div>
+            <div class="tree-branch">
+              <div class="tree-item">Reservation lifecycle: create → check-in → charge → check-out</div>
+              <div class="tree-item">Billing: post charge → apply tax → record payment → close folio</div>
+              <div class="tree-item">Rate Resolver: each rule type wins in correct priority order</div>
+              <div class="tree-item">RBAC: each role cannot exceed its permitted actions</div>
+              <div class="tree-item">No-show: atomic — penalty + room release + folio close in one transaction</div>
+              <div class="tree-item">Folio transfer: source debited, target credited, audit record created</div>
+              <div class="tree-item">Shift: variance calculated correctly, issue carryover works</div>
+            </div>
+            <div class="tree-group-label">Playwright E2E Tests (Next.js)</div>
+            <div class="tree-branch">
+              <div class="tree-item">Full flow: reservation → check-in → folio → check-out → invoice download</div>
+              <div class="tree-item">Walk-in: create guest + book + check-in in one screen</div>
+              <div class="tree-item">Housekeeping: checkout triggers dirty task, status update to clean</div>
+              <div class="tree-item">Report generation + CSV export</div>
+              <div class="tree-item">No-show: mark + room released + comms log entry created</div>
+              <div class="tree-item">Shift open → transactions → close → variance shown</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Night Audit & Polish -->
+      <div class="module-card" id="card-polish">
+        <div class="mc-header" onclick="toggle('card-polish')">
+          <div class="mc-icon" style="background:var(--m6b)">◎</div>
+          <div class="mc-text">
+            <div class="mc-title">Night Audit Baseline & UX Polish</div>
+            <div class="mc-sub">Audit flow, loading states, mobile front desk</div>
+          </div>
+          <div class="mc-tags"><span class="tag tag-fe">FE</span><span class="tag tag-be">BE</span></div>
+          <span class="mc-chevron">▼</span>
+        </div>
+        <div class="mc-body">
+          <div class="tree">
+            <div class="tree-group-label">Night Audit</div>
+            <div class="tree-branch">
+              <div class="tree-item">Pre-audit checklist screen (open folios, unresolved no-shows, shift open)</div>
+              <div class="tree-item">Manual trigger (or optional scheduled at midnight)</div>
+              <div class="tree-item">Auto-post room charges to all open folios</div>
+              <div class="tree-item">Audit report PDF: occupancy summary, revenue, shift variance</div>
+            </div>
+            <div class="tree-group-label">UX Polish</div>
+            <div class="tree-branch">
+              <div class="tree-item">Loading skeleton screens on all data tables</div>
+              <div class="tree-item">Global error boundary + user-friendly error messages</div>
+              <div class="tree-item">Mobile-responsive: check-in, housekeeping task board, room status</div>
+              <div class="tree-item">Keyboard shortcuts for high-frequency receptionist actions (F2 = new reservation, F5 = check-in, Esc = cancel)</div>
+              <div class="tree-item">Optimistic UI updates on status board (room status changes feel instant)</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tenant Onboarding -->
+      <div class="module-card" id="card-onboard">
+        <div class="mc-header" onclick="toggle('card-onboard')">
+          <div class="mc-icon" style="background:var(--m6b)">✦</div>
+          <div class="mc-text">
+            <div class="mc-title">Self-Service Tenant Onboarding</div>
+            <div class="mc-sub">New hotel live without developer involvement</div>
+          </div>
+          <div class="mc-tags"><span class="tag tag-fe">FE</span><span class="tag tag-be">BE</span></div>
+          <span class="mc-chevron">▼</span>
+        </div>
+        <div class="mc-body">
+          <div class="tree">
+            <div class="tree-branch">
+              <div class="tree-item">Signup → email verify → brand mode → property details → buildings/floors → room types → rooms → tax rules → staff invite</div>
+              <div class="tree-item">Automated DB schema provisioning on signup completion</div>
+              <div class="tree-item">Default seed data: room types template, tax rule templates, role presets</div>
+              <div class="tree-item">Guided first-login checklist (% complete indicator)</div>
+              <div class="tree-item">Reg card template setup wizard (house rules, logo, language)</div>
+              <div class="tree-item">No-show policy config during onboarding</div>
+              <div class="tree-item">First shift open prompts: "Set your opening float to get started"</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <div class="del-box">
+      <div class="del-box-title">Month 6 Deliverables — Production Readiness Checklist</div>
+      <div class="del-item">Daily automated backups verified with documented restore test</div>
+      <div class="del-item">Error tracking live (Sentry) on both frontend and backend</div>
+      <div class="del-item">Uptime monitoring + on-call alerting configured</div>
+      <div class="del-item">All RBAC permissions tested — no role can exceed its boundary</div>
+      <div class="del-item">Rate Resolver tested — each rule type wins in correct priority order</div>
+      <div class="del-item">Night audit triggers correctly: room charges post, report generates</div>
+      <div class="del-item">Full E2E test suite passes: reservation → check-in → folio → check-out</div>
+      <div class="del-item">No-show, folio transfer, shift close all covered by integration tests</div>
+      <div class="del-item">New hotel can self-onboard and take their first booking without developer intervention</div>
+      <div class="del-item">Mobile-responsive views for front desk and housekeeping confirmed</div>
+    </div>
+
+    <div class="scale-note">↗ <strong>Scalability hook:</strong> Backup + restore infrastructure becomes Phase 17 (admin/system management, point-in-time recovery). The onboarding flow becomes Phase 14 (tenant provisioning automation, guided setup wizards). Test suite coverage gates all future feature additions cleanly.</div>
+  </div>
+
+  <!-- BOTTOM SUMMARY -->
+  <div style="margin-top:56px;padding-top:32px;border-top:1px solid var(--border);">
+    <div class="hero-kicker">Post-MVP: What unlocks next</div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px;margin-top:16px;">
+      <div style="background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:14px 16px;">
+        <div style="font-size:11px;color:var(--m1);font-family:'JetBrains Mono',monospace;font-weight:500;margin-bottom:6px;">Phase 2 → Booking Engine</div>
+        <div style="font-size:12px;color:var(--text3);line-height:1.6;">OTA integrations, channel manager, package pricing, dynamic yield rules</div>
+      </div>
+      <div style="background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:14px 16px;">
+        <div style="font-size:11px;color:var(--m2);font-family:'JetBrains Mono',monospace;font-weight:500;margin-bottom:6px;">Phase 4 → CRM</div>
+        <div style="font-size:12px;color:var(--text3);line-height:1.6;">Guest preferences, stay history, VIP tiers, corporate accounts, spend analytics</div>
+      </div>
+      <div style="background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:14px 16px;">
+        <div style="font-size:11px;color:var(--m3);font-family:'JetBrains Mono',monospace;font-weight:500;margin-bottom:6px;">Phase 5 → Maintenance</div>
+        <div style="font-size:12px;color:var(--text3);line-height:1.6;">Work orders, preventive maintenance, asset tracking, IoT sensor integration</div>
+      </div>
+      <div style="background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:14px 16px;">
+        <div style="font-size:11px;color:var(--m4);font-family:'JetBrains Mono',monospace;font-weight:500;margin-bottom:6px;">Phase 6 → Payments</div>
+        <div style="font-size:12px;color:var(--text3);line-height:1.6;">Stripe/Adyen PCI integration, multi-currency, corporate master billing, pre-authorizations</div>
+      </div>
+      <div style="background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:14px 16px;">
+        <div style="font-size:11px;color:var(--m5);font-family:'JetBrains Mono',monospace;font-weight:500;margin-bottom:6px;">Phase 8 → RMS</div>
+        <div style="font-size:12px;color:var(--text3);line-height:1.6;">AI demand forecasting, comp set, rate recommendations, overbooking yield strategy</div>
+      </div>
+      <div style="background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:14px 16px;">
+        <div style="font-size:11px;color:var(--m6);font-family:'JetBrains Mono',monospace;font-weight:500;margin-bottom:6px;">Phase 15 → Guest App</div>
+        <div style="font-size:12px;color:var(--text3);line-height:1.6;">Web portal first (stay.yourdomain.com): pre-check-in, digital key, room service, folio review</div>
+      </div>
+    </div>
+  </div>
+
+</div><!-- /wrap -->
+
+<script>
+// ── SCROLL & PROGRESS ──
+const sections = ['m1','m2','m3','m4','m5','m6'];
+const colors = ['var(--m1)','var(--m2)','var(--m3)','var(--m4)','var(--m5)','var(--m6)'];
+const tabs = document.querySelectorAll('.mtab');
+
+function scrollTo(id) {
+  document.getElementById(id).scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function updateProgress() {
+  const scrollY = window.scrollY;
+  const docH = document.documentElement.scrollHeight - window.innerHeight;
+  const pct = Math.round((scrollY / docH) * 100);
+  document.getElementById('progress-label').textContent = pct + '% scrolled';
+  document.getElementById('progress-fill').style.width = pct + '%';
+
+  // Highlight active tab
+  let active = 0;
+  sections.forEach((id, i) => {
+    const el = document.getElementById(id);
+    if (el && el.getBoundingClientRect().top < 120) active = i;
+  });
+  tabs.forEach((t, i) => {
+    t.classList.toggle('active', i === active);
+    t.style.color = i === active ? colors[active] : '';
+    t.style.background = i === active ? 'var(--bg3)' : '';
+  });
+  document.getElementById('progress-fill').style.background = colors[active];
+}
+
+window.addEventListener('scroll', updateProgress, { passive: true });
+updateProgress();
+
+// ── CARD TOGGLE ──
+function toggle(id) {
+  document.getElementById(id).classList.toggle('open');
+}
+</script>
+</body>
+</html>

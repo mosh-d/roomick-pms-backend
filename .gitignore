@@ -1,0 +1,28 @@
+# build
+dist/
+coverage/
+
+# deps
+node_modules/
+
+# env — never commit secrets
+.env
+.env.*
+!.env.example
+
+# httpYac private variables (tenant ids, JWTs) — keep the .example committed
+http-client.private.env.json
+.httpyac/
+*.http
+
+# logs & OS noise
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+*.iml
+.vscode/*
+!.vscode/extensions.json

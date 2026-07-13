@@ -1,0 +1,1372 @@
+// Roomick PMS — Prisma schema (DB architecture v1.2, 39 spec tables + corporate_accounts)
+//
+// Conventions (see pms-database-architecture.html "Patterns & Rules"):
+// - Table names: snake_case plural via @@map. Column names stay camelCase (quoted in PG)
+//   so the RLS policy `"tenantId" = current_setting('app.tenant_id')::uuid` reads naturally.
+// - UUID v4 PKs everywhere except audit_log / rate_audit_log / night_audit_log (BIGSERIAL).
+// - Money is NUMERIC(12,2). Dates without time are DATE. All timestamps TIMESTAMPTZ.
+// - Soft delete (`deletedAt`) on: guests, reservations, folios, line_items, payments,
+//   room_types, rooms, users (+ brands/branches per DB doc).
+// - RLS is applied in a hand-written migration (see prisma/migrations/*_rls); Prisma does
+//   not model policies.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum BrandMode {
+  single
+  multi
+
+  @@map("brand_mode_enum")
+}
+
+enum TenantStatus {
+  trial
+  active
+  suspended
+  cancelled
+
+  @@map("tenant_status_enum")
+}
+
+enum OccupancyStatus {
+  vacant
+  occupied
+
+  @@map("occupancy_status_enum")
+}
+
+enum CleanlinessStatus {
+  dirty
+  cleaning
+  clean
+  inspected
+
+  @@map("cleanliness_status_enum")
+}
+
+// NULL on the column = normal / not held
+enum HeldStatus {
+  out_of_order
+  blocked
+
+  @@map("held_status_enum")
+}
+
+enum BlockReason {
+  maintenance
+  renovation
+  vip_hold
+  other
+
+  @@map("block_reason_enum")
+}
+
+enum ReservationStatus {
+  waitlisted
+  confirmed
+  checked_in
+  checked_out
+  cancelled
+  no_show
+  walked
+
+  @@map("reservation_status_enum")
+}
+
+enum ReservationChannel {
+  direct
+  walk_in
+  booking_com
+  expedia
+  agoda
+  airbnb
+
+  @@map("reservation_channel_enum")
+}
+
+enum RateType {
+  base
+  seasonal
+  weekend
+  corporate
+  negotiated
+  promotional
+
+  @@map("rate_type_enum")
+}
+
+enum AdjustmentType {
+  fixed
+  percentage
+
+  @@map("adjustment_type_enum")
+}
+
+enum FolioStatus {
+  pending
+  open
+  settled
+  disputed
+
+  @@map("folio_status_enum")
+}
+
+enum ChargeType {
+  room
+  fnb
+  spa
+  laundry
+  minibar
+  transport
+  tax
+  penalty
+  correction
+  misc
+
+  @@map("charge_type_enum")
+}
+
+enum PaymentMethod {
+  cash
+  card
+  bank_transfer
+  voucher
+  loyalty_points
+
+  @@map("payment_method_enum")
+}
+
+enum PaymentPurpose {
+  payment
+  deposit
+  deposit_application
+
+  @@map("payment_purpose_enum")
+}
+
+enum RefundStatus {
+  pending
+  approved
+  rejected
+  processed
+
+  @@map("refund_status_enum")
+}
+
+enum PenaltyType {
+  first_night
+  full_stay
+  flat_fee
+  none
+
+  @@map("penalty_type_enum")
+}
+
+enum OutletCategory {
+  restaurant
+  bar
+  spa
+  laundry
+  retail
+  room_service
+
+  @@map("outlet_category_enum")
+}
+
+enum HousekeepingStatus {
+  pending
+  in_progress
+  done
+  skipped
+
+  @@map("hk_status_enum")
+}
+
+enum ShiftType {
+  morning
+  evening
+  night
+
+  @@map("shift_type_enum")
+}
+
+enum IssuePriority {
+  low
+  medium
+  high
+  urgent
+
+  @@map("issue_priority_enum")
+}
+
+enum IssueStatus {
+  open
+  resolved
+  carried_over
+
+  @@map("issue_status_enum")
+}
+
+enum MaintenancePriority {
+  low
+  medium
+  high
+  urgent
+
+  @@map("maintenance_priority_enum")
+}
+
+enum MaintenanceStatus {
+  open
+  in_progress
+  on_hold
+  resolved
+  cancelled
+
+  @@map("maintenance_status_enum")
+}
+
+enum NightAuditStatus {
+  running
+  completed
+  failed
+
+  @@map("night_audit_status_enum")
+}
+
+enum CommsChannel {
+  email
+  sms
+  push
+  in_app_chat
+
+  @@map("comms_channel_enum")
+}
+
+enum DeliveryStatus {
+  queued
+  sent
+  delivered
+  failed
+  opened
+  bounced
+
+  @@map("delivery_status_enum")
+}
+
+enum GdprType {
+  access
+  erasure
+  portability
+
+  @@map("gdpr_type_enum")
+}
+
+enum GdprStatus {
+  pending
+  in_progress
+  completed
+  rejected
+
+  @@map("gdpr_status_enum")
+}
+
+// ---------------------------------------------------------------------------
+// Identity & Auth (5)
+// ---------------------------------------------------------------------------
+
+model Tenant {
+  id          String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  subdomain   String       @unique @db.VarChar(63)
+  groupName   String       @db.VarChar(200)
+  brandMode   BrandMode
+  status      TenantStatus @default(trial)
+  trialEndsAt DateTime?    @db.Timestamptz(6)
+  createdAt   DateTime     @default(now()) @db.Timestamptz(6)
+  updatedAt   DateTime     @updatedAt @db.Timestamptz(6)
+
+  users             User[]
+  roles             Role[]
+  userBranchRoles   UserBranchRole[]
+  inviteTokens      InviteToken[]
+  brands            Brand[]
+  branches          Branch[]
+  buildings         Building[]
+  floors            Floor[]
+  roomTypes         RoomType[]
+  rooms             Room[]
+  roomBlocks        RoomBlock[]
+  guestProfiles     GuestProfile[]
+  reservations      Reservation[]
+  ratePlans         RatePlan[]
+  rateAuditLogs     RateAuditLog[]
+  noShowRecords     NoShowRecord[]
+  walkRecords       WalkRecord[]
+  corporateAccounts CorporateAccount[]
+  folios            Folio[]
+  lineItems         LineItem[]
+  folioTransfers    FolioTransfer[]
+  payments          Payment[]
+  refunds           Refund[]
+  taxRules          TaxRule[]
+  housekeepingTasks HousekeepingTask[]
+  shifts            Shift[]
+  shiftIssues       ShiftIssue[]
+  maintenanceOrders MaintenanceOrder[]
+  assets            Asset[]
+  registrationCards RegistrationCard[]
+  overbookingConfig OverbookingConfig[]
+  outlets           Outlet[]
+  userOutlets       UserOutlet[]
+  nightAuditLogs    NightAuditLog[]
+  communicationLogs CommunicationLog[]
+  auditLogs         AuditLog[]
+  gdprRequests      GdprRequest[]
+
+  @@map("tenants")
+}
+
+model User {
+  id            String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId      String    @db.Uuid
+  email         String    @db.VarChar(320)
+  passwordHash  String?   @db.VarChar(72)
+  name          String    @db.VarChar(200)
+  phone         String?   @db.VarChar(20)
+  emailVerified Boolean   @default(false)
+  lastLoginAt   DateTime? @db.Timestamptz(6)
+  createdAt     DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt     DateTime  @updatedAt @db.Timestamptz(6)
+  deletedAt     DateTime? @db.Timestamptz(6)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+
+  branchRoles                UserBranchRole[]    @relation("UserBranchRoleUser")
+  branchRolesAssigned        UserBranchRole[]    @relation("UserBranchRoleAssignedBy")
+  inviteTokensSent           InviteToken[]
+  roomsStatusChanged         Room[]
+  roomBlocksCreated          RoomBlock[]
+  reservationsCreated        Reservation[]
+  rateAuditLogs              RateAuditLog[]
+  noShowsWaived              NoShowRecord[]      @relation("NoShowWaivedBy")
+  noShowsMarked              NoShowRecord[]      @relation("NoShowMarkedBy")
+  walkRecordsApproved        WalkRecord[]
+  lineItemsPosted            LineItem[]          @relation("LineItemPostedBy")
+  lineItemsVoided            LineItem[]          @relation("LineItemVoidedBy")
+  folioTransfersApproved     FolioTransfer[]     @relation("TransferApprovedBy")
+  folioTransfersReversed     FolioTransfer[]     @relation("TransferReversedBy")
+  paymentsRecorded           Payment[]           @relation("PaymentRecordedBy")
+  paymentsVoided             Payment[]           @relation("PaymentVoidedBy")
+  refundsRequested           Refund[]            @relation("RefundRequestedBy")
+  refundsApproved            Refund[]            @relation("RefundApprovedBy")
+  housekeepingTasksAssigned  HousekeepingTask[]  @relation("HkAssignee")
+  housekeepingTasksCompleted HousekeepingTask[]  @relation("HkCompletedBy")
+  shifts                     Shift[]
+  shiftIssuesResolved        ShiftIssue[]
+  maintenanceOrdersReported  MaintenanceOrder[]  @relation("MaintReportedBy")
+  maintenanceOrdersAssigned  MaintenanceOrder[]  @relation("MaintAssignedTo")
+  registrationCardsWitnessed RegistrationCard[]
+  overbookingConfigsUpdated  OverbookingConfig[]
+  outletAssignments          UserOutlet[]        @relation("UserOutletUser")
+  outletAssignmentsMade      UserOutlet[]        @relation("UserOutletAssignedBy")
+  nightAuditsTriggered       NightAuditLog[]
+  communicationsSent         CommunicationLog[]
+  auditLogs                  AuditLog[]
+
+  @@unique([tenantId, email])
+  @@index([tenantId, deletedAt])
+  @@map("users")
+}
+
+model Role {
+  id       String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId String  @db.Uuid
+  name     String  @db.VarChar(100)
+  isSystem Boolean @default(false)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  userBranchRoles UserBranchRole[]
+  inviteTokens    InviteToken[]
+
+  @@unique([tenantId, name])
+  @@map("roles")
+}
+
+model UserBranchRole {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId   String   @db.Uuid
+  userId     String   @db.Uuid
+  roleId     String   @db.Uuid
+  branchId   String?  @db.Uuid // NULL = access to all branches (owner/admin)
+  assignedAt DateTime @default(now()) @db.Timestamptz(6)
+  assignedBy String?  @db.Uuid
+
+  tenant         Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user           User    @relation("UserBranchRoleUser", fields: [userId], references: [id], onDelete: Cascade)
+  role           Role    @relation(fields: [roleId], references: [id], onDelete: Restrict)
+  branch         Branch? @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  assignedByUser User?   @relation("UserBranchRoleAssignedBy", fields: [assignedBy], references: [id], onDelete: SetNull)
+
+  @@unique([userId, roleId, branchId])
+  @@index([userId, branchId])
+  @@map("user_branch_roles")
+}
+
+model InviteToken {
+  id         String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId   String    @db.Uuid
+  email      String    @db.VarChar(320)
+  token      String    @unique @db.VarChar(128)
+  roleId     String    @db.Uuid
+  branchId   String?   @db.Uuid // NULL = all branches
+  invitedBy  String?   @db.Uuid
+  expiresAt  DateTime  @db.Timestamptz(6)
+  acceptedAt DateTime? @db.Timestamptz(6) // NULL = pending
+  createdAt  DateTime  @default(now()) @db.Timestamptz(6)
+
+  tenant        Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  role          Role    @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  branch        Branch? @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  invitedByUser User?   @relation(fields: [invitedBy], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, email])
+  @@map("invite_tokens")
+}
+
+// ---------------------------------------------------------------------------
+// Property (7)
+// ---------------------------------------------------------------------------
+
+model Brand {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId        String    @db.Uuid
+  name            String    @db.VarChar(200)
+  logoUrl         String?
+  primaryColor    String?   @db.VarChar(7)
+  defaultPolicies Json?
+  createdAt       DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt       DateTime  @updatedAt @db.Timestamptz(6)
+  deletedAt       DateTime? @db.Timestamptz(6)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  branches Branch[]
+
+  @@index([tenantId, deletedAt])
+  @@map("brands")
+}
+
+model Branch {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId        String    @db.Uuid
+  brandId         String    @db.Uuid
+  name            String    @db.VarChar(200)
+  address         Json // {street, city, state, country, zip}
+  timezone        String    @db.VarChar(50) // IANA tz — night audit depends on it
+  currency        String    @db.Char(3) // ISO 4217
+  checkInTime     DateTime  @default(dbgenerated("'14:00:00'::time")) @db.Time(0)
+  checkOutTime    DateTime  @default(dbgenerated("'11:00:00'::time")) @db.Time(0)
+  category        String?   @db.VarChar(30) // hotel | resort | motel | boutique | hostel
+  policies        Json? // overrides brand defaultPolicies; merged at read time. Holds idCaptureMandatory, early/late surcharge policy, AR flag rules.
+  noShowPolicy    Json? // {cutoffTime, defaultPenalty, autoMark, notifyMinutesBefore}
+  regCardTemplate Json? // {logoUrl, houseRules, requiredFields, showRate, language}
+  createdAt       DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt       DateTime  @updatedAt @db.Timestamptz(6)
+  deletedAt       DateTime? @db.Timestamptz(6)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  brand  Brand  @relation(fields: [brandId], references: [id], onDelete: Restrict)
+
+  userBranchRoles   UserBranchRole[]
+  inviteTokens      InviteToken[]
+  buildings         Building[]
+  roomTypes         RoomType[]
+  rooms             Room[]
+  reservations      Reservation[]
+  ratePlans         RatePlan[]
+  rateAuditLogs     RateAuditLog[]
+  folios            Folio[]
+  taxRules          TaxRule[]
+  housekeepingTasks HousekeepingTask[]
+  shifts            Shift[]
+  maintenanceOrders MaintenanceOrder[]
+  assets            Asset[]
+  registrationCards RegistrationCard[]
+  overbookingConfig OverbookingConfig[]
+  outlets           Outlet[]
+  userOutlets       UserOutlet[]
+  nightAuditLogs    NightAuditLog[]
+  communicationLogs CommunicationLog[]
+  auditLogs         AuditLog[]
+
+  @@index([tenantId, brandId])
+  @@index([tenantId, deletedAt])
+  @@map("branches")
+}
+
+model Building {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String   @db.Uuid
+  branchId  String   @db.Uuid
+  name      String?  @db.VarChar(100) // NULL = hidden auto-created default (onboarding skipped this level)
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  branch Branch @relation(fields: [branchId], references: [id], onDelete: Cascade)
+
+  floors Floor[]
+
+  @@index([branchId])
+  @@map("buildings")
+}
+
+model Floor {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId    String   @db.Uuid
+  buildingId  String   @db.Uuid
+  floorNumber Int // 0 = ground floor
+  label       String?  @db.VarChar(30) // NULL = hidden auto-created default
+  createdAt   DateTime @default(now()) @db.Timestamptz(6)
+
+  tenant   Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  building Building @relation(fields: [buildingId], references: [id], onDelete: Cascade)
+
+  rooms Room[]
+
+  @@index([buildingId])
+  @@map("floors")
+}
+
+model RoomType {
+  id        String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String    @db.Uuid
+  branchId  String    @db.Uuid
+  name      String    @db.VarChar(100)
+  baseRate  Decimal   @db.Decimal(12, 2) // starting point for the Rate Resolver — always > 0. NOT in rate_plans.
+  capacity  Json // {adults: int, children: int}
+  bedType   String?   @db.VarChar(50)
+  sizeM2    Decimal?  @db.Decimal(6, 1)
+  amenities String[]
+  photoUrls String[]
+  sortOrder Int?
+  createdAt DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime  @updatedAt @db.Timestamptz(6)
+  deletedAt DateTime? @db.Timestamptz(6)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  branch Branch @relation(fields: [branchId], references: [id], onDelete: Restrict)
+
+  rooms             Room[]
+  reservations      Reservation[]
+  ratePlans         RatePlan[]
+  overbookingConfig OverbookingConfig[]
+
+  @@index([branchId, deletedAt])
+  @@map("room_types")
+}
+
+model Room {
+  id                String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId          String            @db.Uuid
+  branchId          String            @db.Uuid
+  roomTypeId        String            @db.Uuid
+  floorId           String            @db.Uuid
+  number            String            @db.VarChar(20)
+  // Three independent status axes (schema v1.1) — never recombine into one column.
+  occupancyStatus   OccupancyStatus   @default(vacant)
+  cleanlinessStatus CleanlinessStatus @default(clean)
+  heldStatus        HeldStatus? // NULL = normal; non-NULL removes room from all availability
+  view              String?           @db.VarChar(50)
+  notes             String?
+  statusChangedAt   DateTime?         @db.Timestamptz(6)
+  statusChangedBy   String?           @db.Uuid // NULL = system trigger
+  createdAt         DateTime          @default(now()) @db.Timestamptz(6)
+  updatedAt         DateTime          @updatedAt @db.Timestamptz(6)
+  deletedAt         DateTime?         @db.Timestamptz(6)
+
+  tenant              Tenant   @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  branch              Branch   @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  roomType            RoomType @relation(fields: [roomTypeId], references: [id], onDelete: Restrict)
+  floor               Floor    @relation(fields: [floorId], references: [id], onDelete: Restrict)
+  statusChangedByUser User?    @relation(fields: [statusChangedBy], references: [id], onDelete: SetNull)
+
+  roomBlocks        RoomBlock[]
+  reservations      Reservation[]
+  housekeepingTasks HousekeepingTask[]
+  maintenanceOrders MaintenanceOrder[]
+  assets            Asset[]
+
+  @@unique([branchId, number])
+  @@index([branchId, occupancyStatus, cleanlinessStatus])
+  @@index([branchId, roomTypeId, occupancyStatus])
+  @@index([branchId, cleanlinessStatus])
+  @@index([floorId, cleanlinessStatus])
+  @@map("rooms")
+}
+
+model RoomBlock {
+  id        String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String      @db.Uuid
+  roomId    String      @db.Uuid
+  reason    BlockReason
+  fromDate  DateTime    @db.Date
+  toDate    DateTime    @db.Date
+  notes     String?
+  createdBy String?     @db.Uuid
+  createdAt DateTime    @default(now()) @db.Timestamptz(6)
+
+  tenant        Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  room          Room   @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  createdByUser User?  @relation(fields: [createdBy], references: [id], onDelete: SetNull)
+
+  @@index([roomId, fromDate, toDate])
+  @@map("room_blocks")
+}
+
+// ---------------------------------------------------------------------------
+// Reservations (6) + Corporate
+// ---------------------------------------------------------------------------
+
+model GuestProfile {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId        String    @db.Uuid
+  name            String    @db.VarChar(200)
+  email           String?   @db.VarChar(320)
+  phone           String?   @db.VarChar(20)
+  nationality     String?   @db.Char(2) // ISO 3166-1 alpha-2
+  idDocType       String?   @db.VarChar(30) // passport | national_id | drivers_license
+  idDocNumber     String? // AES-256-GCM encrypted at application layer — never plaintext
+  idDocUrl        String? // encrypted S3 bucket URL
+  idDocExpiryDate DateTime? @db.Date // drives 3-state check-in logic: first_visit | valid | expired
+  preferences     Json? // {bedType, floor, view, pillow, temp, dietaryRestrictions[]}
+  vipLevel        Int?      @default(0) @db.SmallInt // 0–5
+  tags            String[]
+  notes           String?
+  loyaltyTier     String?   @db.VarChar(30)
+  loyaltyPoints   Int?      @default(0)
+  createdAt       DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt       DateTime  @updatedAt @db.Timestamptz(6)
+  deletedAt       DateTime? @db.Timestamptz(6) // GDPR erasure sets deletedAt + nullifies PII
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+
+  reservations      Reservation[]
+  folios            Folio[]
+  registrationCards RegistrationCard[]
+  communicationLogs CommunicationLog[]
+  gdprRequests      GdprRequest[]
+
+  @@index([tenantId, email])
+  @@index([tenantId, name])
+  @@map("guest_profiles")
+}
+
+model Reservation {
+  id                 String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  confirmationNumber String             @unique @db.VarChar(20) // RES-2024-00001, sequence per branch
+  tenantId           String             @db.Uuid
+  branchId           String             @db.Uuid
+  guestId            String             @db.Uuid
+  roomTypeId         String             @db.Uuid
+  roomId             String?            @db.Uuid // NULL until check-in (or assignment); always NULL while waitlisted
+  ratePlanId         String?            @db.Uuid // plan that won at booking time
+  confirmedRate      Decimal            @db.Decimal(12, 2) // snapshot at booking — never changes
+  overrideRate       Decimal?           @db.Decimal(12, 2) // manager rate override (absolute nightly rate) — NOT a rate_plans row
+  overrideReason     String? // mandatory when overrideRate is set
+  status             ReservationStatus  @default(confirmed)
+  channel            ReservationChannel
+  checkInDate        DateTime           @db.Date
+  checkOutDate       DateTime           @db.Date
+  actualCheckIn      DateTime?          @db.Timestamptz(6)
+  actualCheckOut     DateTime?          @db.Timestamptz(6)
+  adults             Int                @db.SmallInt
+  children           Int                @default(0) @db.SmallInt
+  specialRequests    String?
+  depositAmount      Decimal?           @db.Decimal(12, 2)
+  createdBy          String?            @db.Uuid // NULL = online booking
+  createdAt          DateTime           @default(now()) @db.Timestamptz(6)
+  updatedAt          DateTime           @updatedAt @db.Timestamptz(6)
+  deletedAt          DateTime?          @db.Timestamptz(6) // soft delete only — cancelled reservations stay
+
+  tenant        Tenant       @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  branch        Branch       @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  guest         GuestProfile @relation(fields: [guestId], references: [id], onDelete: Restrict)
+  roomType      RoomType     @relation(fields: [roomTypeId], references: [id], onDelete: Restrict)
+  room          Room?        @relation(fields: [roomId], references: [id], onDelete: SetNull)
+  ratePlan      RatePlan?    @relation(fields: [ratePlanId], references: [id], onDelete: SetNull)
+  createdByUser User?        @relation(fields: [createdBy], references: [id], onDelete: SetNull)
+
+  rateAuditLogs              RateAuditLog[]
+  noShowRecords              NoShowRecord[]
+  walkRecords                WalkRecord[]
+  folios                     Folio[]
+  housekeepingTasksTriggered HousekeepingTask[]
+  registrationCards          RegistrationCard[]
+  communicationLogs          CommunicationLog[]
+
+  @@index([branchId, checkInDate, status])
+  @@index([branchId, checkOutDate, status])
+  @@index([roomId, checkInDate, checkOutDate])
+  @@index([guestId])
+  @@index([branchId, status, checkInDate])
+  @@map("reservations")
+}
+
+model RatePlan {
+  id             String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId       String          @db.Uuid
+  branchId       String          @db.Uuid
+  roomTypeId     String?         @db.Uuid // NULL = applies to all types
+  name           String          @db.VarChar(150)
+  type           RateType // base/seasonal/weekend/corporate = cascade tiers; negotiated/promotional = overrides
+  amount         Decimal         @db.Decimal(12, 2) // cascade tiers: adjustment on running total; overrides: absolute replacement
+  adjustmentType AdjustmentType? // fixed | percentage; NULL = absolute (override types only)
+  cascadeTier    Int             @db.SmallInt // 1=base 2=seasonal 3=weekend 4=corporate; ignored when isOverride
+  isOverride     Boolean         @default(false) // TRUE only for negotiated/promotional — resolver skips cascade entirely
+  validFrom      DateTime?       @db.Date // NULL = always valid
+  validTo        DateTime?       @db.Date
+  minLOS         Int?            @db.SmallInt
+  promoCode      String?         @db.VarChar(30) // NULL unless type = promotional
+  isActive       Boolean         @default(true) // toggle instead of delete
+  outletId       String?         @db.Uuid // reserved for future F&B package pricing
+  createdAt      DateTime        @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime        @updatedAt @db.Timestamptz(6)
+
+  tenant   Tenant    @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  branch   Branch    @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  roomType RoomType? @relation(fields: [roomTypeId], references: [id], onDelete: Restrict)
+  outlet   Outlet?   @relation(fields: [outletId], references: [id], onDelete: SetNull)
+
+  reservations      Reservation[]
+  corporateAccounts CorporateAccount[]
+
+  @@index([branchId, roomTypeId, isOverride, cascadeTier])
+  @@index([branchId, validFrom, validTo])
+  @@index([branchId, isOverride])
+  @@map("rate_plans")
+}
+
+model RateAuditLog {
+  id            BigInt   @id @default(autoincrement())
+  tenantId      String   @db.Uuid
+  branchId      String   @db.Uuid
+  reservationId String?  @db.Uuid // NULL during pre-booking calculation
+  input         Json // full resolver request payload
+  result        Json // full cascade trace: {finalRate, isOverride, overrideRatePlanId, cascade:[{tier, ratePlanId, amountBefore, adjustment, amountAfter}]}
+  triggeredBy   String?  @db.VarChar(30) // checkin | booking_create | override | ota_import | walkin
+  userId        String?  @db.Uuid // NULL = automated
+  resolvedAt    DateTime @default(now()) @db.Timestamptz(6)
+
+  tenant      Tenant       @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  branch      Branch       @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  reservation Reservation? @relation(fields: [reservationId], references: [id], onDelete: Restrict)
+  user        User?        @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([reservationId])
+  @@map("rate_audit_log")
+}
+
+model NoShowRecord {
+  id            String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId      String      @db.Uuid
+  reservationId String      @db.Uuid
+  penaltyType   PenaltyType
+  penaltyAmount Decimal?    @db.Decimal(12, 2)
+  penaltyWaived Boolean     @default(false)
+  waivedBy      String?     @db.Uuid
+  refundAmount  Decimal?    @db.Decimal(12, 2)
+  markedAt      DateTime    @default(now()) @db.Timestamptz(6)
+  markedBy      String?     @db.Uuid // NULL = auto-marked by night audit
+
+  tenant       Tenant      @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  reservation  Reservation @relation(fields: [reservationId], references: [id], onDelete: Restrict)
+  waivedByUser User?       @relation("NoShowWaivedBy", fields: [waivedBy], references: [id], onDelete: SetNull)
+  markedByUser User?       @relation("NoShowMarkedBy", fields: [markedBy], references: [id], onDelete: SetNull)
+
+  @@index([reservationId])
+  @@map("no_show_records")
+}
+
+model WalkRecord {
+  id                  String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId            String   @db.Uuid
+  reservationId       String   @db.Uuid
+  relocationProperty  String   @db.VarChar(200)
+  transportProvided   Boolean  @default(false)
+  transportCost       Decimal? @db.Decimal(12, 2)
+  compensationOffered String?
+  approvedBy          String?  @db.Uuid // manager approval required
+  walkedAt            DateTime @default(now()) @db.Timestamptz(6)
+
+  tenant         Tenant      @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  reservation    Reservation @relation(fields: [reservationId], references: [id], onDelete: Restrict)
+  approvedByUser User?       @relation(fields: [approvedBy], references: [id], onDelete: SetNull)
+
+  @@index([reservationId])
+  @@map("walk_records")
+}
+
+// Not in the 39-table count but referenced by folios.corporateAccountId and the
+// corporate module (email-domain matcher feeding the corporate cascade tier).
+model CorporateAccount {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId     String   @db.Uuid
+  name         String   @db.VarChar(200)
+  emailDomains String[] // guest email domain match auto-activates the corporate tier / negotiated override
+  ratePlanId   String?  @db.Uuid // negotiated agreement plan
+  contactName  String?  @db.VarChar(200)
+  contactEmail String?  @db.VarChar(320)
+  billingInfo  Json?
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt    DateTime @updatedAt @db.Timestamptz(6)
+
+  tenant   Tenant    @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  ratePlan RatePlan? @relation(fields: [ratePlanId], references: [id], onDelete: SetNull)
+
+  folios Folio[]
+
+  @@index([tenantId, isActive])
+  @@map("corporate_accounts")
+}
+
+// ---------------------------------------------------------------------------
+// Financial (6)
+// ---------------------------------------------------------------------------
+
+model Folio {
+  id                 String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId           String      @db.Uuid
+  branchId           String      @db.Uuid
+  reservationId      String      @db.Uuid
+  guestId            String      @db.Uuid
+  label              String?     @db.VarChar(100) // NULL = primary folio
+  status             FolioStatus @default(pending)
+  payerName          String?     @db.VarChar(200)
+  payerEmail         String?     @db.VarChar(320)
+  corporateAccountId String?     @db.Uuid // NULL = individual folio
+  openedAt           DateTime?   @db.Timestamptz(6) // set on check-in
+  closedAt           DateTime?   @db.Timestamptz(6) // set on check-out or manual close
+  createdAt          DateTime    @default(now()) @db.Timestamptz(6)
+  updatedAt          DateTime    @updatedAt @db.Timestamptz(6)
+  deletedAt          DateTime?   @db.Timestamptz(6)
+
+  tenant           Tenant            @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  branch           Branch            @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  reservation      Reservation       @relation(fields: [reservationId], references: [id], onDelete: Restrict)
+  guest            GuestProfile      @relation(fields: [guestId], references: [id], onDelete: Restrict)
+  corporateAccount CorporateAccount? @relation(fields: [corporateAccountId], references: [id], onDelete: SetNull)
+
+  lineItems    LineItem[]
+  transfersOut FolioTransfer[] @relation("TransferSource")
+  transfersIn  FolioTransfer[] @relation("TransferTarget")
+  payments     Payment[]
+  refunds      Refund[]
+
+  @@index([reservationId])
+  @@index([branchId, status])
+  @@map("folios")
+}
+
+// Append-only: no UPDATE of amounts, no DELETE. Corrections = new negative line item.
+model LineItem {
+  id          String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId    String     @db.Uuid
+  folioId     String     @db.Uuid
+  description String     @db.VarChar(300)
+  amount      Decimal    @db.Decimal(12, 2) // negative = credit/correction; CHECK (amount != 0) in migration
+  taxAmount   Decimal    @default(0) @db.Decimal(12, 2)
+  chargeType  ChargeType // NO deposit — deposits are payments
+  outletId    String?    @db.Uuid // NULL for room / night-audit / system posts
+  taxRuleIds  String[]   @db.Uuid
+  serviceDate DateTime?  @db.Date // date the service occurred (e.g. room-night date)
+  postedBy    String?    @db.Uuid // NULL = system-posted (night audit)
+  postedAt    DateTime   @default(now()) @db.Timestamptz(6)
+  isVoid      Boolean    @default(false) // voided but retained in ledger
+  voidedAt    DateTime?  @db.Timestamptz(6)
+  voidedBy    String?    @db.Uuid
+  deletedAt   DateTime?  @db.Timestamptz(6) // display suppression only, never financial calculation
+
+  tenant       Tenant  @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  folio        Folio   @relation(fields: [folioId], references: [id], onDelete: Restrict)
+  outlet       Outlet? @relation(fields: [outletId], references: [id], onDelete: Restrict)
+  postedByUser User?   @relation("LineItemPostedBy", fields: [postedBy], references: [id], onDelete: SetNull)
+  voidedByUser User?   @relation("LineItemVoidedBy", fields: [voidedBy], references: [id], onDelete: SetNull)
+
+  @@index([folioId, postedAt])
+  @@index([folioId, chargeType])
+  @@index([outletId])
+  @@map("line_items")
+}
+
+model FolioTransfer {
+  id            String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId      String    @db.Uuid
+  sourceFolioId String    @db.Uuid
+  targetFolioId String    @db.Uuid
+  lineItemIds   String[]  @db.Uuid // snapshot of transferred line items
+  amount        Decimal   @db.Decimal(12, 2)
+  reason        String // required for audit
+  approvedBy    String?   @db.Uuid // NULL if below threshold
+  reversedAt    DateTime? @db.Timestamptz(6) // set within 24h window
+  reversedBy    String?   @db.Uuid // manager only
+  createdAt     DateTime  @default(now()) @db.Timestamptz(6)
+
+  tenant         Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  sourceFolio    Folio  @relation("TransferSource", fields: [sourceFolioId], references: [id], onDelete: Restrict)
+  targetFolio    Folio  @relation("TransferTarget", fields: [targetFolioId], references: [id], onDelete: Restrict)
+  approvedByUser User?  @relation("TransferApprovedBy", fields: [approvedBy], references: [id], onDelete: SetNull)
+  reversedByUser User?  @relation("TransferReversedBy", fields: [reversedBy], references: [id], onDelete: SetNull)
+
+  @@index([sourceFolioId])
+  @@index([targetFolioId])
+  @@map("folio_transfers")
+}
+
+// Append-only: voided via isVoid, never removed.
+model Payment {
+  id             String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId       String         @db.Uuid
+  folioId        String         @db.Uuid
+  method         PaymentMethod
+  amount         Decimal        @db.Decimal(12, 2) // positive = payment, negative = refund
+  currency       String         @db.Char(3)
+  reference      String?        @db.VarChar(100) // card auth code, bank ref; deposit_application references original deposit
+  shiftId        String?        @db.Uuid // links payment to cash shift
+  paymentPurpose PaymentPurpose @default(payment)
+  isVoid         Boolean        @default(false)
+  voidedAt       DateTime?      @db.Timestamptz(6)
+  voidedBy       String?        @db.Uuid
+  voidReason     String?
+  recordedAt     DateTime       @default(now()) @db.Timestamptz(6)
+  recordedBy     String?        @db.Uuid
+  deletedAt      DateTime?      @db.Timestamptz(6)
+
+  tenant         Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  folio          Folio  @relation(fields: [folioId], references: [id], onDelete: Restrict)
+  shift          Shift? @relation(fields: [shiftId], references: [id], onDelete: SetNull)
+  recordedByUser User?  @relation("PaymentRecordedBy", fields: [recordedBy], references: [id], onDelete: SetNull)
+  voidedByUser   User?  @relation("PaymentVoidedBy", fields: [voidedBy], references: [id], onDelete: SetNull)
+
+  refunds Refund[]
+
+  @@index([folioId, paymentPurpose])
+  @@index([shiftId])
+  @@map("payments")
+}
+
+model Refund {
+  id          String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId    String       @db.Uuid
+  folioId     String       @db.Uuid
+  paymentId   String?      @db.Uuid // original payment being refunded
+  amount      Decimal      @db.Decimal(12, 2)
+  reason      String
+  status      RefundStatus @default(pending)
+  requestedBy String?      @db.Uuid
+  approvedBy  String?      @db.Uuid
+  processedAt DateTime?    @db.Timestamptz(6)
+  createdAt   DateTime     @default(now()) @db.Timestamptz(6)
+
+  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  folio           Folio    @relation(fields: [folioId], references: [id], onDelete: Restrict)
+  payment         Payment? @relation(fields: [paymentId], references: [id], onDelete: SetNull)
+  requestedByUser User?    @relation("RefundRequestedBy", fields: [requestedBy], references: [id], onDelete: SetNull)
+  approvedByUser  User?    @relation("RefundApprovedBy", fields: [approvedBy], references: [id], onDelete: SetNull)
+
+  @@index([folioId])
+  @@map("refunds")
+}
+
+model TaxRule {
+  id                   String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId             String         @db.Uuid
+  branchId             String         @db.Uuid
+  name                 String         @db.VarChar(100) // "VAT", "Service Charge", "City Tax"
+  rate                 Decimal        @db.Decimal(6, 4) // 0.075 = 7.5%
+  type                 AdjustmentType @default(percentage)
+  appliesToChargeTypes ChargeType[] // empty = applies to all
+  jurisdiction         String?        @db.VarChar(100)
+  isActive             Boolean        @default(true)
+  createdAt            DateTime       @default(now()) @db.Timestamptz(6)
+  updatedAt            DateTime       @updatedAt @db.Timestamptz(6)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  branch Branch @relation(fields: [branchId], references: [id], onDelete: Cascade)
+
+  @@index([branchId, isActive])
+  @@map("tax_rules")
+}
+
+// ---------------------------------------------------------------------------
+// Operations (10)
+// ---------------------------------------------------------------------------
+
+model HousekeepingTask {
+  id                       String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId                 String             @db.Uuid
+  branchId                 String             @db.Uuid
+  roomId                   String             @db.Uuid
+  assigneeId               String?            @db.Uuid // NULL = unassigned
+  taskDate                 DateTime           @db.Date
+  status                   HousekeepingStatus @default(pending)
+  priority                 Int?               @db.SmallInt // 1 = urgent (guest arriving soon), 3 = normal
+  triggerEvent             String?            @db.VarChar(30) // checkout | scheduled | walkin | manual
+  triggeredByReservationId String?            @db.Uuid
+  notes                    String?
+  completedAt              DateTime?          @db.Timestamptz(6)
+  completedBy              String?            @db.Uuid
+  createdAt                DateTime           @default(now()) @db.Timestamptz(6)
+
+  tenant                 Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  branch                 Branch       @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  room                   Room         @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  assignee               User?        @relation("HkAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
+  completedByUser        User?        @relation("HkCompletedBy", fields: [completedBy], references: [id], onDelete: SetNull)
+  triggeredByReservation Reservation? @relation(fields: [triggeredByReservationId], references: [id], onDelete: SetNull)
+
+  @@index([branchId, taskDate, status])
+  @@index([assigneeId, taskDate, status])
+  @@map("housekeeping_tasks")
+}
+
+model Shift {
+  id                  String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId            String    @db.Uuid
+  branchId            String    @db.Uuid
+  agentId             String    @db.Uuid
+  shiftType           ShiftType
+  activeOutletId      String?   @db.Uuid // POS session outlet selection (staff with multiple outlets)
+  openedAt            DateTime  @default(now()) @db.Timestamptz(6)
+  closedAt            DateTime? @db.Timestamptz(6) // NULL = shift still open
+  openingFloat        Decimal?  @db.Decimal(12, 2)
+  openingBreakdown    Json? // [{denomination, count}]
+  systemCashTotal     Decimal?  @db.Decimal(12, 2) // calculated on close
+  closingCashCounted  Decimal?  @db.Decimal(12, 2)
+  closingBreakdown    Json?
+  variance            Decimal?  @db.Decimal(12, 2) // closingCashCounted − systemCashTotal
+  varianceExplanation String? // required if ABS(variance) > branch threshold
+  handoverNotes       String?
+
+  tenant       Tenant  @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  branch       Branch  @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  agent        User    @relation(fields: [agentId], references: [id], onDelete: Restrict)
+  activeOutlet Outlet? @relation(fields: [activeOutletId], references: [id], onDelete: SetNull)
+
+  issues   ShiftIssue[]
+  payments Payment[]
+
+  @@index([branchId, closedAt])
+  @@index([branchId, openedAt(sort: Desc)])
+  @@map("shifts")
+}
+
+model ShiftIssue {
+  id          String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId    String        @db.Uuid
+  shiftId     String        @db.Uuid
+  description String
+  priority    IssuePriority @default(medium)
+  status      IssueStatus   @default(open)
+  resolution  String?
+  resolvedBy  String?       @db.Uuid
+  createdAt   DateTime      @default(now()) @db.Timestamptz(6)
+  resolvedAt  DateTime?     @db.Timestamptz(6)
+
+  tenant         Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  shift          Shift  @relation(fields: [shiftId], references: [id], onDelete: Cascade)
+  resolvedByUser User?  @relation(fields: [resolvedBy], references: [id], onDelete: SetNull)
+
+  @@index([shiftId, status])
+  @@map("shift_issues")
+}
+
+model MaintenanceOrder {
+  id                    String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId              String              @db.Uuid
+  branchId              String              @db.Uuid
+  roomId                String?             @db.Uuid
+  assetId               String?             @db.Uuid
+  title                 String              @db.VarChar(200)
+  description           String?
+  priority              MaintenancePriority @default(medium)
+  status                MaintenanceStatus   @default(open)
+  takesRoomOutOfService Boolean             @default(false) // TRUE sets room.heldStatus = out_of_order atomically
+  reportedBy            String?             @db.Uuid
+  assignedTo            String?             @db.Uuid
+  resolvedAt            DateTime?           @db.Timestamptz(6)
+  createdAt             DateTime            @default(now()) @db.Timestamptz(6)
+  updatedAt             DateTime            @updatedAt @db.Timestamptz(6)
+
+  tenant         Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  branch         Branch @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  room           Room?  @relation(fields: [roomId], references: [id], onDelete: SetNull)
+  asset          Asset? @relation(fields: [assetId], references: [id], onDelete: SetNull)
+  reportedByUser User?  @relation("MaintReportedBy", fields: [reportedBy], references: [id], onDelete: SetNull)
+  assignedToUser User?  @relation("MaintAssignedTo", fields: [assignedTo], references: [id], onDelete: SetNull)
+
+  @@index([branchId, status])
+  @@map("maintenance_orders")
+}
+
+model Asset {
+  id            String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId      String    @db.Uuid
+  branchId      String    @db.Uuid
+  roomId        String?   @db.Uuid // NULL = common-area asset
+  name          String    @db.VarChar(200)
+  category      String?   @db.VarChar(100) // hvac | plumbing | electrical | furniture | appliance
+  serialNumber  String?   @db.VarChar(100)
+  purchaseDate  DateTime? @db.Date
+  warrantyUntil DateTime? @db.Date
+  notes         String?
+  createdAt     DateTime  @default(now()) @db.Timestamptz(6)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  branch Branch @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  room   Room?  @relation(fields: [roomId], references: [id], onDelete: SetNull)
+
+  maintenanceOrders MaintenanceOrder[]
+
+  @@index([branchId])
+  @@map("assets")
+}
+
+model RegistrationCard {
+  id            String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId      String    @db.Uuid
+  branchId      String    @db.Uuid
+  reservationId String    @db.Uuid
+  guestId       String    @db.Uuid
+  fields        Json // snapshot of guest data at check-in
+  signatureData String? // base64 SVG/PNG from signature pad; NULL = unsigned
+  signedAt      DateTime? @db.Timestamptz(6)
+  witnessedBy   String?   @db.Uuid // front desk agent
+  documentUrl   String? // S3 URL of generated PDF (encrypted bucket)
+  generatedAt   DateTime  @default(now()) @db.Timestamptz(6)
+  retainUntil   DateTime? @db.Date // regulatory retention end date
+
+  tenant          Tenant       @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  branch          Branch       @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  reservation     Reservation  @relation(fields: [reservationId], references: [id], onDelete: Restrict)
+  guest           GuestProfile @relation(fields: [guestId], references: [id], onDelete: Restrict)
+  witnessedByUser User?        @relation(fields: [witnessedBy], references: [id], onDelete: SetNull)
+
+  @@index([reservationId])
+  @@index([guestId, generatedAt(sort: Desc)])
+  @@index([branchId, retainUntil])
+  @@map("registration_cards")
+}
+
+model OverbookingConfig {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId       String    @db.Uuid
+  branchId       String    @db.Uuid
+  roomTypeId     String?   @db.Uuid // NULL = applies to all types
+  globalEnabled  Boolean   @default(false) // branch-level master switch (spec: allowOverbooking)
+  maxOverbookPct Decimal?  @db.Decimal(5, 2) // 10.00 = allow 10% over capacity
+  alertAtPct     Decimal?  @db.Decimal(5, 2)
+  validFrom      DateTime? @db.Date
+  validTo        DateTime? @db.Date
+  updatedAt      DateTime  @updatedAt @db.Timestamptz(6)
+  updatedBy      String?   @db.Uuid
+
+  tenant        Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  branch        Branch    @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  roomType      RoomType? @relation(fields: [roomTypeId], references: [id], onDelete: Cascade)
+  updatedByUser User?     @relation(fields: [updatedBy], references: [id], onDelete: SetNull)
+
+  @@unique([branchId, roomTypeId])
+  @@map("overbooking_config")
+}
+
+model Outlet {
+  id         String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId   String         @db.Uuid
+  branchId   String         @db.Uuid
+  name       String         @db.VarChar(150) // "Main Restaurant", "Poolside Bar", "Zen Spa"
+  category   OutletCategory // grouping for management reports
+  chargeType ChargeType // stamped on every line item this outlet posts — staff never choose
+  isActive   Boolean        @default(true) // inactive = hidden from POS selector, kept for history
+  sortOrder  Int?
+  createdAt  DateTime       @default(now()) @db.Timestamptz(6)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  branch Branch @relation(fields: [branchId], references: [id], onDelete: Cascade)
+
+  ratePlans      RatePlan[]
+  lineItems      LineItem[]
+  activeInShifts Shift[]
+  userOutlets    UserOutlet[]
+
+  @@index([branchId, isActive])
+  @@index([branchId, category])
+  @@map("outlets")
+}
+
+model UserOutlet {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId   String   @db.Uuid
+  userId     String   @db.Uuid
+  outletId   String   @db.Uuid
+  branchId   String   @db.Uuid // denormalised for efficient RLS + branch filtering
+  assignedBy String?  @db.Uuid
+  assignedAt DateTime @default(now()) @db.Timestamptz(6)
+
+  tenant         Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user           User   @relation("UserOutletUser", fields: [userId], references: [id], onDelete: Cascade)
+  outlet         Outlet @relation(fields: [outletId], references: [id], onDelete: Cascade)
+  branch         Branch @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  assignedByUser User?  @relation("UserOutletAssignedBy", fields: [assignedBy], references: [id], onDelete: SetNull)
+
+  @@unique([userId, outletId])
+  @@index([userId, branchId])
+  @@index([outletId])
+  @@map("user_outlets")
+}
+
+model NightAuditLog {
+  id                BigInt           @id @default(autoincrement())
+  tenantId          String           @db.Uuid
+  branchId          String           @db.Uuid
+  auditDate         DateTime         @db.Date // the calendar date being closed (branch timezone)
+  triggeredBy       String?          @db.Uuid // NULL = scheduled automatic run
+  triggeredAt       DateTime         @default(now()) @db.Timestamptz(6)
+  status            NightAuditStatus @default(running) // 'running' older than 10 min = stuck
+  foliosProcessed   Int?
+  chargesPosted     Int?
+  totalAmountPosted Decimal?         @db.Decimal(14, 2)
+  errors            Json? // [{folioId, reason}] — continue on error, never abort the batch
+  completedAt       DateTime?        @db.Timestamptz(6)
+
+  tenant          Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  branch          Branch @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  triggeredByUser User?  @relation(fields: [triggeredBy], references: [id], onDelete: SetNull)
+
+  @@unique([branchId, auditDate]) // the DB enforces single-run
+  @@index([branchId, auditDate(sort: Desc)])
+  @@index([status])
+  @@map("night_audit_log")
+}
+
+// ---------------------------------------------------------------------------
+// Comms & Compliance (3)
+// ---------------------------------------------------------------------------
+
+model CommunicationLog {
+  id                String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId          String         @db.Uuid
+  branchId          String         @db.Uuid
+  reservationId     String?        @db.Uuid // NULL = marketing / no specific reservation
+  guestId           String         @db.Uuid
+  channel           CommsChannel
+  subject           String?        @db.VarChar(500) // email only
+  body              String
+  trigger           String         @db.VarChar(50) // booking_confirmation | pre_arrival | checkin_receipt | invoice | post_stay | no_show_notice | cancellation | manual
+  deliveryStatus    DeliveryStatus @default(queued) // MVP: rows stay 'queued' — sending adapter is stubbed
+  externalMessageId String?        @db.VarChar(200)
+  sentBy            String?        @db.Uuid // NULL = automated system send
+  sentAt            DateTime       @default(now()) @db.Timestamptz(6)
+  deliveredAt       DateTime?      @db.Timestamptz(6)
+
+  tenant      Tenant       @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  branch      Branch       @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  reservation Reservation? @relation(fields: [reservationId], references: [id], onDelete: SetNull)
+  guest       GuestProfile @relation(fields: [guestId], references: [id], onDelete: Restrict)
+  sentByUser  User?        @relation(fields: [sentBy], references: [id], onDelete: SetNull)
+
+  @@index([reservationId, sentAt(sort: Desc)])
+  @@index([guestId, sentAt(sort: Desc)])
+  @@index([branchId, deliveryStatus, sentAt])
+  @@map("communication_log")
+}
+
+// Append-only staff action ledger. Every state-changing endpoint writes here
+// via the AuditInterceptor. Cross-tenant access attempts are logged with
+// action prefix 'security.'.
+model AuditLog {
+  id         BigInt   @id @default(autoincrement())
+  tenantId   String   @db.Uuid
+  branchId   String?  @db.Uuid
+  userId     String?  @db.Uuid // NULL = system action
+  action     String   @db.VarChar(100) // e.g. reservation.check_in | folio.charge_posted
+  entityType String?  @db.VarChar(50)
+  entityId   String?  @db.Uuid
+  before     Json? // NULL for CREATE
+  after      Json? // NULL for DELETE
+  ipAddress  String?  @db.Inet
+  userAgent  String? // truncated to 500 chars at write time
+  timestamp  DateTime @default(now()) @db.Timestamptz(6)
+
+  tenant Tenant  @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  branch Branch? @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId, timestamp(sort: Desc)])
+  @@index([entityType, entityId])
+  @@index([userId, timestamp(sort: Desc)])
+  @@map("audit_log")
+}
+
+model GdprRequest {
+  id          String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId    String     @db.Uuid
+  guestId     String     @db.Uuid
+  type        GdprType
+  status      GdprStatus @default(pending)
+  requestedBy String     @db.VarChar(320) // email of requester (may not be a system user)
+  requestedAt DateTime   @default(now()) @db.Timestamptz(6)
+  deadline    DateTime   @db.Date // requestedAt + 30 days
+  completedAt DateTime?  @db.Timestamptz(6)
+  exportUrl   String? // signed S3 URL, expires after 7 days
+  notes       String?
+
+  tenant Tenant       @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  guest  GuestProfile @relation(fields: [guestId], references: [id], onDelete: Restrict)
+
+  @@index([tenantId, status])
+  @@map("gdpr_requests")
+}
+
+// ---------------------------------------------------------------------------
+// System (2) — global tables, NOT tenant-scoped (no RLS)
+// ---------------------------------------------------------------------------
+
+model FeatureFlag {
+  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name              String   @unique @db.VarChar(100) // loyalty_module | overbooking_engine
+  enabledGlobally   Boolean  @default(false)
+  enabledForTenants String[] @db.Uuid // tenant-specific overrides; empty = use global
+  rolloutPct        Int?     @db.SmallInt // 0–100
+  updatedAt         DateTime @updatedAt @db.Timestamptz(6)
+  updatedBy         String?  @db.VarChar(200)
+
+  @@map("feature_flags")
+}
+
+model BackupRecord {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId    String?   @db.Uuid // NULL = full-system backup
+  type        String    @db.VarChar(20) // full | incremental | schema_only
+  status      String    @db.VarChar(20) // running | completed | failed
+  storageUrl  String?
+  sizeBytes   BigInt?
+  startedAt   DateTime  @default(now()) @db.Timestamptz(6)
+  completedAt DateTime? @db.Timestamptz(6)
+  retainUntil DateTime? @db.Date
+
+  @@index([tenantId])
+  @@map("backup_records")
+}
