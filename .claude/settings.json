@@ -11,7 +11,12 @@
       "PowerShell(node \"C:\\\\Temp\\\\claude\\\\c--Users-WINDOWS-Desktop-PROJECTS-Roomick-PMS-roomick-pms-backend\\\\a556d039-8025-4ae3-bb31-3a40f231db63\\\\scratchpad\\\\check-seed.js\")",
       "PowerShell(npm install dotenv --no-audit --no-fund)",
       "PowerShell(Invoke-RestMethod http://localhost:3000/api/v1/system/health)",
-      "PowerShell($env:PORT='3001'; node dist/main.js)"
+      "PowerShell($env:PORT='3001'; node dist/main.js)",
+      "PowerShell(Get-CimInstance Win32_Process -Filter \"Name = 'node.exe'\" | Select-Object ProcessId, @{N='Cmd';E={$_.CommandLine.Substring\\(0, [Math]::Min\\(160, $_.CommandLine.Length\\)\\)}} | Format-List)",
+      "PowerShell(Stop-Process -Id 11260,22028,2760 -Force -ErrorAction SilentlyContinue)",
+      "PowerShell(npx prisma generate)",
+      "PowerShell(& \"C:\\\\Temp\\\\claude\\\\c--Users-WINDOWS-Desktop-PROJECTS-Roomick-PMS-roomick-pms-backend\\\\a556d039-8025-4ae3-bb31-3a40f231db63\\\\scratchpad\\\\p1-smoke.ps1\")",
+      "Read(//c/Users/WINDOWS/Downloads/**)"
     ]
   }
 }

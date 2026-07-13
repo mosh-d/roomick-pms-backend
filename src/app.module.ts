@@ -11,7 +11,11 @@ import { AuditInterceptor } from './common/interceptors/audit.interceptor';
 import { TenantContextInterceptor } from './common/interceptors/tenant-context.interceptor';
 import { JwtStrategy } from './common/strategies/jwt.strategy';
 import { envValidationSchema } from './config/env.validation';
+import { AuthModule } from './modules/auth/auth.module';
+import { PropertyModule } from './modules/property/property.module';
 import { SystemModule } from './modules/system/system.module';
+import { TenantsModule } from './modules/tenants/tenants.module';
+import { UsersModule } from './modules/users/users.module';
 import { PrismaModule } from './prisma/prisma.module';
 
 @Module({
@@ -26,6 +30,10 @@ import { PrismaModule } from './prisma/prisma.module';
     CommonModule,
     PrismaModule,
     SystemModule,
+    AuthModule,
+    TenantsModule,
+    UsersModule,
+    PropertyModule,
   ],
   providers: [
     JwtStrategy,

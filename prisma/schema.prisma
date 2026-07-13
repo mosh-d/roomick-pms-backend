@@ -390,10 +390,11 @@ model User {
 }
 
 model Role {
-  id       String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  tenantId String  @db.Uuid
-  name     String  @db.VarChar(100)
-  isSystem Boolean @default(false)
+  id          String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId    String  @db.Uuid
+  name        String  @db.VarChar(100)
+  isSystem    Boolean @default(false)
+  permissions Json? // {module: [actions]} — PUT /auth/roles/:roleId/permissions; NULL = role-name defaults
 
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 

@@ -1,5 +1,31 @@
 # Phase Notes
 
+## P1 — Identity & Property (2026-07-13)
+
+### Delivered
+- **auth**: register (tenant + owner + 6 seeded system roles in one tx), verify-email, login (subdomain or X-Tenant-ID), refresh (rotating pair, roles reloaded from DB), accept-invite (auto-login), GET /auth/roles, PUT /auth/roles/:roleId/permissions.
+- **tenants**: POST /tenants/configure-mode — single mode auto-creates the hidden brand; mode is immutable once any brand exists (409).
+- **users/staff**: GET /branches/:id/staff, POST /branches/:id/staff/invite (bulk, one invite_tokens row per email, 72h TTL, re-invite replaces pending row), PATCH /staff/:userId (role/outlets/active — deactivation is soft delete), GET/PUT /users/:id/outlets (branch-scoped replacement, validates outlet↔branch).
+- **property**: brands CRUD (single-mode cap enforced), branches (IANA timezone validated, times stored as TIME), buildings/floors incl. POST /branches/:id/floors for "Floors Only" onboarding, room-types (baseRate lives here), POST /branches/:id/rooms/bulk (range and/or explicit numbers, ≤500, clash detection), PATCH /rooms/:id/status (full §4.1 axis state machine), POST /rooms/:id/block, overbooking-config upsert, no-show policy, reg-card template.
+- 52 unit tests green; live smoke test exercised the full flow end-to-end (register → … → staff list) including negative cases: cross-tenant header → 403 + audit row, ladder skip → 409, non-supervisor inspected → 403.
+- Every module ships `http/<module>.<verb>.endpoints.http` httpYac files.
+
+### Decisions & deviations (P1)
+1. **Stateless tokens for email-verification and refresh** — the 39-table schema has no token tables; both are signed JWTs (`tokenType` claim distinguishes them; JwtStrategy accepts only `access`). Revocation-on-logout can be added in P6 if needed.
+2. **Invite public token = `<tenantId>.<secret>`** — accept-invite is pre-auth, and FORCE RLS blocks a bare token lookup; the tenant prefix establishes RLS context, the stored secret authenticates. Invite/verification emails are stubbed: tokens are returned in the API response (swap for the comms adapter in P5).
+3. **roles.permissions JSONB added** (migration `20260713010000`) — §5 requires PUT /auth/roles/:roleId/permissions but no storage existed. Enforcement stays role-name based in RolesGuard for MVP; the JSON map is stored/audited for the UI.
+4. **`brandMode` placeholder** — register sets `single`; configure-mode (signup step 2) finalises it. Immutability is enforced by "any brand exists", per the DB doc.
+5. **POST /branches/:branchId/floors added** (not in the §5 list) — required by "Floors Only" onboarding since the listed floors endpoint needs a buildingId; it targets the hidden default building.
+6. **§4.1 interpretation**: cleanliness ladder strictly `dirty → cleaning → clean → inspected` with any-state → `dirty` allowed (checkout/re-clean); `cleaning → dirty` allowed (abort). Manual occupancy flips and held changes are supervisor-only (owner/manager) corrections — check-in/check-out transactions own those axes from P3.
+7. **accept-invite marks email verified** — receiving the invite email proves mailbox ownership.
+8. Login without subdomain falls back to the raw X-Tenant-ID header (public route, so TenantGuard hasn't validated it — it's only used to *find* the tenant; the password still decides).
+
+### Carried forward
+- Rate limiting on auth endpoints + refresh-token revocation → P6 hardening.
+- RolesGuard reads role names from the JWT; custom per-role permission enforcement (the JSONB map) → when the frontend needs it.
+
+
+
 ## P0 — Skeleton (2026-07-12)
 
 ### Delivered
