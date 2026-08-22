@@ -293,6 +293,13 @@ model Tenant {
   brandMode   BrandMode
   status      TenantStatus @default(trial)
   trialEndsAt DateTime?    @db.Timestamptz(6)
+  // Demo tenants (self-serve "try it" signups, not a sales-assisted trial):
+  // auto-expire and get swept by a scheduled job (see
+  // TenantsService.deleteOrganization / the demo-cleanup cron), or a user
+  // can trigger the same deletion early via DELETE /tenants/:id. Real
+  // tenants never set these.
+  isDemo        Boolean   @default(false)
+  demoExpiresAt DateTime? @db.Timestamptz(6)
   createdAt   DateTime     @default(now()) @db.Timestamptz(6)
   updatedAt   DateTime     @updatedAt @db.Timestamptz(6)
 
@@ -334,6 +341,7 @@ model Tenant {
   auditLogs         AuditLog[]
   gdprRequests      GdprRequest[]
 
+  @@index([isDemo, demoExpiresAt])
   @@map("tenants")
 }
 

@@ -1,5 +1,25 @@
 # Phase Notes
 
+## Demo tenants + delete organization (2026-08-22)
+
+### Delivered
+- `Tenant.isDemo`/`Tenant.demoExpiresAt` (migration `20260822000000_demo_tenant_fields`, hand-written — the `roomick` DB role has no CREATEDB grant, so `prisma migrate dev`'s shadow-database diffing can't run; `migrate deploy` against a hand-authored SQL file works fine and is the correct workflow when the role is properly locked down).
+- `RegisterDto.isDemo?: boolean` — self-serve "try it" signups (not sales-assisted trials) set this; `AuthService.register()` stamps `demoExpiresAt` = now + `DEMO_TENANT_TTL_DAYS` (30, in `tenants.service.ts`) when set.
+- `DELETE /tenants/me` (owner-only, 204) — `TenantsService.deleteOrganization()`. Always the caller's own tenant (derived the same way every other endpoint derives it — JWT + X-Tenant-ID via `@CurrentTenant()`), never a client-supplied ID.
+- `TenantsService.sweepExpiredDemoTenants()` — `@Cron(CronExpression.EVERY_DAY_AT_MIDNIGHT)`, calls the same `deleteOrganization()` for every tenant past its `demoExpiresAt`. First real consumer of `ScheduleModule.forRoot()`, registered since P0 but unused until now.
+
+### Decisions & deviations
+1. **Deletion order is schema-derived, not guessed — and got it wrong once, caught by actually testing against a populated tenant rather than trusting a schema read.** The schema deliberately `Restrict`s a tenant's real financial/operational data (spec: money is append-only) so a tenant can't be silently cascade-wiped. Of the `Restrict`-configured tables, only five are reachable via what's built today: Room, RoomType, Branch, User — and **AuditLog**, which was missed on the first pass (nothing in the schema read flagged it as "populated by side effect") and only surfaced as a live `PrismaClientUnknownRequestError` (FK violation, code 23001) when deleting a tenant that had actually gone through register→configure-mode→branch→room-type→rooms/bulk, each of which writes an audit row via the global `AuditInterceptor`. Fixed by explicitly clearing `auditLog` first. Full reasoning + the exact dependency order lives as a comment on `deleteOrganization()` — read it before touching this method.
+2. **Scope: today's reachable tables only, not general-purpose.** Reservation/Folio/Payment/etc. are `Restrict`-configured too but nothing populates them yet (P2+ endpoints don't exist). If a tenant somehow has real transactional data, the delete fails loudly (DB constraint error) instead of silently destroying it — a deliberate fail-safe. Revisit this method's explicit-delete list as each new module lands real write paths.
+3. **`DELETE /tenants/me`, not `/tenants/:id`** — matches the existing `configureMode` pattern (`@CurrentTenant()`, never a path param) rather than requiring an extra "does `:id` match the caller's own tenant" check.
+4. **Not demo-gated.** Any tenant's owner can call this, not just demo ones — deleting your own account/data on request is a reasonable capability independent of demo status (arguably closer to a GDPR-style expectation than something to restrict).
+5. **Verified live, not just unit-tested**: registered a demo tenant, ran it through the *entire* currently-built onboarding surface (configure-mode → brand → branch → room-type → 5 rooms via bulk), confirmed `isDemo`/`demoExpiresAt` persisted correctly, then called `DELETE /tenants/me` and confirmed the tenant row (and, by Postgres's own atomic cascade guarantee, everything Cascade-configured beneath it) was fully gone.
+
+### Carried forward
+- Redis-backed advisory locking or similar if the nightly sweep ever needs to run across multiple instances (not needed yet — single instance).
+- Extending `deleteOrganization`'s explicit-delete list as P2+ modules add new `Restrict`-configured tables that become reachable.
+- `npm test` now emits a harmless-but-worth-fixing Jest warning ("worker process failed to exit gracefully... active timers") — the new `@Cron` job's timer isn't torn down between test runs. Doesn't fail anything; a proper fix would close the Nest testing module's scheduler in an `afterAll` wherever it gets bootstrapped.
+
 ## Hardening — Auth rate limiting (2026-08-22)
 
 ### Delivered

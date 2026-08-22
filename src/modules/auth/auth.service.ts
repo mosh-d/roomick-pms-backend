@@ -15,6 +15,7 @@ import { randomBytes } from 'node:crypto';
 import { ErrorCode } from '../../common/errors/error-codes';
 import { JwtPayload } from '../../common/types/request-context';
 import { PrismaService, TenantTx } from '../../prisma/prisma.service';
+import { demoExpiryFromNow } from '../tenants/tenants.service';
 import { AcceptInviteDto } from './dto/accept-invite.dto';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
@@ -99,6 +100,8 @@ export class AuthService {
         groupName: dto.groupName,
         brandMode: 'single',
         status: 'trial',
+        isDemo: dto.isDemo ?? false,
+        demoExpiresAt: dto.isDemo ? demoExpiryFromNow() : null,
       },
     });
 

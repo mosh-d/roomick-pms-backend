@@ -1,4 +1,4 @@
-import { Body, Controller, Post } from '@nestjs/common';
+import { Body, Controller, Delete, HttpCode, HttpStatus, Post } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentTenant, CurrentUser } from '../../common/decorators';
 import { Roles, SystemRole } from '../../common/decorators/roles.decorator';
@@ -23,5 +23,18 @@ export class TenantsController {
     @Body() dto: ConfigureModeDto,
   ): ReturnType<TenantsService['configureMode']> {
     return this.tenantsService.configureMode(tenantId, dto, user.sub);
+  }
+
+  @Delete('me')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @Roles(SystemRole.Owner)
+  @ApiOperation({
+    summary:
+      'Delete the caller\'s own organization — manual counterpart to the demo-tenant auto-expiry sweep. ' +
+      'The manual "Delete Organization" action (no path param: always the caller\'s own tenant, derived ' +
+      'the same way every other endpoint derives it, never trusted from a client-supplied ID).',
+  })
+  deleteOrganization(@CurrentTenant() tenantId: string): ReturnType<TenantsService['deleteOrganization']> {
+    return this.tenantsService.deleteOrganization(tenantId);
   }
 }

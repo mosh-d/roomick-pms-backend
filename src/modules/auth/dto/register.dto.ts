@@ -1,6 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Transform } from 'class-transformer';
 import {
+  IsBoolean,
   IsEmail,
   IsOptional,
   IsString,
@@ -52,4 +53,15 @@ export class RegisterDto {
   @IsString()
   @MaxLength(20)
   phone?: string;
+
+  @ApiPropertyOptional({
+    default: false,
+    description:
+      'Self-serve "try it" signup, not a sales-assisted trial — the resulting tenant auto-expires ' +
+      '30 days from creation (see AuthService.register) and can also be deleted early via ' +
+      'DELETE /tenants/:id. Real signups must never set this.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  isDemo?: boolean;
 }
