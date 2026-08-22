@@ -16,7 +16,10 @@
       "PowerShell(Stop-Process -Id 11260,22028,2760 -Force -ErrorAction SilentlyContinue)",
       "PowerShell(npx prisma generate)",
       "PowerShell(& \"C:\\\\Temp\\\\claude\\\\c--Users-WINDOWS-Desktop-PROJECTS-Roomick-PMS-roomick-pms-backend\\\\a556d039-8025-4ae3-bb31-3a40f231db63\\\\scratchpad\\\\p1-smoke.ps1\")",
-      "Read(//c/Users/WINDOWS/Downloads/**)"
+      "Read(//c/Users/WINDOWS/Downloads/**)",
+      "PowerShell(npx prisma validate)",
+      "PowerShell(npx prisma format --check 2>$null)",
+      "PowerShell(npx prisma generate 2>&1)"
     ]
   }
 }
