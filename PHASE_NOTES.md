@@ -1,5 +1,21 @@
 # Phase Notes
 
+## Hardening — Auth rate limiting (2026-08-22)
+
+### Delivered
+- `@nestjs/throttler` wired as a global guard (`ThrottlerModule.forRoot([{ ttl: 60_000, limit: 100 }])` — 100 req/min/IP default), ordered *first* in the guard chain (before `JwtAuthGuard`) so abusive traffic is rejected before it costs a DB round-trip.
+- Per-route overrides on every `@Public()` auth endpoint, tightest on `register`: 5/15min (it provisions a tenant + owner + 6 seeded system roles in one transaction, not a plain INSERT), `login`/`verify-email`/`accept-invite` at 10/min, `refresh` at 20/min (looser — reaching it already requires a valid refresh token).
+
+### Decisions & deviations
+1. **Pulled forward from the P6 hardening backlog** (see P1's "Carried forward" below) rather than left deferred. Reasoning: `register()`'s cost (tenant + owner + role provisioning per call, fully unauthenticated) makes "no rate limit yet" a real resource-exhaustion/spam vector, not just a theoretical gap — cheap to close (one package, a decorator per route) relative to the risk, so there was no good reason to wait for a P6 that has no scheduled date.
+2. **In-memory storage** (the package's default) — correct for this single-instance dev/local deployment. A multi-instance production deployment would need a shared store (the package ships a Redis storage adapter) so instances share counters instead of each enforcing the limit independently. Not needed yet — noted for when horizontal scaling actually happens.
+3. **CAPTCHA/bot-protection explicitly NOT added** — needs a third-party service + frontend integration; the cost isn't justified pre-launch (nothing here is reachable from a public URL yet). Revisit alongside real deployment, not before.
+4. Limits are hardcoded in `app.module.ts`/`auth.controller.ts`, not env-configurable — matches this codebase's existing minimal-env-surface style (see `env.validation.ts`); revisit only if a real need to tune them per-environment shows up.
+
+### Carried forward
+- Refresh-token revocation-on-logout (still P1's original deferral).
+- CAPTCHA/bot-protection, Redis-backed throttler storage for multi-instance deployment (see above).
+
 ## P1 — Identity & Property (2026-07-13)
 
 ### Delivered

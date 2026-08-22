@@ -3,6 +3,7 @@ import { ConfigModule } from '@nestjs/config';
 import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { PassportModule } from '@nestjs/passport';
 import { ScheduleModule } from '@nestjs/schedule';
+import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { CommonModule } from './common/common.module';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import { RolesGuard } from './common/guards/roles.guard';
@@ -27,6 +28,16 @@ import { PrismaModule } from './prisma/prisma.module';
     }),
     PassportModule,
     ScheduleModule.forRoot(),
+    // Global default: 100 req/min per IP. Generous enough not to trip up
+    // normal browsing/polling; the auth module overrides this per-route
+    // with much tighter limits (see auth.controller.ts) since those routes
+    // are @Public() — reachable with no JWT at all — and register()
+    // specifically provisions a full tenant + owner + 6 system roles in
+    // one transaction, not just an INSERT. In-memory storage (the
+    // package's default) is fine for this single-instance deployment;
+    // running more than one API instance would need a shared store (e.g.
+    // the package's Redis storage adapter) so instances share counters.
+    ThrottlerModule.forRoot([{ ttl: 60_000, limit: 100 }]),
     CommonModule,
     PrismaModule,
     SystemModule,
@@ -37,7 +48,10 @@ import { PrismaModule } from './prisma/prisma.module';
   ],
   providers: [
     JwtStrategy,
-    // Order matters: authenticate → validate tenant header ↔ JWT claim → check roles.
+    // Order matters: throttle first (reject abusive traffic before it
+    // costs a DB round-trip) → authenticate → validate tenant header ↔ JWT
+    // claim → check roles.
+    { provide: APP_GUARD, useClass: ThrottlerGuard },
     { provide: APP_GUARD, useClass: JwtAuthGuard },
     { provide: APP_GUARD, useClass: TenantGuard },
     { provide: APP_GUARD, useClass: RolesGuard },

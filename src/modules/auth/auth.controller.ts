@@ -13,6 +13,7 @@ import {
   Query,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
 import { Role } from '@prisma/client';
 import { CurrentTenant, CurrentUser, Public } from '../../common/decorators';
 import { Roles, SystemRole } from '../../common/decorators/roles.decorator';
@@ -32,6 +33,14 @@ export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
   @Public()
+  // Strictest limit in this controller: register() isn't a plain INSERT —
+  // it provisions a tenant + owner + 6 seeded system roles in one
+  // transaction (see AuthService.register), so unlimited unauthenticated
+  // calls here are both a spam vector and a real resource-exhaustion risk.
+  // 5 per 15 minutes per IP is generous for a genuine signup (nobody
+  // registers 6 tenants in 15 minutes from one machine) and cheap for an
+  // attacker to not bother with.
+  @Throttle({ default: { limit: 5, ttl: 900_000 } })
   @Post('register')
   @ApiOperation({ summary: 'Tenant signup step 1 — creates tenant, owner account, system roles' })
   register(@Body() dto: RegisterDto): ReturnType<AuthService['register']> {
@@ -39,6 +48,7 @@ export class AuthController {
   }
 
   @Public()
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
   @Post('verify-email')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Confirm owner/staff email with the token from the signup email' })
@@ -47,6 +57,13 @@ export class AuthController {
   }
 
   @Public()
+  // Standard anti-brute-force/credential-stuffing limit. Loose enough that
+  // a shared office/hotel-desk IP with a few staff mistyping passwords
+  // won't get itself locked out, tight enough to make password guessing
+  // impractical. AuthService.login's DUMMY_HASH already makes timing
+  // attacks against this endpoint uninformative; this closes the other
+  // half (raw guess-rate).
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
   @Post('login')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Login with email + password (+ subdomain or X-Tenant-ID header)' })
@@ -60,6 +77,10 @@ export class AuthController {
   }
 
   @Public()
+  // Looser than login: reaching this route at all requires already
+  // possessing a valid (signed, unexpired) refresh token, which is a much
+  // higher bar than "knows an email address."
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
   @Post('refresh')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Exchange a refresh token for a fresh token pair' })
@@ -68,6 +89,7 @@ export class AuthController {
   }
 
   @Public()
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
   @Post('accept-invite/:token')
   @ApiOperation({ summary: 'Accept a staff invite — creates the account and logs in' })
   acceptInvite(
