@@ -288,6 +288,11 @@ enum GdprStatus {
 
 model Tenant {
   id          String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  // Backend-internal identifier only — auto-generated at registration
+  // (slugified groupName, retried with a random suffix on collision, see
+  // AuthService.register), never user-typed or shown. Login no longer
+  // uses it at all (see UserEmailIndex below); nothing else in the app
+  // consumes it as a real subdomain/URL either.
   subdomain   String       @unique @db.VarChar(63)
   groupName   String       @db.VarChar(200)
   brandMode   BrandMode
@@ -397,9 +402,38 @@ model User {
   communicationsSent         CommunicationLog[]
   auditLogs                  AuditLog[]
 
-  @@unique([tenantId, email])
+  // Global, not per-tenant: login is plain email+password now (no
+  // subdomain/tenant header to disambiguate), so one email can only ever
+  // resolve to one account. Real behavior change from the old
+  // @@unique([tenantId, email]) — the same address can no longer be staff
+  // at two independent tenants (see UserEmailIndex below and
+  // AuthService.acceptInvite's cross-tenant guard).
+  @@unique([email])
   @@index([tenantId, deletedAt])
   @@map("users")
+}
+
+/**
+ * Deliberately NOT RLS-scoped — same category as `Tenant`/`FeatureFlag`/
+ * `BackupRecord` (system-level, not per-tenant data). Exists because
+ * `users` has FORCE ROW LEVEL SECURITY (`tenant_isolation` policy,
+ * `USING ("tenantId" = current_setting('app.tenant_id', true)::uuid)`):
+ * a query against `users` with no `app.tenant_id` set (i.e. before you
+ * know which tenant to even look in) returns zero rows, always — verified
+ * directly, not assumed. Login needs exactly this "which tenant does this
+ * email belong to" answer *before* it can call `withTenant()`, so this
+ * table exists purely to answer that one question, holding nothing more
+ * sensitive than the pointer itself: no passwordHash, no name, no phone.
+ * Every real user field still lives only on the RLS-protected `users` row.
+ */
+model UserEmailIndex {
+  email     String   @id @db.VarChar(320)
+  tenantId  String   @db.Uuid
+  userId    String   @db.Uuid
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+
+  @@index([tenantId])
+  @@map("user_email_index")
 }
 
 model Role {

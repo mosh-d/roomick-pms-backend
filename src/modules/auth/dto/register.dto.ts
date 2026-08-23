@@ -7,28 +7,20 @@ import {
   IsOptional,
   IsString,
   IsStrongPassword,
-  Matches,
   MaxLength,
   MinLength,
 } from 'class-validator';
 import { toTrimmedLowerCase } from '../../../common/transforms/string.transforms';
 
+/**
+ * No `subdomain` field — login is plain email+password now (see LoginDto),
+ * so there's nothing left for a user-typed subdomain to disambiguate.
+ * `Tenant.subdomain` still exists as a DB column (still `@unique`) but is
+ * generated internally by `AuthService.register()` (slugified `groupName`,
+ * retried with a random suffix on collision) — never read from the
+ * request body.
+ */
 export class RegisterDto {
-  @ApiProperty({
-    example: 'acme',
-    description:
-      'Short, unique account id — used to resolve which tenant a login belongs to (see LoginDto). ' +
-      'Not currently a real subdomain/URL; no per-tenant routing is wired up.',
-  })
-  @Transform(toTrimmedLowerCase)
-  @IsString()
-  @MinLength(3)
-  @MaxLength(63)
-  @Matches(/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/, {
-    message: 'subdomain must be lowercase alphanumeric with inner hyphens only',
-  })
-  subdomain!: string;
-
   @ApiProperty({ example: 'Acme Hotels Group' })
   @IsString()
   @MinLength(2)

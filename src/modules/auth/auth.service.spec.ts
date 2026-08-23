@@ -37,6 +37,14 @@ function makeTx(): Record<string, Record<string, jest.Mock>> {
       findUnique: jest.fn(),
       update: jest.fn().mockResolvedValue({}),
     },
+    userEmailIndex: {
+      // register()'s and acceptInvite()'s cross-tenant-guard writes — both
+      // run via `tx`, inside the same transaction as user creation, not
+      // the top-level `prisma` client (see auth.service.ts's own comment
+      // on why: atomicity, not RLS — the table isn't RLS-scoped at all).
+      create: jest.fn().mockResolvedValue({}),
+      findUnique: jest.fn().mockResolvedValue(null),
+    },
     auditLog: {
       create: jest.fn().mockResolvedValue({}),
     },
@@ -48,6 +56,7 @@ describe('AuthService', () => {
   let tx: ReturnType<typeof makeTx>;
   let prisma: {
     tenant: { findUnique: jest.Mock; create: jest.Mock };
+    userEmailIndex: { findUnique: jest.Mock; create: jest.Mock };
     withTenant: jest.Mock;
   };
   let jwt: { signAsync: jest.Mock; verifyAsync: jest.Mock };
@@ -56,8 +65,18 @@ describe('AuthService', () => {
     tx = makeTx();
     prisma = {
       tenant: {
+        // Doubles as generateUniqueSubdomain()'s collision check in
+        // register() now — null (no collision) is the correct happy-path
+        // default for both callers.
         findUnique: jest.fn().mockResolvedValue(null),
         create: jest.fn().mockResolvedValue({ id: TENANT_ID, subdomain: 'acme' }),
+      },
+      userEmailIndex: {
+        // register()'s and login()'s pre-checks run against the top-level
+        // client, not `tx` — null (no existing account) is the correct
+        // happy-path default; individual tests override for collisions.
+        findUnique: jest.fn().mockResolvedValue(null),
+        create: jest.fn().mockResolvedValue({}),
       },
       withTenant: jest.fn((_tenantId: string, fn: (t: unknown) => unknown) => fn(tx)),
     };
@@ -86,17 +105,34 @@ describe('AuthService', () => {
 
   describe('register', () => {
     const dto = {
-      subdomain: 'acme',
       groupName: 'Acme',
       name: 'Ada',
       email: 'ada@acme.test',
       password: 'Str0ngPass!',
     };
 
-    it('rejects a taken subdomain with SUBDOMAIN_TAKEN', async () => {
-      prisma.tenant.findUnique.mockResolvedValue({ id: 'existing' });
+    it('rejects a duplicate email with EMAIL_TAKEN', async () => {
+      prisma.userEmailIndex.findUnique.mockResolvedValue({ email: dto.email, tenantId: 'existing', userId: 'u' });
       await expect(service.register(dto)).rejects.toThrow(ConflictException);
       expect(prisma.tenant.create).not.toHaveBeenCalled();
+    });
+
+    it('retries subdomain generation on a collision instead of failing', async () => {
+      // First candidate ("acme") collides, second (suffixed) doesn't.
+      prisma.tenant.findUnique.mockResolvedValueOnce({ id: 'existing', subdomain: 'acme' }).mockResolvedValueOnce(null);
+      await service.register(dto);
+      expect(prisma.tenant.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ subdomain: expect.stringMatching(/^acme-[0-9a-f]{6}$/) }),
+        }),
+      );
+    });
+
+    it('writes a matching userEmailIndex row inside the same transaction as the user', async () => {
+      await service.register(dto);
+      expect(tx.userEmailIndex.create).toHaveBeenCalledWith({
+        data: { email: dto.email, tenantId: TENANT_ID, userId: USER_ID },
+      });
     });
 
     it('creates tenant, all six system roles, owner user and role assignment', async () => {
@@ -131,7 +167,7 @@ describe('AuthService', () => {
   });
 
   describe('login', () => {
-    const dto = { email: 'ada@acme.test', password: 'pw', subdomain: 'acme' };
+    const dto = { email: 'ada@acme.test', password: 'pw' };
     const verifiedUser = {
       id: USER_ID,
       tenantId: TENANT_ID,
@@ -143,14 +179,26 @@ describe('AuthService', () => {
     };
 
     beforeEach(() => {
-      prisma.tenant.findUnique.mockResolvedValue({ id: TENANT_ID, subdomain: 'acme' });
+      // The two-step lookup's first step — resolves which tenant to even
+      // look in, since `users` returns zero rows with no app.tenant_id set
+      // (FORCE ROW LEVEL SECURITY). Overridden per-test for the "email
+      // never indexed at all" case below.
+      prisma.userEmailIndex.findUnique.mockResolvedValue({ email: dto.email, tenantId: TENANT_ID, userId: USER_ID });
     });
 
-    it('rejects unknown users with INVALID_CREDENTIALS (and still runs bcrypt)', async () => {
+    it('rejects an unknown email with INVALID_CREDENTIALS and still runs bcrypt', async () => {
+      prisma.userEmailIndex.findUnique.mockResolvedValue(null);
+      (bcrypt.compare as jest.Mock).mockResolvedValue(false);
+      await expect(service.login(dto)).rejects.toThrow(UnauthorizedException);
+      expect(bcrypt.compare).toHaveBeenCalled(); // timing-safe: dummy hash comparison even on an index miss
+      expect(prisma.withTenant).not.toHaveBeenCalled(); // never even resolved a tenant to look in
+    });
+
+    it('rejects a user missing from the resolved tenant with INVALID_CREDENTIALS', async () => {
       tx.user.findFirst.mockResolvedValue(null);
       (bcrypt.compare as jest.Mock).mockResolvedValue(false);
       await expect(service.login(dto)).rejects.toThrow(UnauthorizedException);
-      expect(bcrypt.compare).toHaveBeenCalled(); // timing-safe: dummy hash comparison
+      expect(bcrypt.compare).toHaveBeenCalled();
     });
 
     it('rejects a wrong password', async () => {
@@ -181,12 +229,6 @@ describe('AuthService', () => {
       );
       expect(tx.user.update).toHaveBeenCalled(); // lastLoginAt
       expect(tx.auditLog.create).toHaveBeenCalled();
-    });
-
-    it('requires a subdomain or tenant header', async () => {
-      await expect(service.login({ email: 'a@b.c', password: 'x' })).rejects.toThrow(
-        BadRequestException,
-      );
     });
   });
 
@@ -293,6 +335,59 @@ describe('AuthService', () => {
         expect.objectContaining({ data: expect.objectContaining({ acceptedAt: expect.any(Date) }) }),
       );
       expect(result.accessToken).toBe('signed.jwt.token');
+    });
+
+    it('rejects a duplicate email with EMAIL_TAKEN when it belongs to a different tenant', async () => {
+      tx.inviteToken.findUnique.mockResolvedValue({
+        id: 'inv',
+        email: 'staff@acme.test',
+        roleId: 'role-fd',
+        branchId: 'branch-1',
+        acceptedAt: null,
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+      tx.user.findFirst.mockResolvedValue(null); // no existing user in *this* tenant
+      tx.userEmailIndex.findUnique.mockResolvedValue({
+        email: 'staff@acme.test',
+        tenantId: 'some-other-tenant',
+        userId: 'someone-else',
+      });
+
+      await expect(
+        service.acceptInvite(`${TENANT_ID}.${'a'.repeat(96)}`, { name: 'Chidi', password: 'Pw1aaaaa' }),
+      ).rejects.toThrow(ConflictException);
+      expect(tx.user.create).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('listMyBranches', () => {
+    it('returns [] without querying when there are no branch-scoped roles', async () => {
+      const result = await service.listMyBranches(TENANT_ID, [{ branchId: null, role: 'owner' }]);
+      expect(result).toEqual([]);
+      expect(prisma.withTenant).not.toHaveBeenCalled();
+    });
+
+    it('dedupes repeated branchIds before querying', async () => {
+      tx.branch = { findMany: jest.fn().mockResolvedValue([{ id: 'b1', name: 'Main' }]) };
+      await service.listMyBranches(TENANT_ID, [
+        { branchId: 'b1', role: 'front_desk' },
+        { branchId: 'b1', role: 'housekeeper' },
+        { branchId: 'b2', role: 'front_desk' },
+      ]);
+      expect(tx.branch.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: expect.objectContaining({ id: { in: ['b1', 'b2'] } }) }),
+      );
+    });
+
+    it('filters out null branchIds before querying', async () => {
+      tx.branch = { findMany: jest.fn().mockResolvedValue([]) };
+      await service.listMyBranches(TENANT_ID, [
+        { branchId: null, role: 'owner' },
+        { branchId: 'b1', role: 'front_desk' },
+      ]);
+      expect(tx.branch.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: expect.objectContaining({ id: { in: ['b1'] } }) }),
+      );
     });
   });
 });

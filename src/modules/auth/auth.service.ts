@@ -82,21 +82,25 @@ export class AuthService {
     subdomain: string;
     verificationToken: string;
   }> {
-    const existing = await this.prisma.tenant.findUnique({ where: { subdomain: dto.subdomain } });
-    if (existing) {
+    // Email is the real, global uniqueness check now (see UserEmailIndex in
+    // schema.prisma) — subdomain no longer has a user-facing collision to
+    // check, it's generated below regardless of what already exists.
+    const existingEmail = await this.prisma.userEmailIndex.findUnique({ where: { email: dto.email } });
+    if (existingEmail) {
       throw new ConflictException({
-        code: ErrorCode.SUBDOMAIN_TAKEN,
-        message: 'This subdomain is already in use',
+        code: ErrorCode.EMAIL_TAKEN,
+        message: 'An account with this email already exists',
       });
     }
 
     const passwordHash = await bcrypt.hash(dto.password, BCRYPT_COST);
+    const subdomain = await this.generateUniqueSubdomain(dto.groupName);
 
     // brandMode is finalised by POST /tenants/configure-mode (signup step 2);
     // 'single' is the placeholder until then — immutability is enforced there.
     const tenant = await this.prisma.tenant.create({
       data: {
-        subdomain: dto.subdomain,
+        subdomain,
         groupName: dto.groupName,
         brandMode: 'single',
         status: 'trial',
@@ -130,8 +134,21 @@ export class AuthService {
         data: { tenantId: tenant.id, userId: user.id, roleId: ownerRole.id, branchId: null },
       });
 
+      // Written via `tx`, inside the same transaction as user creation, for
+      // atomicity — `user_email_index` isn't RLS-scoped (no policy applies
+      // to it, see its schema.prisma comment) so this is only about the
+      // transaction boundary, not visibility. Doing this as a separate
+      // top-level call after the transaction commits would leave a real
+      // crash window: a user that exists but isn't indexed, unable to log
+      // in and unable to re-register (a Postgres-level unique violation on
+      // `users.email`, not the clean EMAIL_TAKEN this method's own
+      // pre-check is meant to give).
+      await tx.userEmailIndex.create({
+        data: { email: dto.email, tenantId: tenant.id, userId: user.id },
+      });
+
       await this.audit(tx, tenant.id, user.id, 'auth.register', 'tenant', tenant.id, {
-        subdomain: dto.subdomain,
+        subdomain,
       });
       return user;
     });
@@ -185,12 +202,33 @@ export class AuthService {
   // -------------------------------------------------------------------------
   // Login / refresh
   // -------------------------------------------------------------------------
-  async login(dto: LoginDto, headerTenantId?: string): Promise<LoginResult> {
-    const tenantId = await this.resolveTenantId(dto.subdomain, headerTenantId);
+  /**
+   * Two-step lookup, not a single query — `users` has FORCE ROW LEVEL
+   * SECURITY, and a query with no `app.tenant_id` set (i.e. before we know
+   * which tenant to even look in) returns zero rows, always, verified
+   * directly against the running app role (not assumed). `UserEmailIndex`
+   * exists purely to answer "which tenant" before `withTenant()` is even
+   * callable; it holds nothing else, so the real password/verification
+   * checks still happen against the RLS-protected `users` row exactly as
+   * before.
+   */
+  async login(dto: LoginDto): Promise<LoginResult> {
+    const indexRow = await this.prisma.userEmailIndex.findUnique({ where: { email: dto.email } });
+    if (!indexRow) {
+      // Still runs bcrypt against DUMMY_HASH even on a known miss — login
+      // latency must not reveal whether an email is registered (this was
+      // already the point of DUMMY_HASH before; an index-table lookup miss
+      // is just as observable a timing signal as a `users` miss was).
+      await bcrypt.compare(dto.password, DUMMY_HASH);
+      throw new UnauthorizedException({
+        code: ErrorCode.INVALID_CREDENTIALS,
+        message: 'Email or password is incorrect',
+      });
+    }
 
-    return this.prisma.withTenant(tenantId, async (tx) => {
+    return this.prisma.withTenant(indexRow.tenantId, async (tx) => {
       const user = await tx.user.findFirst({
-        where: { tenantId, email: dto.email, deletedAt: null },
+        where: { tenantId: indexRow.tenantId, email: dto.email, deletedAt: null },
       });
 
       const passwordOk = await bcrypt.compare(dto.password, user?.passwordHash ?? DUMMY_HASH);
@@ -209,7 +247,7 @@ export class AuthService {
 
       const roles = await this.loadRolesClaim(tx, user.id);
       await tx.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });
-      await this.audit(tx, tenantId, user.id, 'auth.login', 'user', user.id);
+      await this.audit(tx, indexRow.tenantId, user.id, 'auth.login', 'user', user.id);
 
       return this.buildLoginResult(user, roles);
     });
@@ -249,6 +287,31 @@ export class AuthService {
     });
   }
 
+  /**
+   * Resolves display names for the caller's own branch-scoped roles —
+   * powers the post-login branch/property picker. Not a general
+   * `GET /branches` list (deliberately deferred elsewhere in this
+   * codebase): it only ever returns names for branch IDs the caller's own
+   * JWT already grants a role on, matching the purpose-built-endpoint
+   * precedent `GET /tenants/me/onboarding-status` already set. `roles`
+   * comes straight from the JWT payload, not re-queried — it's already
+   * the authoritative list of what this token can see.
+   */
+  async listMyBranches(
+    tenantId: string,
+    roles: Array<{ branchId: string | null; role: string }>,
+  ): Promise<Array<{ id: string; name: string }>> {
+    const branchIds = [...new Set(roles.map((r) => r.branchId).filter((id): id is string => id !== null))];
+    if (branchIds.length === 0) return [];
+    return this.prisma.withTenant(tenantId, (tx) =>
+      tx.branch.findMany({
+        where: { id: { in: branchIds }, deletedAt: null },
+        select: { id: true, name: true },
+        orderBy: { name: 'asc' },
+      }),
+    );
+  }
+
   // -------------------------------------------------------------------------
   // Invites
   // -------------------------------------------------------------------------
@@ -273,6 +336,19 @@ export class AuthService {
         where: { tenantId, email: invite.email, deletedAt: null },
       });
       if (!user) {
+        // Email is global now (see UserEmailIndex) — a real behavior
+        // change, not incidental: before this, the same address could be
+        // staff at multiple independent tenants; now it can't. Checked
+        // here, not left to the DB's unique constraint, so this comes back
+        // as a clean EMAIL_TAKEN instead of a raw 500.
+        const existingElsewhere = await tx.userEmailIndex.findUnique({ where: { email: invite.email } });
+        if (existingElsewhere && existingElsewhere.tenantId !== tenantId) {
+          throw new ConflictException({
+            code: ErrorCode.EMAIL_TAKEN,
+            message: 'This email already belongs to an account in a different organization',
+          });
+        }
+
         const passwordHash = await bcrypt.hash(dto.password, BCRYPT_COST);
         user = await tx.user.create({
           data: {
@@ -283,6 +359,9 @@ export class AuthService {
             phone: dto.phone,
             emailVerified: true, // receiving the invite email proves ownership
           },
+        });
+        await tx.userEmailIndex.create({
+          data: { email: invite.email, tenantId, userId: user.id },
         });
       }
 
@@ -356,22 +435,28 @@ export class AuthService {
   // -------------------------------------------------------------------------
   // Internals
   // -------------------------------------------------------------------------
-  private async resolveTenantId(subdomain?: string, headerTenantId?: string): Promise<string> {
-    if (subdomain) {
-      const tenant = await this.prisma.tenant.findUnique({ where: { subdomain } });
-      if (!tenant) {
-        throw new UnauthorizedException({
-          code: ErrorCode.INVALID_CREDENTIALS,
-          message: 'Email or password is incorrect',
-        });
-      }
-      return tenant.id;
+  private slugify(input: string): string {
+    return input
+      .toLowerCase()
+      .trim()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '');
+  }
+
+  /**
+   * `Tenant.subdomain` is still `@unique` at the DB level, but it's no
+   * longer user-typed (see RegisterDto's own comment) — this generates one
+   * from `groupName` and silently retries on collision, so a duplicate
+   * slug can never surface as an error a real user would ever see.
+   */
+  private async generateUniqueSubdomain(groupName: string): Promise<string> {
+    const base = this.slugify(groupName).slice(0, 50) || 'tenant';
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const candidate = attempt === 0 ? base : `${base}-${randomBytes(3).toString('hex')}`;
+      const existing = await this.prisma.tenant.findUnique({ where: { subdomain: candidate } });
+      if (!existing) return candidate;
     }
-    if (headerTenantId) return headerTenantId;
-    throw new BadRequestException({
-      code: ErrorCode.TENANT_HEADER_MISSING,
-      message: 'Provide a subdomain or an X-Tenant-ID header',
-    });
+    return `${base}-${randomBytes(6).toString('hex')}`; // astronomically unlikely fallback
   }
 
   private async loadRolesClaim(

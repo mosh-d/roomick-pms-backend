@@ -3,7 +3,6 @@ import {
   Controller,
   ForbiddenException,
   Get,
-  Headers,
   HttpCode,
   HttpStatus,
   Param,
@@ -66,14 +65,9 @@ export class AuthController {
   @Throttle({ default: { limit: 10, ttl: 60_000 } })
   @Post('login')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Login with email + password (+ subdomain or X-Tenant-ID header)' })
-  login(
-    @Body() dto: LoginDto,
-    // Public route — TenantGuard is skipped, so read the raw header as the
-    // subdomain-less fallback for resolving the tenant.
-    @Headers('x-tenant-id') headerTenantId?: string,
-  ): Promise<LoginResult> {
-    return this.authService.login(dto, headerTenantId);
+  @ApiOperation({ summary: 'Login with email + password' })
+  login(@Body() dto: LoginDto): Promise<LoginResult> {
+    return this.authService.login(dto);
   }
 
   @Public()
@@ -97,6 +91,19 @@ export class AuthController {
     @Body() dto: AcceptInviteDto,
   ): Promise<LoginResult> {
     return this.authService.acceptInvite(token, dto);
+  }
+
+  @Get('me/branches')
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary:
+      "List display names for the caller's own branch-scoped roles — powers the post-login branch/property picker",
+  })
+  listMyBranches(
+    @CurrentTenant() tenantId: string,
+    @CurrentUser() user: JwtPayload,
+  ): ReturnType<AuthService['listMyBranches']> {
+    return this.authService.listMyBranches(tenantId, user.roles);
   }
 
   @Get('roles')
