@@ -3,6 +3,7 @@ import { Transform } from 'class-transformer';
 import {
   IsBoolean,
   IsEmail,
+  IsISO31661Alpha2,
   IsOptional,
   IsString,
   IsStrongPassword,
@@ -60,11 +61,21 @@ export class RegisterDto {
   phone?: string;
 
   @ApiPropertyOptional({
+    example: 'NG',
+    description:
+      'ISO 3166-1 alpha-2. Reporting only for now (which countries are onboarding) — not consumed by ' +
+      'any business logic yet.',
+  })
+  @IsOptional()
+  @IsISO31661Alpha2()
+  country?: string;
+
+  @ApiPropertyOptional({
     default: false,
     description:
       'Self-serve "try it" signup, not a sales-assisted trial — the resulting tenant auto-expires ' +
       '30 days from creation (see AuthService.register) and can also be deleted early via ' +
-      'DELETE /tenants/:id. Real signups must never set this.',
+      'DELETE /tenants/me. Real signups must never set this.',
   })
   @IsOptional()
   @IsBoolean()

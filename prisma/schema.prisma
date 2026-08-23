@@ -293,6 +293,11 @@ model Tenant {
   brandMode   BrandMode
   status      TenantStatus @default(trial)
   trialEndsAt DateTime?    @db.Timestamptz(6)
+  // Owner-supplied country at signup (ISO 3166-1 alpha-2, e.g. "NG") —
+  // reporting/analytics only for now (which countries onboard from), not
+  // consumed by any business logic yet. Optional: not every signup is
+  // guaranteed to supply it.
+  country String? @db.VarChar(2)
   // Demo tenants (self-serve "try it" signups, not a sales-assisted trial):
   // auto-expire and get swept by a scheduled job (see
   // TenantsService.deleteOrganization / the demo-cleanup cron), or a user

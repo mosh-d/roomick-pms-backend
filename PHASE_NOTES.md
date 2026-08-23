@@ -1,5 +1,21 @@
 # Phase Notes
 
+## Tenant country field (2026-08-23)
+
+### Delivered
+- `Tenant.country` — nullable `VARCHAR(2)` (migration `20260823000000_tenant_country`, hand-written for the same reason every migration in this repo is — see the "Demo tenants" entry below on why `migrate dev` doesn't work here).
+- `RegisterDto.country?: string` with `@IsISO31661Alpha2()` (same validator `AddressDto.country` already uses in `branch.dto.ts` — one established pattern for "ISO 3166-1 alpha-2 country code" across the codebase, not a new one). Wired through `AuthService.register()`'s `tenant.create()` call.
+
+### Decisions & deviations
+1. **Reporting only, on purpose.** Requested specifically to track which countries are onboarding from, not to drive any business logic yet — no timezone-suggestion, no locale defaults, nothing reads this column anywhere else in the codebase today. The frontend's own carried-forward notes flag using it to suggest a default branch timezone during Branch Setup as the natural next consumer, not built here.
+2. **Nullable, not required.** Consistent with `phone` and other owner-supplied-but-optional fields already on this DTO — not every signup is guaranteed to supply it, and there's no reason to block registration over it.
+
+### Verified
+`npx tsc --noEmit` clean. `prisma migrate deploy` applied cleanly against the existing dev database (a nullable column with no default needs no backfill). Confirmed end-to-end from the frontend: registered a real tenant with `country: "NG"`, read the row back directly via the Prisma client (not just checked the API response didn't error) — `country: 'NG'` persisted correctly.
+
+### Carried forward
+- Everything downstream of this column: timezone suggestions, reporting/analytics queries, any actual consumption of the value. It exists to be tracked, nothing more yet.
+
 ## Demo tenants + delete organization (2026-08-22)
 
 ### Delivered

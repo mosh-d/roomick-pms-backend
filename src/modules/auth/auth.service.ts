@@ -100,6 +100,7 @@ export class AuthService {
         groupName: dto.groupName,
         brandMode: 'single',
         status: 'trial',
+        country: dto.country,
         isDemo: dto.isDemo ?? false,
         demoExpiresAt: dto.isDemo ? demoExpiryFromNow() : null,
       },
