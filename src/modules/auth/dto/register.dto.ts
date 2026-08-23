@@ -13,7 +13,12 @@ import {
 import { toTrimmedLowerCase } from '../../../common/transforms/string.transforms';
 
 export class RegisterDto {
-  @ApiProperty({ example: 'acme', description: 'Tenant subdomain — acme → acme.roomick.com' })
+  @ApiProperty({
+    example: 'acme',
+    description:
+      'Short, unique account id — used to resolve which tenant a login belongs to (see LoginDto). ' +
+      'Not currently a real subdomain/URL; no per-tenant routing is wired up.',
+  })
   @Transform(toTrimmedLowerCase)
   @IsString()
   @MinLength(3)
