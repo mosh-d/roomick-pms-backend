@@ -75,6 +75,80 @@ export class TenantsService {
   }
 
   /**
+   * Powers the signup wizard's "you already have an account — log in and
+   * continue where you left off" path (frontend: `RegisterForm`'s
+   * `SUBDOMAIN_TAKEN`/`EMAIL_TAKEN` handling). Nothing here is `/auth/
+   * login`-specific — it's a plain read of how far onboarding has actually
+   * gotten on the backend, keyed off whatever's already authenticated
+   * (JWT + tenant context), so the frontend can rehydrate its local wizard
+   * draft to match reality instead of either losing progress (a blank
+   * wizard) or re-attempting steps that already succeeded (a second
+   * `configure-mode` call failing with `BRAND_MODE_ALREADY_CONFIGURED`).
+   *
+   * Walks the same brand → branch → room type → rooms chain Review's
+   * "Finish" creates, stopping at the first missing link — a tenant that
+   * only has a brand gets `branch: null` back (nothing deeper is queried,
+   * there's nothing there yet). `roomCount` is a plain count, not a list —
+   * the frontend only needs to know rooms exist and how many, not
+   * reconstruct the exact range that created them.
+   */
+  async getOnboardingStatus(tenantId: string, userId: string) {
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const [tenant, user] = await Promise.all([
+        tx.tenant.findUniqueOrThrow({ where: { id: tenantId } }),
+        tx.user.findUniqueOrThrow({ where: { id: userId } }),
+      ]);
+
+      const brand = await tx.brand.findFirst({
+        where: { deletedAt: null },
+        orderBy: { createdAt: 'asc' },
+      });
+      const branch = brand
+        ? await tx.branch.findFirst({ where: { brandId: brand.id, deletedAt: null }, orderBy: { createdAt: 'asc' } })
+        : null;
+      const roomType = branch
+        ? await tx.roomType.findFirst({ where: { branchId: branch.id, deletedAt: null }, orderBy: { createdAt: 'asc' } })
+        : null;
+      const roomCount = branch ? await tx.room.count({ where: { branchId: branch.id, deletedAt: null } }) : 0;
+
+      return {
+        tenant: {
+          groupName: tenant.groupName,
+          subdomain: tenant.subdomain,
+          country: tenant.country,
+          brandMode: tenant.brandMode,
+        },
+        user: { name: user.name, email: user.email, phone: user.phone },
+        brand: brand ? { id: brand.id, name: brand.name } : null,
+        branch: branch
+          ? {
+              id: branch.id,
+              name: branch.name,
+              category: branch.category,
+              address: branch.address as { street: string; city: string; state?: string; country: string; zip?: string },
+              timezone: branch.timezone,
+              currency: branch.currency,
+              checkInTime: branch.checkInTime.toISOString().slice(11, 16),
+              checkOutTime: branch.checkOutTime.toISOString().slice(11, 16),
+            }
+          : null,
+        roomType: roomType
+          ? {
+              id: roomType.id,
+              name: roomType.name,
+              baseRate: Number(roomType.baseRate),
+              capacity: roomType.capacity as { adults: number; children: number },
+              bedType: roomType.bedType,
+              sizeM2: roomType.sizeM2 ? Number(roomType.sizeM2) : null,
+              amenities: roomType.amenities,
+            }
+          : null,
+        roomCount,
+      };
+    });
+  }
+
+  /**
    * Deletes an organization entirely — the manual counterpart to the
    * scheduled demo-expiry sweep (see the cron in this same class). Real
    * ("full account deletion") support is future work; this pass only wires

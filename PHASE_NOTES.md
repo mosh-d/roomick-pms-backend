@@ -1,5 +1,20 @@
 # Phase Notes
 
+## `GET /tenants/me/onboarding-status` (2026-08-23)
+
+### Delivered
+- `TenantsService.getOnboardingStatus(tenantId, userId)` + `GET /tenants/me/onboarding-status` (Owner-only, matching every other onboarding endpoint's gating). Walks the same brand → branch → room type → rooms chain the signup wizard's "Finish" creates, stopping at the first missing link (a tenant with only a brand gets `branch: null` back — nothing deeper is queried). Returns enough to fully rehydrate a frontend wizard draft: `tenant` (groupName/subdomain/country/brandMode), `user` (name/email/phone), `brand`/`branch`/`roomType` (or `null`), `roomCount` (a count, not a list).
+
+### Decisions & deviations
+1. **Exists specifically to power the frontend's "log in and continue where you left off" flow** (`roomick-pms-frontend`'s `RegisterForm` — see that repo's `PHASE_NOTES.md`), not as a general-purpose "list my branches/room types" API. A returning owner's browser has no local record that an account (or a brand, or a branch...) already exists once `SUBDOMAIN_TAKEN`/`EMAIL_TAKEN` fires on a fresh session — without this, the only options were either a dead-end error or blindly re-walking the wizard and hitting `BRAND_MODE_ALREADY_CONFIGURED` on Finish. A purpose-built read endpoint was chosen over adding generic `GET /brands/:id/branches` / `GET /branches/:id/rooms` list endpoints — those don't exist yet either, and building them with proper pagination/filtering for a future branch-management screen is real, separate work this endpoint doesn't need to wait for or overlap with.
+2. **`branch.category` and other free-form columns are returned as-is, not re-validated.** The DB column is a plain `VARCHAR`, not a Postgres enum (schema.prisma's own comment already flags this) — this endpoint trusts data the backend itself created via `CreateBranchDto`'s validation at write time, not re-checked at read time.
+
+### Verified
+`npx tsc --noEmit` and existing `tenants.service.spec.ts` suite both clean (no behavior change to `configureMode`, so no new failures). Two live checks via direct API calls, not just reading the code: a freshly registered+verified tenant with no brand yet returns `{ brand: null, branch: null, roomType: null, roomCount: 0 }`; the same tenant after real `configure-mode` → create branch → create room type → bulk-create-rooms calls returns every field populated correctly (address, timezone, currency, check-in/out times formatted as `"HH:mm"`, capacity, amenities, `roomCount: 5` matching the actual bulk-created count) — confirmed against real Postgres rows, not assumed from the Prisma query alone.
+
+### Carried forward
+- None specific to this endpoint.
+
 ## `configure-mode` always creates the head brand (2026-08-23)
 
 ### Delivered

@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, HttpCode, HttpStatus, Post } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Post } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentTenant, CurrentUser } from '../../common/decorators';
 import { Roles, SystemRole } from '../../common/decorators/roles.decorator';
@@ -23,6 +23,20 @@ export class TenantsController {
     @Body() dto: ConfigureModeDto,
   ): ReturnType<TenantsService['configureMode']> {
     return this.tenantsService.configureMode(tenantId, dto, user.sub);
+  }
+
+  @Get('me/onboarding-status')
+  @Roles(SystemRole.Owner)
+  @ApiOperation({
+    summary:
+      'How far onboarding has actually gotten on the backend (brand/branch/room type/room count) — ' +
+      'powers "log in and continue where you left off" when the signup wizard hits SUBDOMAIN_TAKEN/EMAIL_TAKEN',
+  })
+  getOnboardingStatus(
+    @CurrentTenant() tenantId: string,
+    @CurrentUser() user: JwtPayload,
+  ): ReturnType<TenantsService['getOnboardingStatus']> {
+    return this.tenantsService.getOnboardingStatus(tenantId, user.sub);
   }
 
   @Delete('me')
