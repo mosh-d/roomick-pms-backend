@@ -1,5 +1,21 @@
 # Phase Notes
 
+## `configure-mode` always creates the head brand (2026-08-23)
+
+### Delivered
+- `TenantsService.configureMode()` now creates the head `Brand` row for **both** `single` and `multi` mode — previously only `single` mode did this; `multi` mode returned `brand: null` and the frontend called a separate `POST /brands` on its own screen right after. Return type changed from `{ tenant: Tenant; brand: Brand | null }` to `{ tenant: Tenant; brand: Brand }` — `brand` is no longer optional.
+
+### Decisions & deviations
+1. **Driven by a real product question, not a backend-side cleanup**: "what's the need for hotel name when we already have brand name" — there wasn't one. The owner already names their organization at signup (`groupName`); asking again for a "Brand Name" on the Organization Structure screen (previously only shown for `single` mode, and shown as a completely empty screen with no field at all for `multi` mode — a real UX bug, reported directly) was asking twice for the same thing. Defaulting to `groupName` for both modes removes the double-ask entirely.
+2. **Doesn't change what multi-brand tenants can do.** `createBrand` was already unrestricted for multi-mode tenants (only `single`-mode tenants are capped at exactly one brand) — this change just means the *first* brand is created automatically, same as single mode always did, instead of requiring a separate manual step. Additional brands are still created the same way they always were.
+3. **`ConfigureModeDto.brandName` stays optional** — its meaning is unchanged (an override for the head brand's name), just no longer conditional on mode.
+
+### Verified
+`npx tsc --noEmit` clean. Unit tests updated (`tenants.service.spec.ts`) — the old "multi mode creates no brand" test is now "multi mode also creates the head brand"; both pass. Verified against a real request from the frontend's rewritten onboarding wizard: registered a multi-mode tenant, confirmed a brand row named after the tenant's `groupName` actually exists in Postgres (RLS context set explicitly), not just that the API call returned 2xx.
+
+### Carried forward
+- None specific to this change — see the frontend's own `PHASE_NOTES.md` (Phase 7) for the larger onboarding-wizard rework this was one piece of.
+
 ## Tenant country field (2026-08-23)
 
 ### Delivered

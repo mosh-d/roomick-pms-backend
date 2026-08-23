@@ -43,7 +43,7 @@ describe('TenantsService', () => {
     service = moduleRef.get(TenantsService);
   });
 
-  it('single mode auto-creates the hidden brand (defaults to groupName)', async () => {
+  it('single mode creates the head brand (defaults to groupName)', async () => {
     const result = await service.configureMode(TENANT_ID, { mode: BrandModeInput.single }, USER_ID);
 
     expect(tx.brand.create).toHaveBeenCalledWith({
@@ -57,10 +57,12 @@ describe('TenantsService', () => {
     expect(tx.auditLog.create).toHaveBeenCalled();
   });
 
-  it('multi mode creates no brand', async () => {
+  it('multi mode also creates the head brand (not just single)', async () => {
     const result = await service.configureMode(TENANT_ID, { mode: BrandModeInput.multi }, USER_ID);
-    expect(tx.brand.create).not.toHaveBeenCalled();
-    expect(result.brand).toBeNull();
+    expect(tx.brand.create).toHaveBeenCalledWith({
+      data: { tenantId: TENANT_ID, name: 'Demo Hotels Group' },
+    });
+    expect(result.brand).not.toBeNull();
   });
 
   it('is immutable once a brand exists (spec: brandMode immutable after first brand)', async () => {

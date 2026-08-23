@@ -3,7 +3,7 @@ import { Cron, CronExpression } from '@nestjs/schedule';
 import { Brand, Tenant } from '@prisma/client';
 import { ErrorCode } from '../../common/errors/error-codes';
 import { PrismaService } from '../../prisma/prisma.service';
-import { BrandModeInput, ConfigureModeDto } from './dto/configure-mode.dto';
+import { ConfigureModeDto } from './dto/configure-mode.dto';
 
 /** How long a demo (self-serve "try it") tenant lives before the cleanup job sweeps it. */
 export const DEMO_TENANT_TTL_DAYS = 30;
@@ -20,15 +20,25 @@ export class TenantsService {
 
   /**
    * Signup step 2 (spec §5): fixes single/multi-brand mode.
-   * brandMode is immutable once the first brand exists (DB doc) — in single
-   * mode the hidden brand row is created here, in the same transaction.
-   * The backend never special-cases single-brand afterwards (spec §1.1).
+   * brandMode is immutable once the first brand exists (DB doc) — the
+   * "head brand" row is always created here, in the same transaction,
+   * regardless of mode. This used to only happen for `single` mode
+   * (multi-mode tenants got no brand here, and the frontend called
+   * `POST /brands` separately, on its own screen, right after) — changed
+   * because there's no real reason to ask twice: the owner already named
+   * their organization at signup (`groupName`), and a multi-brand tenant
+   * still needs exactly one starting brand to do anything useful with
+   * (branches attach to a brand, not a tenant). More brands are always
+   * addable later via `POST /brands` (already unrestricted for multi-mode
+   * tenants — see `createBrand`); this just removes the redundant
+   * separate step for the *first* one. The backend never special-cases
+   * single-brand afterwards otherwise (spec §1.1).
    */
   async configureMode(
     tenantId: string,
     dto: ConfigureModeDto,
     actorUserId: string,
-  ): Promise<{ tenant: Tenant; brand: Brand | null }> {
+  ): Promise<{ tenant: Tenant; brand: Brand }> {
     return this.prisma.withTenant(tenantId, async (tx) => {
       const existingBrands = await tx.brand.count({ where: { deletedAt: null } });
       if (existingBrands > 0) {
@@ -38,16 +48,13 @@ export class TenantsService {
         });
       }
 
-      let brand: Brand | null = null;
-      if (dto.mode === BrandModeInput.single) {
-        const current = await tx.tenant.findUniqueOrThrow({ where: { id: tenantId } });
-        brand = await tx.brand.create({
-          data: { tenantId, name: dto.brandName ?? current.groupName },
-        });
-      }
+      const current = await tx.tenant.findUniqueOrThrow({ where: { id: tenantId } });
+      const brand = await tx.brand.create({
+        data: { tenantId, name: dto.brandName ?? current.groupName },
+      });
 
       // tenants is the RLS root (no tenantId column) — writable inside the
-      // same tx, keeping mode + hidden brand + audit atomic.
+      // same tx, keeping mode + head brand + audit atomic.
       const tenant = await tx.tenant.update({
         where: { id: tenantId },
         data: { brandMode: dto.mode },
@@ -60,7 +67,7 @@ export class TenantsService {
           action: 'tenant.configure_mode',
           entityType: 'tenant',
           entityId: tenantId,
-          after: { mode: dto.mode, brandId: brand?.id ?? null },
+          after: { mode: dto.mode, brandId: brand.id },
         },
       });
       return { tenant, brand };

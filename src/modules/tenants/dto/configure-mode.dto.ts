@@ -14,7 +14,9 @@ export class ConfigureModeDto {
   @ApiPropertyOptional({
     example: 'Acme Hotels',
     description:
-      'Single mode only: name for the auto-created (UI-hidden) brand. Defaults to the tenant groupName.',
+      'Name for the head brand this call always creates (single or multi mode alike). Defaults to the ' +
+      'tenant groupName — most callers omit this and let it default, since the owner already named the ' +
+      'organization at signup.',
   })
   @IsOptional()
   @IsString()

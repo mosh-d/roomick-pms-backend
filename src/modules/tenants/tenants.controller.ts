@@ -15,7 +15,7 @@ export class TenantsController {
   @Post('configure-mode')
   @Roles(SystemRole.Owner)
   @ApiOperation({
-    summary: 'Signup step 2 — fix single/multi-brand mode (single auto-creates the hidden brand)',
+    summary: 'Signup step 2 — fix single/multi-brand mode; always creates the head brand',
   })
   configureMode(
     @CurrentTenant() tenantId: string,
