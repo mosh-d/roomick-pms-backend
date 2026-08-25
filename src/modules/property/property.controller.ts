@@ -63,6 +63,21 @@ export class PropertyController {
     return this.propertyService.createBranch(tenantId, brandId, dto, user.sub);
   }
 
+  @Get('branches')
+  @Roles(SystemRole.Owner)
+  @ApiOperation({
+    summary:
+      "List every branch under the tenant — resolves which branch an owner's dashboard opens to. " +
+      'Owner-only, deliberately not Manager too: this route has no :branchId param, and RolesGuard ' +
+      "lets any role assignment matching the required role through when there's no param to scope " +
+      'against — a branch-scoped manager would see every branch in the tenant, not just their own, ' +
+      'if this allowed Manager. An owner’s branchId:null role already means all-branches by definition, ' +
+      'so no such over-disclosure risk exists for that role.',
+  })
+  listBranches(@CurrentTenant() tenantId: string): ReturnType<PropertyService['listBranches']> {
+    return this.propertyService.listBranches(tenantId);
+  }
+
   @Patch('branches/:branchId')
   @Roles(SystemRole.Owner, SystemRole.Manager)
   @ApiOperation({ summary: 'Update branch config (times, currency, timezone, policies)' })

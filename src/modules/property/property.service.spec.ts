@@ -20,6 +20,7 @@ function makeTx() {
     },
     branch: {
       findFirst: jest.fn().mockResolvedValue({ id: BRANCH_ID }),
+      findMany: jest.fn().mockResolvedValue([]),
       create: jest.fn().mockResolvedValue({ id: BRANCH_ID }),
       update: jest.fn().mockResolvedValue({ id: BRANCH_ID }),
     },
@@ -95,6 +96,23 @@ describe('PropertyService', () => {
           data: expect.objectContaining({ checkInTime: timeStringToDate('15:00') }),
         }),
       );
+    });
+  });
+
+  describe('listBranches', () => {
+    it('returns [] for a tenant with no branches', async () => {
+      const result = await service.listBranches(TENANT_ID);
+      expect(result).toEqual([]);
+    });
+
+    it('lists branches sorted by name, excluding soft-deleted ones', async () => {
+      tx.branch.findMany.mockResolvedValue([{ id: 'b1', name: 'Alpha' }]);
+      await service.listBranches(TENANT_ID);
+      expect(tx.branch.findMany).toHaveBeenCalledWith({
+        where: { deletedAt: null },
+        select: { id: true, name: true },
+        orderBy: { name: 'asc' },
+      });
     });
   });
 

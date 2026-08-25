@@ -49,6 +49,15 @@ export class RoomsController {
     return this.roomsService.bulkCreateRooms(tenantId, branchId, dto, user.sub);
   }
 
+  @Get('branches/:branchId/rooms')
+  @ApiOperation({ summary: 'List rooms for a branch with floor/building/room-type detail — powers the Room Status Board' })
+  listRooms(
+    @CurrentTenant() tenantId: string,
+    @Param('branchId', ParseUUIDPipe) branchId: string,
+  ): ReturnType<RoomsService['listRoomsForBranch']> {
+    return this.roomsService.listRoomsForBranch(tenantId, branchId);
+  }
+
   @Patch('rooms/:roomId/status')
   @ApiOperation({
     summary:

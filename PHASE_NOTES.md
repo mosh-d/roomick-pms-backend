@@ -1,5 +1,19 @@
 # Phase Notes
 
+## Room Status Board — two new read endpoints (2026-08-25)
+
+First real dashboard screen (see `roomick-pms-frontend`'s own `PHASE_NOTES.md` for the frontend half). Room *status* was already fully modeled (`Room.occupancyStatus`/`cleanlinessStatus`/`heldStatus`, `PATCH /rooms/:roomId/status` all existed) — this phase only needed to add the two read endpoints the grid consumes.
+
+### Delivered
+- `GET /branches` (`PropertyService.listBranches`) — resolves an owner's branch(es) for dashboard routing. **Owner-only, deliberately not Manager too**: verified directly in `roles.guard.ts` that a route with no `:branchId` param lets *any* role assignment matching the required role through, regardless of that assignment's own branch scope — a branch-A-scoped manager would see every branch in the tenant if this endpoint allowed Manager. Owner-only is safe because an owner's `branchId: null` role already means all-branches by definition. Deliberately a new endpoint, not an extension of `GET /auth/me/branches` — that endpoint's contract ("branches I hold an *explicit* per-branch role at") has a passing test asserting exactly the case that would otherwise break (`auth.service.spec.ts`: `[{branchId: null, role: 'owner'}]` → `[]`).
+- `GET /branches/:branchId/rooms` (`RoomsService.listRoomsForBranch`) — the grid's data, one row per room with floor/building/room-type nested via `include` rather than separate list calls. No `@Roles()`, matching `listRoomTypes`'s existing "open to any authenticated role at this branch" precedent (front_desk and housekeeper both need this board). Known, accepted gap: a floor with zero rooms won't render, since building/floor data only arrives nested inside a room row.
+
+### Verified
+`npx tsc --noEmit`, `npm run lint`, and the full `npm test` suite (63 tests, including new `listBranches`/`listRoomsForBranch` cases) all clean. Live, against a freshly seeded real tenant (2 branches, 2 buildings, 24 rooms, a housekeeper on an explicit branch role): `GET /branches` returns both branches for the owner; `GET /branches/:branchId/rooms` returns correctly nested floor/building/room-type data; `PATCH /rooms/:roomId/status` exercised through the full housekeeping ladder (dirty→cleaning→clean→inspected) plus an occupancy correction and a hold/release, all as owner; a direct, unauthorized `PATCH` call as the housekeeper (no UI involved) confirmed a real 403 for occupancy correction, not just a hidden button on the frontend.
+
+### Carried forward
+- Everything from the entries below — unchanged.
+
 ## Plain email+password login, no subdomain (2026-08-23)
 
 Direct user decision: match Cloudbeds' model — plain email+password login, then a post-login branch/property picker if the account has roles on more than one branch (see `roomick-pms-frontend`'s own `PHASE_NOTES.md` for the frontend half). Scoped via Plan Mode specifically because it's bigger than a login-form simplification: `User.email` had to become globally unique (was `@@unique([tenantId, email])`), and that ran straight into a real architectural constraint.

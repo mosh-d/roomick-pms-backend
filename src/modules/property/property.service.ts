@@ -136,6 +136,24 @@ export class PropertyService {
     });
   }
 
+  /**
+   * Owner-only (see controller): resolves which branch(es) an owner's
+   * dashboard should open to. An owner's own role row is always
+   * `branchId: null` ("all branches"), so `GET /auth/me/branches`
+   * (branches held via an *explicit* per-branch role assignment) always
+   * returns `[]` for them by design — this is a deliberately separate
+   * endpoint, not a change to that one.
+   */
+  async listBranches(tenantId: string): Promise<Array<Pick<Branch, 'id' | 'name'>>> {
+    return this.prisma.withTenant(tenantId, (tx) =>
+      tx.branch.findMany({
+        where: { deletedAt: null },
+        select: { id: true, name: true },
+        orderBy: { name: 'asc' },
+      }),
+    );
+  }
+
   async updateBranch(
     tenantId: string,
     branchId: string,

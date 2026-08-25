@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, ForbiddenException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, NotFoundException } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { JwtPayload } from '../../common/types/request-context';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -207,6 +207,43 @@ describe('RoomsService', () => {
       await expect(
         service.bulkCreateRooms(TENANT_ID, BRANCH_ID, { roomTypeId: TYPE_ID }, manager.sub),
       ).rejects.toThrow(BadRequestException);
+    });
+  });
+
+  describe('listRoomsForBranch', () => {
+    it('returns [] for a branch with no rooms', async () => {
+      const result = await service.listRoomsForBranch(TENANT_ID, BRANCH_ID);
+      expect(result).toEqual([]);
+      expect(propertyService.assertBranch).toHaveBeenCalled();
+    });
+
+    it('rejects an unknown/foreign branch', async () => {
+      propertyService.assertBranch.mockRejectedValue(new NotFoundException());
+      await expect(service.listRoomsForBranch(TENANT_ID, BRANCH_ID)).rejects.toThrow(NotFoundException);
+      expect(tx.room.findMany).not.toHaveBeenCalled();
+    });
+
+    it('includes floor/building/room-type detail, scoped and ordered correctly', async () => {
+      await service.listRoomsForBranch(TENANT_ID, BRANCH_ID);
+      expect(tx.room.findMany).toHaveBeenCalledWith({
+        where: { branchId: BRANCH_ID, deletedAt: null },
+        include: {
+          roomType: { select: { id: true, name: true, bedType: true } },
+          floor: {
+            select: {
+              id: true,
+              floorNumber: true,
+              label: true,
+              building: { select: { id: true, name: true } },
+            },
+          },
+        },
+        orderBy: [
+          { floor: { building: { name: 'asc' } } },
+          { floor: { floorNumber: 'asc' } },
+          { number: 'asc' },
+        ],
+      });
     });
   });
 

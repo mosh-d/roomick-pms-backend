@@ -150,6 +150,42 @@ export class RoomsService {
     });
   }
 
+  /**
+   * Powers the Room Status Board grid — one row per room, already carrying
+   * its floor/building/room-type names so the grid doesn't need separate
+   * buildings/floors list calls (neither exists yet; nothing else needs
+   * them as a first-class resource today, so a purpose-built shape here
+   * beats a premature general one — same reasoning `getOnboardingStatus`
+   * and `listMyBranches` already used). A floor with zero rooms won't
+   * appear (building/floor data only ever arrives nested inside a room
+   * row) — accepted for now, a real fix needs actual buildings/floors GET
+   * endpoints, which have no other consumer yet either.
+   */
+  async listRoomsForBranch(tenantId: string, branchId: string) {
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      await this.propertyService.assertBranch(tx, branchId);
+      return tx.room.findMany({
+        where: { branchId, deletedAt: null },
+        include: {
+          roomType: { select: { id: true, name: true, bedType: true } },
+          floor: {
+            select: {
+              id: true,
+              floorNumber: true,
+              label: true,
+              building: { select: { id: true, name: true } },
+            },
+          },
+        },
+        orderBy: [
+          { floor: { building: { name: 'asc' } } },
+          { floor: { floorNumber: 'asc' } },
+          { number: 'asc' },
+        ],
+      });
+    });
+  }
+
   // -------------------------------------------------------------------------
   // Room status — three independent axes (§4.1)
   // -------------------------------------------------------------------------
