@@ -114,6 +114,18 @@ export class PropertyService {
       if (!brand) {
         throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Brand not found' });
       }
+      // A second, independent Finish run (a stale/reset local onboarding
+      // draft, a different device, a repeated test session) shouldn't be
+      // able to silently duplicate a branch — same "pre-check before
+      // create, inside the same transaction" pattern `bulkCreateRooms`
+      // already uses for `ROOM_NUMBERS_TAKEN`.
+      const existing = await tx.branch.findFirst({ where: { brandId, name: dto.name, deletedAt: null } });
+      if (existing) {
+        throw new ConflictException({
+          code: ErrorCode.BRANCH_NAME_TAKEN,
+          message: `A branch named "${dto.name}" already exists under this brand`,
+        });
+      }
       const branch = await tx.branch.create({
         data: {
           tenantId,

@@ -82,6 +82,14 @@ describe('PropertyService', () => {
       checkInTime: '15:00',
     };
 
+    beforeEach(() => {
+      // No name clash by default — `tx.branch.findFirst` otherwise defaults
+      // to resolving a truthy branch (`makeTx()`'s default, used elsewhere
+      // for by-ID lookups), which would trip the new name-collision guard
+      // in every test below unless overridden per-case.
+      tx.branch.findFirst.mockResolvedValue(null);
+    });
+
     it('rejects invalid IANA timezones before touching the DB', async () => {
       await expect(
         service.createBranch(TENANT_ID, BRAND_ID, { ...dto, timezone: 'Mars/Olympus' }, ACTOR),
@@ -96,6 +104,19 @@ describe('PropertyService', () => {
           data: expect.objectContaining({ checkInTime: timeStringToDate('15:00') }),
         }),
       );
+    });
+
+    it('rejects a name that already exists (non-deleted) under the same brand', async () => {
+      tx.branch.findFirst.mockResolvedValue({ id: 'existing-branch', name: 'Lagos' });
+      await expect(service.createBranch(TENANT_ID, BRAND_ID, dto, ACTOR)).rejects.toThrow(ConflictException);
+      expect(tx.branch.create).not.toHaveBeenCalled();
+    });
+
+    it('excludes soft-deleted branches from the name-collision check', async () => {
+      await service.createBranch(TENANT_ID, BRAND_ID, dto, ACTOR);
+      expect(tx.branch.findFirst).toHaveBeenCalledWith({
+        where: { brandId: BRAND_ID, name: dto.name, deletedAt: null },
+      });
     });
   });
 

@@ -1,5 +1,23 @@
 # Phase Notes
 
+## Reject duplicate branch names per brand (2026-08-25)
+
+Found live, not in review: a real tenant ended up with two branches both named "Sope Hotel Abijo" (identical address too), 29 minutes apart — traced to `createBranch` doing a blind `INSERT` with no collision check at all. The onboarding wizard already guards against re-submitting the *same* browser session's Finish twice (writes each branch's real ID back into its local draft the moment it succeeds — see `roomick-pms-frontend/PHASE_NOTES.md`'s Review step notes), but nothing stopped a **second, independent** Finish run (stale/reset local draft, different device, a repeated test session) from creating a fresh branch with a name that already existed.
+
+### Delivered
+- `PropertyService.createBranch` now checks for an existing non-deleted branch with the same `name` under the same `brandId` before creating, rejecting with a new `BRANCH_NAME_TAKEN` (409) instead of silently duplicating — same "pre-check inside the same transaction, before `create`" pattern `RoomsService.bulkCreateRooms` already uses for `ROOM_NUMBERS_TAKEN`.
+- New `ErrorCode.BRANCH_NAME_TAKEN`, placed alongside the other property-module codes.
+
+### Decisions & deviations
+1. **Blocks the collision, not re-entry into `/signup`.** Considered redirecting an already-onboarded, already-authenticated user away from `/signup` entirely — rejected because there's no branch-management screen yet (`/dashboard` is Room Status Board only), so re-entering `/signup` while logged in is currently the *only* way to add a genuinely new, differently-named branch to an existing account. Blocking name collisions fixes the actual harm (silent duplicate data) without breaking that.
+2. **Name uniqueness scoped to `brandId`, not tenant-wide.** A multi-brand tenant could legitimately want the same branch name reused across two different brands (e.g. two unrelated hotel brands the same group owns); scoping tighter than that would be a real, unrequested restriction with no problem behind it.
+
+### Verified
+`npx tsc --noEmit`, `eslint`, and the full test suite (65 tests, including 2 new cases: rejects a same-name collision, excludes soft-deleted branches from the check) all clean. Live against the real backend: re-submitting `POST /brands/:brandId/branches` with an already-used name for that brand returns a real `409 BRANCH_NAME_TAKEN` with a clear message; a genuinely different name for the same brand still succeeds normally (no false positive).
+
+### Carried forward
+- Everything else already carried forward from the entry below — unchanged.
+
 ## Room Status Board — two new read endpoints (2026-08-25)
 
 First real dashboard screen (see `roomick-pms-frontend`'s own `PHASE_NOTES.md` for the frontend half). Room *status* was already fully modeled (`Room.occupancyStatus`/`cleanlinessStatus`/`heldStatus`, `PATCH /rooms/:roomId/status` all existed) — this phase only needed to add the two read endpoints the grid consumes.
