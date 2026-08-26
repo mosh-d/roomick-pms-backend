@@ -354,11 +354,12 @@ export class PropertyService {
   }
 
   // -------------------------------------------------------------------------
-  async assertBranch(tx: TenantTx, branchId: string): Promise<void> {
+  async assertBranch(tx: TenantTx, branchId: string): Promise<Branch> {
     const branch = await tx.branch.findFirst({ where: { id: branchId, deletedAt: null } });
     if (!branch) {
       throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Branch not found' });
     }
+    return branch;
   }
 
   private async audit(

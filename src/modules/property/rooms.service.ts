@@ -5,7 +5,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { CleanlinessStatus, Prisma, Room, RoomBlock, RoomType } from '@prisma/client';
+import { CleanlinessStatus, OccupancyStatus, Prisma, Room, RoomBlock, RoomType } from '@prisma/client';
 import { ErrorCode } from '../../common/errors/error-codes';
 import { JwtPayload } from '../../common/types/request-context';
 import { PrismaService, TenantTx } from '../../prisma/prisma.service';
@@ -283,6 +283,61 @@ export class RoomsService {
 
       return updated;
     });
+  }
+
+  /**
+   * System-driven occupancy write for check-in/check-out (`ReservationsService`,
+   * a different module — invoked directly, never over HTTP). Deliberately NOT
+   * `changeStatus`: that method gates occupancy behind `isSupervisorAt` (owner/
+   * manager only) because a MANUAL correction is what it's for; check-in/check-
+   * out is a routine front_desk action and must not be blocked by that gate.
+   * Reuses `changeStatus`'s exact before/after audit shape, but skips both the
+   * supervisor check and the cleanliness ladder validation — this is a system
+   * transition, not a human manually picking a state.
+   */
+  async applyReservationOccupancy(
+    tx: TenantTx,
+    tenantId: string,
+    roomId: string,
+    patch: { occupancyStatus: OccupancyStatus; cleanlinessStatus?: CleanlinessStatus },
+    actorId: string,
+  ): Promise<Room> {
+    const room = await tx.room.findFirst({ where: { id: roomId, deletedAt: null } });
+    if (!room) {
+      throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Room not found' });
+    }
+    const before = {
+      occupancyStatus: room.occupancyStatus,
+      cleanlinessStatus: room.cleanlinessStatus,
+      heldStatus: room.heldStatus,
+    };
+    const updated = await tx.room.update({
+      where: { id: roomId },
+      data: {
+        occupancyStatus: patch.occupancyStatus,
+        ...(patch.cleanlinessStatus ? { cleanlinessStatus: patch.cleanlinessStatus } : {}),
+        statusChangedAt: new Date(),
+        statusChangedBy: actorId,
+      },
+    });
+    await tx.auditLog.create({
+      data: {
+        tenantId,
+        branchId: room.branchId,
+        userId: actorId,
+        action: 'room.status_changed',
+        entityType: 'room',
+        entityId: roomId,
+        before,
+        after: {
+          occupancyStatus: updated.occupancyStatus,
+          cleanlinessStatus: updated.cleanlinessStatus,
+          heldStatus: updated.heldStatus,
+          reason: 'reservation_lifecycle',
+        },
+      },
+    });
+    return updated;
   }
 
   // -------------------------------------------------------------------------

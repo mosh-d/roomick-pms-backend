@@ -275,4 +275,41 @@ describe('RoomsService', () => {
       expect(tx.auditLog.create).toHaveBeenCalled();
     });
   });
+
+  describe('applyReservationOccupancy', () => {
+    it('a front-desk actor succeeds — unlike changeStatus, which would reject them for the same occupancy change', async () => {
+      tx.room.findFirst.mockResolvedValue(room({ occupancyStatus: 'vacant' }));
+      const updated = await service.applyReservationOccupancy(
+        tx as never,
+        TENANT_ID,
+        ROOM_ID,
+        { occupancyStatus: 'occupied' },
+        housekeeper.sub, // stand-in for a front_desk actor id — this method takes a plain id, not a JwtPayload/role check at all
+      );
+      expect(updated.occupancyStatus).toBe('occupied');
+      expect(tx.auditLog.create).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ action: 'room.status_changed' }) }),
+      );
+    });
+
+    it('sets both occupancy and cleanliness in one write when both are passed', async () => {
+      tx.room.findFirst.mockResolvedValue(room({ occupancyStatus: 'occupied', cleanlinessStatus: 'clean' }));
+      const updated = await service.applyReservationOccupancy(
+        tx as never,
+        TENANT_ID,
+        ROOM_ID,
+        { occupancyStatus: 'vacant', cleanlinessStatus: 'dirty' },
+        housekeeper.sub,
+      );
+      expect(updated.occupancyStatus).toBe('vacant');
+      expect(updated.cleanlinessStatus).toBe('dirty');
+    });
+
+    it('404s on a missing room', async () => {
+      tx.room.findFirst.mockResolvedValue(null);
+      await expect(
+        service.applyReservationOccupancy(tx as never, TENANT_ID, ROOM_ID, { occupancyStatus: 'occupied' }, housekeeper.sub),
+      ).rejects.toThrow(NotFoundException);
+    });
+  });
 });
