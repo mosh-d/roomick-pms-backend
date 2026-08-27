@@ -13,9 +13,11 @@ import { TenantContextInterceptor } from './common/interceptors/tenant-context.i
 import { JwtStrategy } from './common/strategies/jwt.strategy';
 import { envValidationSchema } from './config/env.validation';
 import { AuthModule } from './modules/auth/auth.module';
+import { FoliosModule } from './modules/folios/folios.module';
 import { GuestsModule } from './modules/guests/guests.module';
 import { PropertyModule } from './modules/property/property.module';
 import { ReservationsModule } from './modules/reservations/reservations.module';
+import { TaxesModule } from './modules/taxes/taxes.module';
 import { SystemModule } from './modules/system/system.module';
 import { TenantsModule } from './modules/tenants/tenants.module';
 import { UsersModule } from './modules/users/users.module';
@@ -49,6 +51,8 @@ import { PrismaModule } from './prisma/prisma.module';
     PropertyModule,
     GuestsModule,
     ReservationsModule,
+    TaxesModule,
+    FoliosModule,
   ],
   providers: [
     JwtStrategy,

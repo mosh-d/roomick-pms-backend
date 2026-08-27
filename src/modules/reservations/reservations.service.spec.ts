@@ -4,6 +4,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { PropertyService } from '../property/property.service';
 import { RoomsService } from '../property/rooms.service';
 import { GuestsService } from '../guests/guests.service';
+import { FoliosService } from '../folios/folios.service';
 import { ReservationsService } from './reservations.service';
 
 const TENANT_ID = '11111111-1111-4111-8111-111111111111';
@@ -56,12 +57,18 @@ describe('ReservationsService', () => {
   let propertyService: { assertBranch: jest.Mock };
   let roomsService: { applyReservationOccupancy: jest.Mock };
   let guestsService: { findOrCreateGuestInTx: jest.Mock };
+  let foliosService: { ensurePrimaryFolio: jest.Mock; postRoomChargeForDate: jest.Mock; settleIfFullyPaid: jest.Mock };
 
   beforeEach(async () => {
     tx = makeTx();
     propertyService = { assertBranch: jest.fn().mockResolvedValue({ id: BRANCH_ID, timezone: 'Africa/Lagos' }) };
     roomsService = { applyReservationOccupancy: jest.fn().mockResolvedValue({}) };
     guestsService = { findOrCreateGuestInTx: jest.fn().mockResolvedValue({ id: GUEST_ID, name: 'John Doe' }) };
+    foliosService = {
+      ensurePrimaryFolio: jest.fn().mockResolvedValue({ id: 'folio-1', status: 'open' }),
+      postRoomChargeForDate: jest.fn().mockResolvedValue({ id: 'li-room' }),
+      settleIfFullyPaid: jest.fn().mockResolvedValue(true),
+    };
 
     const moduleRef = await Test.createTestingModule({
       providers: [
@@ -73,6 +80,7 @@ describe('ReservationsService', () => {
         { provide: PropertyService, useValue: propertyService },
         { provide: RoomsService, useValue: roomsService },
         { provide: GuestsService, useValue: guestsService },
+        { provide: FoliosService, useValue: foliosService },
       ],
     }).compile();
     service = moduleRef.get(ReservationsService);
@@ -234,6 +242,17 @@ describe('ReservationsService', () => {
       expect(roomsService.applyReservationOccupancy).toHaveBeenCalledWith(tx, TENANT_ID, ROOM_ID, { occupancyStatus: 'occupied' }, ACTOR_ID);
     });
 
+    it('opens the folio and accrues ONLY the arrival night (night audit posts the rest)', async () => {
+      tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'confirmed', roomId: null }));
+      tx.room.findFirst.mockResolvedValue({ id: ROOM_ID, branchId: BRANCH_ID, roomTypeId: TYPE_ID, occupancyStatus: 'vacant', heldStatus: null, deletedAt: null });
+      await service.checkIn(TENANT_ID, RESERVATION_ID, { roomId: ROOM_ID }, ACTOR_ID);
+      expect(foliosService.ensurePrimaryFolio).toHaveBeenCalled();
+      expect(foliosService.postRoomChargeForDate).toHaveBeenCalledTimes(1);
+      expect(foliosService.postRoomChargeForDate).toHaveBeenCalledWith(
+        tx, expect.anything(), expect.anything(), expect.any(Date), 'Check-in', ACTOR_ID,
+      );
+    });
+
     it('cleanliness is a soft filter, not enforced server-side (dirty room still allowed)', async () => {
       tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'confirmed', roomId: null }));
       tx.room.findFirst.mockResolvedValue({ id: ROOM_ID, branchId: BRANCH_ID, roomTypeId: TYPE_ID, occupancyStatus: 'vacant', heldStatus: null, cleanlinessStatus: 'dirty', deletedAt: null });
@@ -254,6 +273,21 @@ describe('ReservationsService', () => {
         tx, TENANT_ID, ROOM_ID, { occupancyStatus: 'vacant', cleanlinessStatus: 'dirty' }, ACTOR_ID,
       );
       expect(tx.reservation.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: 'checked_out' }) }));
+    });
+
+    // The City Ledger rule (see checkOut's own comment): a departing guest
+    // who still owes must NOT be held hostage — the room has to release.
+    it('SUCCEEDS with an outstanding balance and leaves the folio open (City Ledger receivable)', async () => {
+      tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'checked_in', roomId: ROOM_ID }));
+      foliosService.settleIfFullyPaid.mockResolvedValue(false); // balance still owed
+      await expect(service.checkOut(TENANT_ID, RESERVATION_ID, ACTOR_ID)).resolves.toBeDefined();
+      expect(roomsService.applyReservationOccupancy).toHaveBeenCalled(); // room released regardless
+    });
+
+    it('settles the folio when it is fully paid', async () => {
+      tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'checked_in', roomId: ROOM_ID }));
+      await service.checkOut(TENANT_ID, RESERVATION_ID, ACTOR_ID);
+      expect(foliosService.settleIfFullyPaid).toHaveBeenCalled();
     });
   });
 

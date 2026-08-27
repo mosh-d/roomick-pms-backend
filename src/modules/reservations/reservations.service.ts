@@ -7,6 +7,7 @@ import { PropertyService } from '../property/property.service';
 import { RoomsService } from '../property/rooms.service';
 import { GuestsService } from '../guests/guests.service';
 import { CreateGuestDto } from '../guests/dto/guest.dto';
+import { FoliosService } from '../folios/folios.service';
 import {
   AvailabilityQueryDto,
   CancelReservationDto,
@@ -33,6 +34,7 @@ export class ReservationsService {
     private readonly propertyService: PropertyService,
     private readonly roomsService: RoomsService,
     private readonly guestsService: GuestsService,
+    private readonly foliosService: FoliosService,
   ) {}
 
   // -------------------------------------------------------------------------
@@ -214,6 +216,10 @@ export class ReservationsService {
 
       await this.roomsService.applyReservationOccupancy(tx, tenantId, dto.roomId, { occupancyStatus: 'occupied' }, actorId);
 
+      // Same arrival-night-only accrual as `checkIn` — see its comment.
+      const folio = await this.foliosService.ensurePrimaryFolio(tx, reservation, actorId);
+      await this.foliosService.postRoomChargeForDate(tx, reservation, folio, checkInDate, 'Walk-in', actorId);
+
       // One combined audit row, not two — a single atomic action from the guest's perspective.
       await this.audit(tx, tenantId, branchId, actorId, 'reservation.walk_in', reservation.id, {
         confirmationNumber,
@@ -257,6 +263,15 @@ export class ReservationsService {
         include: RESERVATION_INCLUDE,
       });
       await this.roomsService.applyReservationOccupancy(tx, tenantId, roomId, { occupancyStatus: 'occupied' }, actorId);
+
+      // Open the folio and accrue the ARRIVAL NIGHT only — not the whole
+      // stay. Each subsequent night is posted by night audit through the
+      // same `postRoomChargeForDate`, which refuses to double-post a date
+      // that's already billed. See its own comment for why the rate comes
+      // off the reservation rather than the room type.
+      const folio = await this.foliosService.ensurePrimaryFolio(tx, updated, actorId);
+      await this.foliosService.postRoomChargeForDate(tx, updated, folio, updated.checkInDate, 'Check-in', actorId);
+
       await this.audit(tx, tenantId, reservation.branchId, actorId, 'reservation.checked_in', reservationId, { roomId });
       return updated;
     });
@@ -295,6 +310,20 @@ export class ReservationsService {
         { occupancyStatus: 'vacant', cleanlinessStatus: 'dirty' },
         actorId,
       );
+
+      // **Check-out is NEVER blocked by an outstanding balance** — the room
+      // has to release either way. A departing guest who still owes becomes
+      // a City Ledger receivable (a collections matter), which the folio
+      // list derives from `reservation.status` + balance; a still-in-house
+      // guest who owes is a Guest Ledger matter front desk resolves before
+      // departure. This mirrors the in-house PMS
+      // (`five-clover-nestjs-backend/docs/PMS-OPERATIONS-GUIDE.md:218`) and
+      // Cloudbeds, whose AR transfer likewise happens *after* check-out.
+      // `settleIfFullyPaid` therefore never throws — `FOLIO_NOT_SETTLED`
+      // belongs to the explicit `closeFolio` path alone.
+      const folio = await this.foliosService.ensurePrimaryFolio(tx, updated, actorId);
+      await this.foliosService.settleIfFullyPaid(tx, folio, actorId);
+
       await this.audit(tx, tenantId, reservation.branchId, actorId, 'reservation.checked_out', reservationId);
       return updated;
     });

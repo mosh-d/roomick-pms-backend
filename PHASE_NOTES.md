@@ -1,5 +1,34 @@
 # Phase Notes
 
+## Folios, line items, taxes & payments (P4 minimal slice) (2026-08-27)
+
+Closes the hole Reservations shipped with ("check-out does not settle any charges — billing isn't available yet"). All models already existed and were RLS-protected from the initial migration — pure application-layer build, no schema/migration work.
+
+**Two of my design decisions were wrong and were corrected by studying the in-house PMS (`five-clover-nestjs-backend`) and Cloudbeds rather than assuming.** Recording both, because the wrong versions were plausible:
+
+### 1. Check-out must NEVER be blocked by an outstanding balance
+I planned a hard `FOLIO_NOT_SETTLED` gate on check-out. That is wrong. The in-house PMS's own docs are explicit — *"checkout itself is never blocked on it (the room has to release either way)"* (`docs/PMS-OPERATIONS-GUIDE.md:218`), with front desk shown *"an explicit warning to settle payment first"* instead (`docs/FRONT-OFFICE-PMS-GUIDE.md:155`). Cloudbeds agrees: its AR transfer happens *"typically after check-out"*.
+So: a still-checked-in guest who owes is a **Guest Ledger** matter; a departed guest who owes is a **City Ledger** receivable (collections). `FoliosService.deriveGuestStatus` derives that label from reservation status + balance — nothing is stored, nothing is blocked. `FOLIO_NOT_SETTLED` now belongs **only** to the explicit `closeFolio` path. `checkOut` calls `settleIfFullyPaid`, which deliberately returns a boolean and never throws.
+Deferred but real: Cloudbeds' explicit *Transfer to Accounts Receivable* (which zeroes the folio and moves the balance to a named AR ledger) is the fuller model — Roomick has `CorporateAccount` + `Folio.corporateAccountId` to build it on, but it needs a new AR-ledger table, i.e. a migration.
+
+### 2. Room charges accrue one night at a time, from the reservation's own rate
+I planned to post the whole stay at check-in. Also wrong — it mis-states the ledger and would double-post once night audit lands. The in-house PMS posts the *arrival night* at check-in and each subsequent night via night audit, both through the same function with the same date-scoped guard (`reservations.service.ts:1525`, `night-audit.service.ts:130`), deriving from the reservation's own stored total *"not the room type's live base_rate, so a manually adjusted rate applies to every night of the stay"*. Cloudbeds confirms the accrual rule and names it: future nightly rates are **pending** until night audit **posts** them, and only *"past or current date of stay"* transactions count.
+`postRoomChargeForDate` implements exactly this: `overrideRate ?? (confirmedRate / nights)`, guarded on an existing `room` line item for that `serviceDate`. **A 3-night stay legitimately shows one night on day one — accrual, not under-billing.** Night audit (not built) must call this function rather than re-implement it; the guard is what makes adding it safe.
+
+### Delivered
+- **`src/modules/taxes/`** — `TaxRule` CRUD (retire via `isActive`, never delete: a deleted rule would orphan the `taxRuleIds` on historical tax rows) + the tax engine. `computeTaxesForCharge` matches active branch rules (`appliesToChargeTypes: []` = all types), computes `amount × rate` to 2dp in `Prisma.Decimal`, and **skips any rule computing to exactly 0** — `line_items` carries a DB `CHECK (amount <> 0)` that a 0.00 tax row would abort the transaction on. Reachable via a 0%-rate rule or a charge small enough to round down.
+- **`src/modules/folios/`** — `ensurePrimaryFolio` (idempotent, so pre-feature reservations resolve a folio instead of 404-ing), `postRoomChargeForDate`, `postCharge`, `recordPayment`, `correctLineItem`, `closeFolio`, `settleIfFullyPaid`, `getFolio`, `getTaxBreakdown`, `listFolios` (`all` / `outstanding` / `overdue`, using the in-house system's own definition of overdue: owing *and* check-out date passed).
+- **Taxes post as separate `chargeType: 'tax'` line items** per spec §4.5, each carrying its `taxRuleIds`. The parent's `taxAmount` column is a **display denormalisation only** (the reference's "+345 tax" per-line suffix) — balance sums `amount` alone, so nothing double-counts. Note this differs from the in-house PMS, which uses a `tax` column on the item; Roomick's own spec wins for Roomick.
+- **Append-only ledger enforced**: `correctLineItem` appends a negated `correction` row with a mandatory reason and never mutates the original. Balance is always computed, never stored.
+- `checkIn`/`walkIn` open the folio and accrue the arrival night; `checkOut` settles only if fully paid.
+
+### Verified
+`npx tsc --noEmit`, `npm run lint`, `npm test` (132 tests — 8 new for the tax engine, 19 for folios, plus new reservations cases asserting check-out succeeds with a balance). Live against real Postgres, 26/26 checks: VAT rule → walk-in → folio auto-exists with exactly one night + its tax row and a correct balance → extra charge writes parent + tax → tax breakdown reverses the taxable base correctly → **check-out with a balance SUCCEEDS**, folio stays `open`, `guestStatus: city_ledger`, room still released `vacant`+`dirty` → `closeFolio` rejects with `409 FOLIO_NOT_SETTLED` → payment → balance 0 → `closeFolio` settles → correction leaves the original row untouched.
+
+### Carried forward
+- Night audit (ref p35), Cloudbeds-style Transfer-to-AR, split billing (ref p34), folio transfer, refunds, payment void, POS/outlet attribution, corporate payer, shift linkage, Print/Send Email — all deferred, all named.
+- Multi-night stays only accrue subsequent nights once night audit exists. Expected, not a bug.
+
 ## Reservations — minimal slice: guests, book/walk-in, check-in/out (2026-08-25/26)
 
 First backend work past P1 — Guests + Reservations, deliberately reduced from the full spec (`backend-execution-spec.md` §4) to what's needed for the Front Desk hub's Check-In/Check-Out/In-House Management cards to become genuinely real (see `roomick-pms-frontend/PHASE_NOTES.md` for why: the user asked for the nav to be interactive, and faking it with UI-only stubs would have broken this app's own established honesty convention). Full scope decision and deferred-list written up in the approved plan before any code — repeated here only where it affects what got built.
