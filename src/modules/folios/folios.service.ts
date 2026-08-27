@@ -281,16 +281,21 @@ export class FoliosService {
       if (!folio) {
         throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Folio not found' });
       }
-      const [lineItems, payments, totals] = await Promise.all([
+      const [lineItems, payments, totals, branch] = await Promise.all([
         tx.lineItem.findMany({ where: { folioId, deletedAt: null }, orderBy: { postedAt: 'asc' } }),
         tx.payment.findMany({ where: { folioId, deletedAt: null }, orderBy: { recordedAt: 'asc' } }),
         this.computeTotals(tx, folioId),
+        this.propertyService.assertBranch(tx, folio.branchId),
       ]);
       return {
         ...folio,
         lineItems,
         payments,
         totals,
+        // The branch's ISO 4217 code travels with every money response so
+        // the client never has to guess (or fetch the branch separately)
+        // which symbol to render amounts in.
+        currency: branch.currency,
         guestStatus: this.deriveGuestStatus(folio.reservation?.status ?? null, totals.balanceDue),
       };
     });
@@ -371,6 +376,7 @@ export class FoliosService {
             guest: folio.guest,
             reservation: folio.reservation,
             balanceDue: totals.balanceDue,
+            currency: branch.currency,
             guestStatus: this.deriveGuestStatus(folio.reservation?.status ?? null, totals.balanceDue),
           };
         }),
