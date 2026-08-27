@@ -11,6 +11,10 @@
     "sourceMap": true,
     "outDir": "./dist",
     "baseUrl": "./",
+    // "5.0" not "6.0": this project is on TypeScript 5.9, which only accepts
+    // "5.0" here — "6.0" is a TS 6.x value and makes the compiler bail with
+    // TS5103 before it builds anything.
+    "ignoreDeprecations": "5.0",
     "incremental": true,
     "skipLibCheck": true,
     "strict": true,
