@@ -3,7 +3,7 @@ import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentTenant, CurrentUser } from '../../common/decorators';
 import { Roles, SystemRole } from '../../common/decorators/roles.decorator';
 import { JwtPayload } from '../../common/types/request-context';
-import { CorrectLineItemDto, PostChargeDto, RecordPaymentDto } from './dto/folio.dto';
+import { CorrectLineItemDto, CreateFolioDto, PostChargeDto, RecordPaymentDto, SplitFolioDto } from './dto/folio.dto';
 import { FoliosService } from './folios.service';
 
 @ApiTags('folios')
@@ -86,6 +86,42 @@ export class FoliosController {
     @Param('folioId', ParseUUIDPipe) folioId: string,
   ): ReturnType<FoliosService['closeFolio']> {
     return this.foliosService.closeFolio(tenantId, folioId, user.sub);
+  }
+
+  @Post('reservations/:reservationId/folios')
+  @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk, SystemRole.Accountant)
+  @ApiOperation({ summary: 'Open an additional named folio on a reservation (e.g. room to company, incidentals to guest)' })
+  createAdditionalFolio(
+    @CurrentTenant() tenantId: string,
+    @CurrentUser() user: JwtPayload,
+    @Param('reservationId', ParseUUIDPipe) reservationId: string,
+    @Body() dto: CreateFolioDto,
+  ): ReturnType<FoliosService['createAdditionalFolio']> {
+    return this.foliosService.createAdditionalFolio(tenantId, reservationId, dto.label, user.sub);
+  }
+
+  @Post('folios/:folioId/split')
+  @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk, SystemRole.Accountant)
+  @ApiOperation({
+    summary:
+      'Move selected line items to another folio on the same reservation. Records a FolioTransfer; no amounts change, so the combined balance is unaffected.',
+  })
+  splitFolio(
+    @CurrentTenant() tenantId: string,
+    @CurrentUser() user: JwtPayload,
+    @Param('folioId', ParseUUIDPipe) folioId: string,
+    @Body() dto: SplitFolioDto,
+  ): ReturnType<FoliosService['splitFolio']> {
+    return this.foliosService.splitFolio(tenantId, folioId, dto, user.sub);
+  }
+
+  @Get('folios/:folioId/transfer-history')
+  @ApiOperation({ summary: 'Transfers this folio was the source or target of' })
+  getTransferHistory(
+    @CurrentTenant() tenantId: string,
+    @Param('folioId', ParseUUIDPipe) folioId: string,
+  ): ReturnType<FoliosService['getTransferHistory']> {
+    return this.foliosService.getTransferHistory(tenantId, folioId);
   }
 
   @Post('line-items/:lineItemId/correct')

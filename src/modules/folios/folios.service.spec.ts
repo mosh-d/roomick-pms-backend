@@ -1,4 +1,4 @@
-import { ConflictException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -38,8 +38,10 @@ function makeTx() {
       findFirst: jest.fn().mockResolvedValue(null),
       findMany: jest.fn().mockResolvedValue([]),
       create: jest.fn().mockImplementation(({ data }: { data: Record<string, unknown> }) => Promise.resolve({ id: 'li-1', ...data })),
+      updateMany: jest.fn().mockResolvedValue({ count: 2 }),
     },
     payment: { findMany: jest.fn().mockResolvedValue([]), create: jest.fn().mockResolvedValue({ id: 'pay-1' }) },
+    folioTransfer: { create: jest.fn().mockResolvedValue({ id: 'transfer-1' }), findMany: jest.fn().mockResolvedValue([]) },
     taxRule: { findMany: jest.fn().mockResolvedValue([]) },
     auditLog: { create: jest.fn().mockResolvedValue({}) },
   };
@@ -246,6 +248,65 @@ describe('FoliosService', () => {
     it('404s on a missing line item', async () => {
       tx.lineItem.findFirst.mockResolvedValue(null);
       await expect(service.correctLineItem(TENANT_ID, 'nope', { reason: 'x' }, ACTOR_ID)).rejects.toThrow(NotFoundException);
+    });
+  });
+
+  describe('splitFolio — moving charges between a reservation\'s folios', () => {
+    const TARGET_ID = '88888888-8888-4888-8888-888888888888';
+    const dto = { targetFolioId: TARGET_ID, lineItemIds: ['li-1', 'li-2'], reason: 'Room to company account' };
+
+    beforeEach(() => {
+      tx.folio.findFirst.mockImplementation(({ where }: { where: { id: string } }) =>
+        Promise.resolve(where.id === TARGET_ID ? folio({ id: TARGET_ID, label: 'Company' }) : folio()),
+      );
+      tx.lineItem.findMany.mockResolvedValue([
+        { id: 'li-1', amount: new Prisma.Decimal('20000') },
+        { id: 'li-2', amount: new Prisma.Decimal('1500') },
+      ]);
+    });
+
+    it('reassigns the folio without touching any amount, and snapshots what moved', async () => {
+      const transfer = await service.splitFolio(TENANT_ID, FOLIO_ID, dto, ACTOR_ID);
+      expect(tx.lineItem.updateMany).toHaveBeenCalledWith({
+        where: { id: { in: ['li-1', 'li-2'] } },
+        data: { folioId: TARGET_ID }, // folioId only — no amount in this update
+      });
+      expect(tx.folioTransfer.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ lineItemIds: ['li-1', 'li-2'], reason: dto.reason }),
+        }),
+      );
+      expect(transfer).toBeDefined();
+    });
+
+    it('records the transfer amount as the sum of what moved (balance is conserved across the pair)', async () => {
+      await service.splitFolio(TENANT_ID, FOLIO_ID, dto, ACTOR_ID);
+      expect(tx.folioTransfer.create.mock.calls[0][0].data.amount.toFixed(2)).toBe('21500.00');
+    });
+
+    it('rejects splitting a folio into itself', async () => {
+      await expect(service.splitFolio(TENANT_ID, FOLIO_ID, { ...dto, targetFolioId: FOLIO_ID }, ACTOR_ID)).rejects.toThrow(
+        BadRequestException,
+      );
+    });
+
+    it('rejects a target folio on a different reservation — that is a transfer, not a split', async () => {
+      tx.folio.findFirst.mockImplementation(({ where }: { where: { id: string } }) =>
+        Promise.resolve(where.id === TARGET_ID ? folio({ id: TARGET_ID, reservationId: 'other-reservation' }) : folio()),
+      );
+      await expect(service.splitFolio(TENANT_ID, FOLIO_ID, dto, ACTOR_ID)).rejects.toThrow(BadRequestException);
+      expect(tx.lineItem.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('rejects line items that do not belong to the source folio', async () => {
+      tx.lineItem.findMany.mockResolvedValue([{ id: 'li-1', amount: new Prisma.Decimal('20000') }]); // only 1 of 2 found
+      await expect(service.splitFolio(TENANT_ID, FOLIO_ID, dto, ACTOR_ID)).rejects.toThrow(BadRequestException);
+      expect(tx.lineItem.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('rejects splitting out of a settled folio', async () => {
+      tx.folio.findFirst.mockResolvedValue(folio({ status: 'settled' }));
+      await expect(service.splitFolio(TENANT_ID, FOLIO_ID, dto, ACTOR_ID)).rejects.toThrow(ConflictException);
     });
   });
 

@@ -1,6 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
-import { IsIn, IsISO8601, IsNumber, IsOptional, IsPositive, IsString, MaxLength, MinLength } from 'class-validator';
+import { ArrayMinSize, IsArray, IsIn, IsISO8601, IsNumber, IsOptional, IsPositive, IsString, IsUUID, MaxLength, MinLength } from 'class-validator';
 import { ChargeType, PaymentMethod, PaymentPurpose } from '@prisma/client';
 
 /** `tax` and `correction` are excluded: tax rows are written by the engine, corrections by `POST /line-items/:id/correct`. Neither is a thing a human posts directly. */
@@ -50,6 +50,32 @@ export class RecordPaymentDto {
   @IsString()
   @MaxLength(100)
   reference?: string;
+}
+
+export class CreateFolioDto {
+  @ApiProperty({ example: 'Company account', description: 'Names this folio apart from the primary one (which has no label).' })
+  @IsString()
+  @MinLength(1)
+  @MaxLength(100)
+  label!: string;
+}
+
+export class SplitFolioDto {
+  @ApiProperty({ description: 'Folio to move the selected line items into. Must belong to the same reservation.' })
+  @IsUUID()
+  targetFolioId!: string;
+
+  @ApiProperty({ type: [String], description: 'Line items to move. Tax rows are independent ledger entries — include them alongside their parent charge if the tax should follow it.' })
+  @IsArray()
+  @ArrayMinSize(1)
+  @IsUUID('4', { each: true })
+  lineItemIds!: string[];
+
+  @ApiProperty({ example: 'Room charges billed to the company account', description: 'Mandatory — a folio transfer without a stated reason is unauditable.' })
+  @IsString()
+  @MinLength(1)
+  @MaxLength(300)
+  reason!: string;
 }
 
 export class CorrectLineItemDto {

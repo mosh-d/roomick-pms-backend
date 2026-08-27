@@ -252,6 +252,126 @@ export class FoliosService {
     });
   }
 
+  /**
+   * Creates an ADDITIONAL folio on a reservation (spec §4.5: "a reservation
+   * can hold multiple folios — e.g. room charges → company folio,
+   * incidentals → guest folio"). The primary folio is the one with a null
+   * `label`; every extra one must be named, so the two are never
+   * ambiguous in a list.
+   */
+  async createAdditionalFolio(tenantId: string, reservationId: string, label: string, actorId: string): Promise<Folio> {
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const reservation = await tx.reservation.findFirst({ where: { id: reservationId, deletedAt: null } });
+      if (!reservation) {
+        throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Reservation not found' });
+      }
+      const folio = await tx.folio.create({
+        data: {
+          tenantId,
+          branchId: reservation.branchId,
+          reservationId,
+          guestId: reservation.guestId,
+          label,
+          status: 'open',
+          openedAt: new Date(),
+        },
+      });
+      await this.audit(tx, tenantId, reservation.branchId, actorId, 'folio.opened', folio.id, { reservationId, label });
+      return folio;
+    });
+  }
+
+  /**
+   * Moves selected line items to another folio on the same reservation,
+   * recording a `FolioTransfer` as the audit trail (spec §5:
+   * "`POST /folios/:folioId/split` — move selected line items to a new
+   * folio").
+   *
+   * **Reassigning `folioId` is not a violation of the append-only rule.**
+   * That rule is about money: "no UPDATE of amounts, no DELETE"
+   * (§4.5). No amount changes here and the combined balance across both
+   * folios is identical before and after — only which bill an existing,
+   * unmodified charge belongs to. `FolioTransfer.lineItemIds` snapshots
+   * exactly what moved, which is the shape the schema was built for.
+   *
+   * Tax rows are independent ledger entries with no parent link in the
+   * schema (`taxRuleIds` names the rule, not the charge), so they do NOT
+   * follow their parent automatically — the caller selects them
+   * explicitly. Surfaced in the UI rather than guessed at by matching
+   * description strings, which would break the moment a description is
+   * edited.
+   */
+  async splitFolio(
+    tenantId: string,
+    sourceFolioId: string,
+    dto: { targetFolioId: string; lineItemIds: string[]; reason: string },
+    actorId: string,
+  ) {
+    if (sourceFolioId === dto.targetFolioId) {
+      throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: 'Source and target folio must be different' });
+    }
+
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const source = await this.findFolioOrThrow(tx, sourceFolioId);
+      const target = await this.findFolioOrThrow(tx, dto.targetFolioId);
+      this.assertFolioOpen(source);
+      this.assertFolioOpen(target);
+
+      // Both folios must belong to the same reservation — moving a charge
+      // onto an unrelated guest's bill is a `transfer`, a separate
+      // manager-approved operation (deferred), not a split.
+      if (source.reservationId !== target.reservationId) {
+        throw new BadRequestException({
+          code: ErrorCode.VALIDATION_FAILED,
+          message: 'Both folios must belong to the same reservation',
+        });
+      }
+
+      const lineItems = await tx.lineItem.findMany({
+        where: { id: { in: dto.lineItemIds }, folioId: sourceFolioId, isVoid: false, deletedAt: null },
+      });
+      if (lineItems.length !== dto.lineItemIds.length) {
+        throw new BadRequestException({
+          code: ErrorCode.VALIDATION_FAILED,
+          message: 'One or more line items do not belong to this folio, or are voided',
+        });
+      }
+
+      const amount = lineItems.reduce((sum, item) => sum.plus(item.amount), ZERO);
+      await tx.lineItem.updateMany({ where: { id: { in: dto.lineItemIds } }, data: { folioId: dto.targetFolioId } });
+
+      const transfer = await tx.folioTransfer.create({
+        data: {
+          tenantId,
+          sourceFolioId,
+          targetFolioId: dto.targetFolioId,
+          lineItemIds: dto.lineItemIds,
+          amount,
+          reason: dto.reason,
+          approvedBy: actorId,
+        },
+      });
+      await this.audit(tx, tenantId, source.branchId, actorId, 'folio.split', sourceFolioId, {
+        targetFolioId: dto.targetFolioId,
+        lineItemCount: lineItems.length,
+        amount: amount.toFixed(2),
+        reason: dto.reason,
+      });
+      return transfer;
+    });
+  }
+
+  /** Every transfer this folio was either the source or the target of (spec §5's `GET /folios/:folioId/transfer-history`). */
+  async getTransferHistory(tenantId: string, folioId: string) {
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      await this.findFolioOrThrow(tx, folioId);
+      return tx.folioTransfer.findMany({
+        where: { OR: [{ sourceFolioId: folioId }, { targetFolioId: folioId }] },
+        orderBy: { createdAt: 'desc' },
+      });
+    });
+  }
+
   /** The ONLY place `FOLIO_NOT_SETTLED` is thrown. Check-out deliberately does not use it — see `ReservationsService.checkOut`. */
   async closeFolio(tenantId: string, folioId: string, actorId: string): Promise<Folio> {
     return this.prisma.withTenant(tenantId, async (tx) => {

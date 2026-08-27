@@ -1,5 +1,23 @@
 # Phase Notes
 
+## Split billing — additional folios and charge transfer (2026-08-27)
+
+Ref p34. A reservation can now carry more than one folio, and posted charges can move between them — the company pays the room, the guest pays the minibar.
+
+### Delivered
+- **`createAdditionalFolio(tenantId, reservationId, label)`** — every non-primary folio is named. The primary one keeps `label: null`, which is what identifies it; a second unnamed folio would make "which is the primary" ambiguous, so the label is required here and rejected if blank.
+- **`splitFolio(tenantId, sourceFolioId, {targetFolioId, lineItemIds, reason})`** — one transaction. Validates source ≠ target, that both folios belong to the *same reservation* (moving a charge onto an unrelated guest's bill is a manager-approved `transfer`, a separate deferred operation), that neither is settled, and that every named line item genuinely belongs to the source and isn't voided.
+- **Re-parenting `folioId` is not an append-only violation.** §4.5's rule is about money — "no UPDATE of amounts, no DELETE". No amount changes in a split and the combined balance across both folios is identical before and after; only which bill an existing, unmodified charge sits on. `FolioTransfer.lineItemIds` snapshots exactly what moved, which is the shape the schema was built for.
+- **`getTransferHistory(folioId)`** — every transfer this folio was either source or target of, with its mandatory reason and `approvedBy`.
+
+### Decisions & deviations
+1. **Tax rows do not follow their parent automatically.** Tax lines are independent ledger entries — `taxRuleIds` names the *rule*, not the charge, so the schema has no parent link to walk. Inferring one by matching description strings would break the first time a description is edited. The UI surfaces the tax rows as separately selectable instead, so moving a charge with its tax is a deliberate two-row selection rather than a guess.
+2. **The combined balance across both folios is invariant.** Nothing is created or destroyed by a split — asserted directly, because a transfer that changes the total is a money bug.
+3. **Folio transfer *between reservations* stays deferred**, as does Cloudbeds-style Transfer-to-AR. Both were already named as deferred in the folios entry below and remain so.
+
+### Verified
+`npx tsc --noEmit`, `npm run lint`, `npm test` — 28 folio tests, 6 of them new for the split: reassigns the folio without touching any amount and snapshots what moved; records the transfer amount as the sum of what moved (balance conserved across the pair); rejects splitting a folio into itself; rejects a target on a different reservation; rejects line items that don't belong to the source; rejects splitting out of a settled folio.
+
 ## Night audit — accrual rollover, no-shows, check-out safety net (2026-08-27)
 
 Completes the accrual model the folios phase set up. `postRoomChargeForDate` and its per-date guard were built for exactly this; night audit is the loop that calls them, so nothing about the posting logic is duplicated here.
