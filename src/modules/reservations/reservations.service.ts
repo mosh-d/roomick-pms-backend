@@ -322,6 +322,18 @@ export class ReservationsService {
       // `settleIfFullyPaid` therefore never throws — `FOLIO_NOT_SETTLED`
       // belongs to the explicit `closeFolio` path alone.
       const folio = await this.foliosService.ensurePrimaryFolio(tx, updated, actorId);
+      // Safety net: bill any elapsed night the night audit hasn't reached
+      // yet (it runs early-morning, so a guest departing today would
+      // otherwise leave with last night un-posted). Idempotent per date.
+      const branch = await this.propertyService.assertBranch(tx, reservation.branchId);
+      await this.foliosService.backfillRoomCharges(
+        tx,
+        updated,
+        folio,
+        toBranchDate(todayInTimezone(branch.timezone)),
+        'Check-out',
+        actorId,
+      );
       await this.foliosService.settleIfFullyPaid(tx, folio, actorId);
 
       await this.audit(tx, tenantId, reservation.branchId, actorId, 'reservation.checked_out', reservationId);

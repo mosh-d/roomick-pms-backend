@@ -130,6 +130,39 @@ export class FoliosService {
     });
   }
 
+  /**
+   * Posts every night of the stay that has actually elapsed and isn't
+   * already billed. Each night goes through `postRoomChargeForDate`, so
+   * the per-date guard makes this safe to call repeatedly.
+   *
+   * This is the check-out **safety net** — the in-house PMS runs the same
+   * one for exactly this reason: a guest who leaves before the night audit
+   * next runs would otherwise walk out with un-posted nights. Nights are
+   * counted `[checkInDate, checkOutDate)` — the departure day itself is
+   * never a billable night — and capped at `today`, so a guest leaving
+   * early is never charged for nights they didn't stay.
+   */
+  async backfillRoomCharges(
+    tx: TenantTx,
+    reservation: Reservation & { roomType?: { name: string } | null },
+    folio: Folio,
+    today: Date,
+    label: string,
+    actorId: string,
+  ): Promise<number> {
+    let posted = 0;
+    const lastBillable = today < reservation.checkOutDate ? today : reservation.checkOutDate;
+    for (
+      let night = new Date(reservation.checkInDate);
+      night < lastBillable;
+      night.setUTCDate(night.getUTCDate() + 1)
+    ) {
+      const result = await this.postRoomChargeForDate(tx, reservation, folio, new Date(night), label, actorId);
+      if (result) posted++;
+    }
+    return posted;
+  }
+
   // -------------------------------------------------------------------------
   // Charges, payments, corrections
   // -------------------------------------------------------------------------

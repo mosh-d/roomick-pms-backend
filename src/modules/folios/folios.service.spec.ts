@@ -118,6 +118,50 @@ describe('FoliosService', () => {
     });
   });
 
+  describe('backfillRoomCharges — the check-out safety net', () => {
+    it('posts every elapsed night, stopping before the departure day', async () => {
+      // Stay 01→04 (3 nights), "today" is the 04th: nights 01, 02, 03 bill.
+      const posted = await service.backfillRoomCharges(
+        tx as never,
+        reservation() as never,
+        folio() as never,
+        new Date('2026-09-04T00:00:00.000Z'),
+        'Check-out',
+        ACTOR_ID,
+      );
+      expect(posted).toBe(3);
+      const dates = tx.lineItem.create.mock.calls.map((c) => c[0].data.serviceDate.toISOString().slice(0, 10));
+      expect(dates).toEqual(['2026-09-01', '2026-09-02', '2026-09-03']);
+    });
+
+    it('never bills nights that have not happened yet (early departure)', async () => {
+      // Same stay, but the guest leaves on the 02nd — only the 01st is billable.
+      const posted = await service.backfillRoomCharges(
+        tx as never,
+        reservation() as never,
+        folio() as never,
+        new Date('2026-09-02T00:00:00.000Z'),
+        'Check-out',
+        ACTOR_ID,
+      );
+      expect(posted).toBe(1);
+    });
+
+    it('skips nights already billed, so it is safe to run repeatedly', async () => {
+      tx.lineItem.findFirst.mockResolvedValue({ id: 'already-billed' });
+      const posted = await service.backfillRoomCharges(
+        tx as never,
+        reservation() as never,
+        folio() as never,
+        new Date('2026-09-04T00:00:00.000Z'),
+        'Check-out',
+        ACTOR_ID,
+      );
+      expect(posted).toBe(0);
+      expect(tx.lineItem.create).not.toHaveBeenCalled();
+    });
+  });
+
   describe('postCharge — taxes as separate line items', () => {
     it('writes the parent charge plus one tax line item per matching rule', async () => {
       tx.folio.findFirst.mockResolvedValue(folio());

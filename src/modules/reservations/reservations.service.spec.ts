@@ -57,7 +57,12 @@ describe('ReservationsService', () => {
   let propertyService: { assertBranch: jest.Mock };
   let roomsService: { applyReservationOccupancy: jest.Mock };
   let guestsService: { findOrCreateGuestInTx: jest.Mock };
-  let foliosService: { ensurePrimaryFolio: jest.Mock; postRoomChargeForDate: jest.Mock; settleIfFullyPaid: jest.Mock };
+  let foliosService: {
+    ensurePrimaryFolio: jest.Mock;
+    postRoomChargeForDate: jest.Mock;
+    backfillRoomCharges: jest.Mock;
+    settleIfFullyPaid: jest.Mock;
+  };
 
   beforeEach(async () => {
     tx = makeTx();
@@ -67,6 +72,7 @@ describe('ReservationsService', () => {
     foliosService = {
       ensurePrimaryFolio: jest.fn().mockResolvedValue({ id: 'folio-1', status: 'open' }),
       postRoomChargeForDate: jest.fn().mockResolvedValue({ id: 'li-room' }),
+      backfillRoomCharges: jest.fn().mockResolvedValue(0),
       settleIfFullyPaid: jest.fn().mockResolvedValue(true),
     };
 
@@ -288,6 +294,19 @@ describe('ReservationsService', () => {
       tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'checked_in', roomId: ROOM_ID }));
       await service.checkOut(TENANT_ID, RESERVATION_ID, ACTOR_ID);
       expect(foliosService.settleIfFullyPaid).toHaveBeenCalled();
+    });
+
+    // Safety net: a guest leaving before the night audit next runs would
+    // otherwise depart with un-posted nights.
+    it('backfills any elapsed-but-unposted night before settling', async () => {
+      tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'checked_in', roomId: ROOM_ID }));
+      await service.checkOut(TENANT_ID, RESERVATION_ID, ACTOR_ID);
+      expect(foliosService.backfillRoomCharges).toHaveBeenCalledWith(
+        tx, expect.anything(), expect.anything(), expect.any(Date), 'Check-out', ACTOR_ID,
+      );
+      const backfillOrder = foliosService.backfillRoomCharges.mock.invocationCallOrder[0];
+      const settleOrder = foliosService.settleIfFullyPaid.mock.invocationCallOrder[0];
+      expect(backfillOrder).toBeLessThan(settleOrder);
     });
   });
 

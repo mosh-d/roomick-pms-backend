@@ -1,5 +1,31 @@
 # Phase Notes
 
+## Night audit — accrual rollover, no-shows, check-out safety net (2026-08-27)
+
+Completes the accrual model the folios phase set up. `postRoomChargeForDate` and its per-date guard were built for exactly this; night audit is the loop that calls them, so nothing about the posting logic is duplicated here.
+
+### Delivered
+- **`src/modules/night-audit/`** — `runAudit(tenantId, branchId, auditDate, triggeredBy)`: writes the `night_audit_log` row first (the `@@unique([branchId, auditDate])` constraint is what actually prevents a double run — a check-then-act guard alone would race two concurrent triggers; the explicit pre-check just turns the common case into a clean `409 AUDIT_ALREADY_RAN`), posts the night that just ended for every reservation occupying it, marks no-shows, then completes the log with counts and errors.
+- **Continue-on-error** per spec §4.6 — a single broken folio is recorded in `errors[]` and the batch carries on. One bad reservation must never stop a branch's whole close-out.
+- **Occupancy definition**: `checkInDate <= auditDate < checkOutDate`. The departure day is never a billable night.
+- **No-show marking** with penalties from `branch.noShowPolicy`: `first_night` (per-night rate), `full_stay` (`confirmedRate`), `flat_fee` (policy amount), `none`. Honours `autoMark: false` — a property that wants front desk to make that call gets left alone rather than having reservations silently flipped.
+- **`FoliosService.backfillRoomCharges`** + a **check-out safety net**. The in-house PMS has exactly this and says why: the audit runs early-morning, so a guest departing before it would otherwise leave with last night un-posted. Bills `[checkInDate, min(today, checkOutDate))` — every elapsed night, never one that hasn't happened. Idempotent, since each night still goes through the per-date guard.
+- **Timezone-aware sweep** (`night-audit.scheduler.ts`): hourly, not once-a-day. Branches carry their own IANA timezones, so the in-house PMS's single fixed-time cron would fire at the wrong local hour for most of them; each pass asks per branch whether *its* local clock has passed the audit hour. Enumerating tenants without a request works because `tenants` is deliberately outside the RLS carve-out; every per-tenant read then goes back through `withTenant`. Suspended/cancelled tenants are skipped — they aren't operating, so nothing should be accruing.
+- **`getPreflight`** — what date would close, whether it already ran, due-outs, open folios, unresolved no-shows.
+
+### Decisions & deviations
+1. **Two of the reference's three pre-audit checks report `passed: null`, not a tick.** "No blocking maintenance issues" and "Night shift is open" need the maintenance and shift modules, which don't exist. Reporting them as passing would make the checklist a lie; they surface as "Not tracked" instead.
+2. **Scheduler split from the service** so the service stays a plain callable unit — the manual trigger and the tests both use it with no scheduler in the way. Same split the in-house PMS uses between its `TasksService` and its audit service.
+
+### Verified
+`npx tsc --noEmit`, `npm run lint`, `npm test` (149 tests — 13 new for night audit, 3 new for the backfill, 1 asserting check-out backfills *before* settling). Live, 14/14 against real Postgres: check-in posts only the arrival night → auditing the next night posts a second → re-running that date returns `409 AUDIT_ALREADY_RAN` → auditing a night before arrival adds nothing → **check-out backfills the elapsed nights and charges exactly 2 for an arrival on the 25th departing the 27th**, correct dates, no duplicates, subtotal = nights × rate → history lists runs with BigInt ids serialised.
+
+One assertion of mine was wrong before the code was: I expected 3 nights for that stay. The departure night is never billable — 2 is correct, and the subtotal proved it.
+
+### Carried forward
+- Everything from the entries below — unchanged.
+- The spec's "run stuck in `running` >10 min" health rule is recorded in the log but not yet surfaced by a health endpoint.
+
 ## Folios, line items, taxes & payments (P4 minimal slice) (2026-08-27)
 
 Closes the hole Reservations shipped with ("check-out does not settle any charges — billing isn't available yet"). All models already existed and were RLS-protected from the initial migration — pure application-layer build, no schema/migration work.
