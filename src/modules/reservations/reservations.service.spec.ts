@@ -8,6 +8,7 @@ import { GuestsService } from '../guests/guests.service';
 import { FoliosService } from '../folios/folios.service';
 import { HousekeepingService } from '../housekeeping/housekeeping.service';
 import { RateResolverService } from '../rate-resolver/rate-resolver.service';
+import { RegistrationCardsService } from '../registration-cards/registration-cards.service';
 import { ReservationsService } from './reservations.service';
 
 const TENANT_ID = '11111111-1111-4111-8111-111111111111';
@@ -31,6 +32,7 @@ function reservation(overrides: Partial<Record<string, unknown>> = {}) {
     children: 0,
     confirmedRate: { toFixed: () => '300.00' },
     deletedAt: null,
+    branch: { currency: 'NGN' },
     ...overrides,
   };
 }
@@ -81,10 +83,11 @@ describe('ReservationsService', () => {
   };
   let housekeepingService: { createTaskInTx: jest.Mock };
   let rateResolverService: { resolveStay: jest.Mock; linkAuditLogsToReservation: jest.Mock };
+  let registrationCardsService: { generateCardInTx: jest.Mock };
 
   beforeEach(async () => {
     tx = makeTx();
-    propertyService = { assertBranch: jest.fn().mockResolvedValue({ id: BRANCH_ID, timezone: 'Africa/Lagos', noShowPolicy: null }) };
+    propertyService = { assertBranch: jest.fn().mockResolvedValue({ id: BRANCH_ID, timezone: 'Africa/Lagos', noShowPolicy: null, regCardTemplate: null }) };
     roomsService = { applyReservationOccupancy: jest.fn().mockResolvedValue({}) };
     guestsService = { findOrCreateGuestInTx: jest.fn().mockResolvedValue({ id: GUEST_ID, name: 'John Doe' }) };
     foliosService = {
@@ -117,6 +120,7 @@ describe('ReservationsService', () => {
       }),
       linkAuditLogsToReservation: jest.fn().mockResolvedValue(undefined),
     };
+    registrationCardsService = { generateCardInTx: jest.fn().mockResolvedValue({ id: 'card-1' }) };
 
     const moduleRef = await Test.createTestingModule({
       providers: [
@@ -131,6 +135,7 @@ describe('ReservationsService', () => {
         { provide: FoliosService, useValue: foliosService },
         { provide: HousekeepingService, useValue: housekeepingService },
         { provide: RateResolverService, useValue: rateResolverService },
+        { provide: RegistrationCardsService, useValue: registrationCardsService },
       ],
     }).compile();
     service = moduleRef.get(ReservationsService);
@@ -402,6 +407,12 @@ describe('ReservationsService', () => {
       tx.room.findFirst.mockResolvedValue({ id: ROOM_ID, branchId: BRANCH_ID, roomTypeId: TYPE_ID, occupancyStatus: 'occupied', heldStatus: null, deletedAt: null });
       await expect(service.walkIn(TENANT_ID, BRANCH_ID, dto, ACTOR_ID)).rejects.toThrow(ConflictException);
     });
+
+    it('a walk-in IS a check-in — the registration card is generated the same way', async () => {
+      tx.room.findFirst.mockResolvedValue({ id: ROOM_ID, branchId: BRANCH_ID, roomTypeId: TYPE_ID, occupancyStatus: 'vacant', heldStatus: null, deletedAt: null });
+      await service.walkIn(TENANT_ID, BRANCH_ID, dto, ACTOR_ID);
+      expect(registrationCardsService.generateCardInTx).toHaveBeenCalledWith(tx, TENANT_ID, expect.objectContaining({ branch: { currency: 'NGN', regCardTemplate: null } }), ACTOR_ID);
+    });
   });
 
   describe('checkIn', () => {
@@ -447,6 +458,13 @@ describe('ReservationsService', () => {
       tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'confirmed', roomId: null }));
       tx.room.findFirst.mockResolvedValue({ id: ROOM_ID, branchId: BRANCH_ID, roomTypeId: TYPE_ID, occupancyStatus: 'vacant', heldStatus: null, cleanlinessStatus: 'dirty', deletedAt: null });
       await expect(service.checkIn(TENANT_ID, RESERVATION_ID, { roomId: ROOM_ID }, ACTOR_ID)).resolves.toBeDefined();
+    });
+
+    it('auto-generates the registration card in the same transaction — "auto-generated when check-in is triggered"', async () => {
+      tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'confirmed', roomId: null }));
+      tx.room.findFirst.mockResolvedValue({ id: ROOM_ID, branchId: BRANCH_ID, roomTypeId: TYPE_ID, occupancyStatus: 'vacant', heldStatus: null, deletedAt: null });
+      await service.checkIn(TENANT_ID, RESERVATION_ID, { roomId: ROOM_ID }, ACTOR_ID);
+      expect(registrationCardsService.generateCardInTx).toHaveBeenCalledWith(tx, TENANT_ID, expect.objectContaining({ branch: { currency: 'NGN', regCardTemplate: null } }), ACTOR_ID);
     });
   });
 

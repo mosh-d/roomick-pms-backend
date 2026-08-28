@@ -1,5 +1,28 @@
 # Phase Notes
 
+## Guest Registration Card — auto-generated at check-in, DB-only by explicit choice (2026-08-28)
+
+Per the MVP timeline reference (Month 3): "a legal document, not an afterthought" — auto-generated when check-in is triggered, pre-filled guest/room/rate/house-rules, a digital signature pad, and a signed document stored encrypted and retrievable. `RegistrationCard` and `Branch.regCardTemplate` were already fully modeled in the schema from an earlier pass; `PropertyService.setRegCardTemplate` and its `PATCH` route already existed too. This closes the actual card-generation and signing flow.
+
+### Scope, decided explicitly before writing any code
+The reference's "signed PDF generated server-side... stored encrypted" needs real infrastructure — a PDF library and encrypted object storage — that doesn't exist anywhere in this project (same gap ID-document encryption has always been named against). Asked rather than assumed: the guest snapshot (`fields: Json`) and signature (`signatureData: String?`) already live directly in Postgres per the existing schema, so **no new infrastructure at all** — the `[cardId]` page itself, rendering those two columns, stands in for "the document," with `window.print()` (and `print:hidden` added to the sidebar/header chrome) as the closest thing to a downloadable file this pass offers. `documentUrl` stays null, named as deferred the same way ID-document encryption already is.
+
+### What's new
+- **`registration-cards/` module**: `generateCardInTx` (idempotent on `reservationId`, called from `ReservationsService.checkIn`/`walkIn` inside their OWN transaction — "auto-generated when check-in is triggered" is a real step of check-in, not a fire-and-forget follow-up), a standalone `generateCard` (manual/backfill path, for a stay checked in before this module existed — only valid once `checked_in`), `signCard` (rejects re-signing an already-signed card — a legal document isn't a silently overwritable field), `getCard`/`getCardForReservation`.
+- **The snapshot deliberately omits ID-document fields** (nationality, doc type/number) — `CreateGuestDto` has never collected them (ID capture + its required encryption are still unbuilt, named elsewhere), so there was nothing real to put there. Tested directly: a card's `fields` never carries `idDocNumber`/`nationality`.
+- **`GET /branches/:id/registration-card-template`** — the `PATCH` already existed with nothing to read it back with; an edit form blind-overwriting fields it never fetched first would have silently blanked out whatever the caller didn't resubmit.
+
+### Verified
+`npx tsc --noEmit`, `npm run lint`, `npm test` — 260 tests (11 new in `registration-cards.service.spec.ts`: the snapshot's exact shape, idempotency, the ID-document omission, the already-signed rejection; 3 new in `reservations.service.spec.ts` proving `checkIn`/`walkIn` actually call `generateCardInTx` with the right reservation+branch shape).
+
+Live, against real Postgres: saved a branch template with real house rules through the UI → walked a guest in through the actual Walk-In Booking form → check-in auto-redirected straight to a freshly generated card (no separate "go generate it" step) → confirmed the card's snapshot has the right guest name, room, dates, and the branch's own house rules, with no ID-document fields present → signed it via a real mouse-drawn signature on the canvas → confirmed `signedAt`/`witnessedBy`/a real non-trivial base64 PNG all landed via the API (ground truth, not just the UI) → confirmed a second sign attempt is rejected with `409` → reloaded the page and confirmed the signed state is view-only (no pad, a Print button instead).
+
+### Carried forward
+- Everything from the entry below — unchanged.
+- Real PDF generation and encrypted object storage — explicitly deferred, not silently dropped; the DB-only approach here was a decision, not a placeholder for one.
+- ID capture (document type/number, photo) and its required encryption — still unbuilt, same gap named since Guest capture's own first pass.
+- `RegCardTemplateDto.requiredFields` (a list of which fields a branch requires on its card) — the schema/DTO carry it, but with no ID-capture fields to require in the first place, there's nothing real for a picker to offer yet; omitted from the template form rather than built against nothing.
+
 ## No-Show Handling — manual mark/waive/reinstate, unified with Night Audit's own automated sweep (2026-08-28)
 
 Per the MVP timeline reference (Month 3): a pending-arrivals dashboard, atomic mark-as-no-show (penalty + room release + folio), manager waive, and late-arrival reinstatement. `NoShowRecord`/`Branch.noShowPolicy` were already in the schema, and — found while scoping this, not assumed — `NightAuditService` already had a private, *automated* no-show sweep from an earlier phase (`markNoShows`, gated on `noShowPolicy.autoMark`, penalty math in a private `penaltyAmountFor`). What Night Audit's own version never did: post the computed penalty as an actual folio charge. It created a `NoShowRecord` carrying a `penaltyAmount` figure and stopped there — a number sitting on a record, with no real billing consequence for the guest. The reference's own wording for the manual path — "penalty **posted**" — settled that this was a real gap, not a deliberate simplification worth preserving.

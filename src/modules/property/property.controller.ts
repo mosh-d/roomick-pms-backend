@@ -102,6 +102,16 @@ export class PropertyController {
     return this.propertyService.setNoShowPolicy(tenantId, branchId, dto, user.sub);
   }
 
+  @Get('branches/:branchId/registration-card-template')
+  @Roles(SystemRole.Owner, SystemRole.Manager)
+  @ApiOperation({ summary: 'Read the branch registration-card template — lets the edit form pre-fill' })
+  getRegCardTemplate(
+    @CurrentTenant() tenantId: string,
+    @Param('branchId', ParseUUIDPipe) branchId: string,
+  ): ReturnType<PropertyService['getRegCardTemplate']> {
+    return this.propertyService.getRegCardTemplate(tenantId, branchId);
+  }
+
   @Patch('branches/:branchId/registration-card-template')
   @Roles(SystemRole.Owner, SystemRole.Manager)
   @ApiOperation({ summary: 'Set the branch registration-card template' })

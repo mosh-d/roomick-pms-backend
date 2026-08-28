@@ -227,6 +227,14 @@ export class PropertyService {
     });
   }
 
+  /** Read side of `setRegCardTemplate` — lets the edit form pre-fill instead of blind-overwriting fields the caller didn't resubmit. `{}` (not null) when nothing's been set yet, matching the DTO's own all-optional shape. */
+  async getRegCardTemplate(tenantId: string, branchId: string): Promise<Prisma.JsonValue> {
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const branch = await this.assertBranch(tx, branchId);
+      return branch.regCardTemplate ?? {};
+    });
+  }
+
   // -------------------------------------------------------------------------
   // Buildings & floors (3-mode onboarding: hidden defaults have name NULL)
   // -------------------------------------------------------------------------

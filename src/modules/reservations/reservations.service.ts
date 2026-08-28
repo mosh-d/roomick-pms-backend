@@ -10,6 +10,7 @@ import { CreateGuestDto } from '../guests/dto/guest.dto';
 import { FoliosService } from '../folios/folios.service';
 import { HousekeepingService } from '../housekeeping/housekeeping.service';
 import { RateResolverService } from '../rate-resolver/rate-resolver.service';
+import { RegistrationCardsService } from '../registration-cards/registration-cards.service';
 import {
   AvailabilityCalendarQueryDto,
   AvailabilityQueryDto,
@@ -57,6 +58,7 @@ export class ReservationsService {
     private readonly foliosService: FoliosService,
     private readonly housekeepingService: HousekeepingService,
     private readonly rateResolverService: RateResolverService,
+    private readonly registrationCardsService: RegistrationCardsService,
   ) {}
 
   // -------------------------------------------------------------------------
@@ -305,6 +307,9 @@ export class ReservationsService {
       const folio = await this.foliosService.ensurePrimaryFolio(tx, reservation, actorId);
       await this.foliosService.postRoomChargeForDate(tx, reservation, folio, checkInDate, 'Walk-in', actorId);
 
+      // A walk-in IS a check-in (create + immediate check-in in one call) — same "auto-generated when check-in is triggered" rule `checkIn` follows.
+      await this.registrationCardsService.generateCardInTx(tx, tenantId, { ...reservation, branch: { currency: reservation.branch.currency, regCardTemplate: branch.regCardTemplate } }, actorId);
+
       // One combined audit row, not two — a single atomic action from the guest's perspective.
       await this.audit(tx, tenantId, branchId, actorId, 'reservation.walk_in', reservation.id, {
         confirmationNumber,
@@ -356,6 +361,12 @@ export class ReservationsService {
       // off the reservation rather than the room type.
       const folio = await this.foliosService.ensurePrimaryFolio(tx, updated, actorId);
       await this.foliosService.postRoomChargeForDate(tx, updated, folio, updated.checkInDate, 'Check-in', actorId);
+
+      // "Auto-generated when check-in is triggered" (ref) — a legal
+      // document, not an afterthought, so it's part of THIS transaction,
+      // not a fire-and-forget follow-up call.
+      const branch = await this.propertyService.assertBranch(tx, reservation.branchId);
+      await this.registrationCardsService.generateCardInTx(tx, tenantId, { ...updated, branch: { currency: updated.branch.currency, regCardTemplate: branch.regCardTemplate } }, actorId);
 
       await this.audit(tx, tenantId, reservation.branchId, actorId, 'reservation.checked_in', reservationId, { roomId });
       return updated;

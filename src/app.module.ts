@@ -19,6 +19,7 @@ import { HousekeepingModule } from './modules/housekeeping/housekeeping.module';
 import { NightAuditModule } from './modules/night-audit/night-audit.module';
 import { PropertyModule } from './modules/property/property.module';
 import { RateResolverModule } from './modules/rate-resolver/rate-resolver.module';
+import { RegistrationCardsModule } from './modules/registration-cards/registration-cards.module';
 import { ReservationsModule } from './modules/reservations/reservations.module';
 import { TaxesModule } from './modules/taxes/taxes.module';
 import { SystemModule } from './modules/system/system.module';
@@ -54,6 +55,7 @@ import { PrismaModule } from './prisma/prisma.module';
     PropertyModule,
     GuestsModule,
     RateResolverModule,
+    RegistrationCardsModule,
     ReservationsModule,
     TaxesModule,
     FoliosModule,

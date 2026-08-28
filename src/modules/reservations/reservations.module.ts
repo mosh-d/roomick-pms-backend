@@ -4,11 +4,12 @@ import { GuestsModule } from '../guests/guests.module';
 import { FoliosModule } from '../folios/folios.module';
 import { HousekeepingModule } from '../housekeeping/housekeeping.module';
 import { RateResolverModule } from '../rate-resolver/rate-resolver.module';
+import { RegistrationCardsModule } from '../registration-cards/registration-cards.module';
 import { ReservationsController } from './reservations.controller';
 import { ReservationsService } from './reservations.service';
 
 @Module({
-  imports: [PropertyModule, GuestsModule, FoliosModule, HousekeepingModule, RateResolverModule],
+  imports: [PropertyModule, GuestsModule, FoliosModule, HousekeepingModule, RateResolverModule, RegistrationCardsModule],
   controllers: [ReservationsController],
   providers: [ReservationsService],
   exports: [ReservationsService],
