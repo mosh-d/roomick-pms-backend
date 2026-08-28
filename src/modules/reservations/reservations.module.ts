@@ -5,11 +5,12 @@ import { FoliosModule } from '../folios/folios.module';
 import { HousekeepingModule } from '../housekeeping/housekeeping.module';
 import { RateResolverModule } from '../rate-resolver/rate-resolver.module';
 import { RegistrationCardsModule } from '../registration-cards/registration-cards.module';
+import { CommsLogModule } from '../comms-log/comms-log.module';
 import { ReservationsController } from './reservations.controller';
 import { ReservationsService } from './reservations.service';
 
 @Module({
-  imports: [PropertyModule, GuestsModule, FoliosModule, HousekeepingModule, RateResolverModule, RegistrationCardsModule],
+  imports: [PropertyModule, GuestsModule, FoliosModule, HousekeepingModule, RateResolverModule, RegistrationCardsModule, CommsLogModule],
   controllers: [ReservationsController],
   providers: [ReservationsService],
   exports: [ReservationsService],

@@ -22,6 +22,7 @@ import { RateResolverModule } from './modules/rate-resolver/rate-resolver.module
 import { RegistrationCardsModule } from './modules/registration-cards/registration-cards.module';
 import { ReservationsModule } from './modules/reservations/reservations.module';
 import { ShiftsModule } from './modules/shifts/shifts.module';
+import { CommsLogModule } from './modules/comms-log/comms-log.module';
 import { TaxesModule } from './modules/taxes/taxes.module';
 import { SystemModule } from './modules/system/system.module';
 import { TenantsModule } from './modules/tenants/tenants.module';
@@ -63,6 +64,7 @@ import { PrismaModule } from './prisma/prisma.module';
     NightAuditModule,
     HousekeepingModule,
     ShiftsModule,
+    CommsLogModule,
   ],
   providers: [
     JwtStrategy,

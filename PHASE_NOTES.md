@@ -1,5 +1,37 @@
 # Phase Notes
 
+## Guest Communications Log — automated + manual message record, per reservation and guest (2026-08-28)
+
+Per the MVP timeline reference (Month 5): "complete history of every automated and manual communication sent to a guest, attached to both the reservation and guest profile — critical for dispute resolution." `CommunicationLog` was already fully modeled, with its own schema comment settling scope up front: *"MVP: rows stay 'queued' — sending adapter is stubbed."* So this is a LOG module, not a mailer — the deliverable is a trustworthy record of what was meant to go out and what it said, independent of whether real delivery infrastructure exists yet.
+
+### Five real automated triggers, wired at the exact lifecycle points that already exist
+`CommunicationLog.trigger`'s own vocabulary (`booking_confirmation | pre_arrival | checkin_receipt | invoice | post_stay | no_show_notice | cancellation | manual`) maps almost one-to-one onto reservation lifecycle methods already built this session — so rather than inventing a notification layer, `CommsLogService.logAutomatedInTx` (takes an already-open transaction, mirroring every other `*InTx` helper this codebase uses for the same nested-transaction-safety reason) is called directly from inside each:
+- `createReservation` → `booking_confirmation` (skipped for a waitlist join — nothing's actually confirmed yet).
+- `walkIn` → `checkin_receipt` only, not `booking_confirmation` too — a walk-in has no gap between booking and arrival, so a separate "your booking is confirmed" message doesn't make sense the way it does for an advance reservation.
+- `checkIn` → `checkin_receipt`.
+- `checkOut` → `post_stay`.
+- `cancel` → `cancellation`, with the guest-supplied reason folded into the logged body when given.
+- `markNoShowInTx` → `no_show_notice`, naming the penalty amount when one was actually applied.
+
+`pre_arrival` (needs a scheduled reminder job — real new infra, not a lifecycle hook) and `invoice` (would need real PDF generation, the same gap already named against Registration Cards) are both explicitly deferred, not silently dropped.
+
+### `channel: 'email'` is a deliberate default, not an oversight
+Every automated trigger logs as `email` — the reference's own vocabulary treats email as the default guest-facing channel, and building real per-channel routing logic (SMS gateway selection, push tokens) with no actual sending adapter behind any of it would be building against nothing. Manual sends let the front-desk agent pick `email` or `sms` explicitly (`push`/`in_app_chat` have no compose UI yet — nothing produces them manually in this system today).
+
+### No `Template` model exists — the reference's "template picker dropdown" has nothing to pick from
+Checked before designing the DTO: no template/message-template table anywhere in the schema. `SendCommunicationDto` therefore has no `templateId` field at all, rather than accepting one that would silently do nothing — the agent composes the message directly (subject + body), matching how this codebase has handled every other "reference wants X but X's own infrastructure doesn't exist yet" gap (PDF generation, ID-document encryption).
+
+### Verified
+`npx tsc --noEmit`, `npm run lint`, `npm test` — 303 tests (7 new in `comms-log.service.spec.ts`: automated rows write `sentBy: null`/`deliveryStatus: 'queued'`, manual sends stamp the actor, a 404 on a missing reservation, and the guest-level date-range filter; 6 new in `reservations.service.spec.ts` proving each of the five lifecycle hooks actually fires with the right trigger/guestId, including that a waitlist join does NOT log a booking confirmation).
+
+Live, against real Postgres: created an advance reservation through the API and confirmed `booking_confirmation` was auto-logged (`queued`, `sentBy: null`) → cancelled it with a reason and confirmed the `cancellation` entry's body names that exact reason → opened the page through the actual sidebar link, searched by guest name, and confirmed both auto-logged entries render in the timeline with correct trigger labels and delivery-status badges → expanded a message and confirmed the full body renders → sent a manual message through the real composer and confirmed it appears in the timeline, then confirmed via the API that it's stamped `trigger: 'manual'`, `sentBy` = the actual logged-in agent, `deliveryStatus: 'queued'` → confirmed the guest-level endpoint (`GET /guests/:id/communications`, no UI yet — see below) returns the identical set of entries.
+
+### Carried forward
+- No Guest Profile hub page exists yet, so this page is reservation-centric (search a reservation → see its timeline) rather than the reference's own guest-profile-scoped route. `GET /guests/:guestId/communications?from=&to=` is fully built and tested — the moment a Guest Profile page exists, wiring a Comms tab onto it needs no new backend work.
+- `pre_arrival` trigger (needs a scheduled reminder job) and `invoice` trigger (needs real PDF generation) — both explicitly deferred, not forgotten.
+- Real sending (an actual email/SMS adapter) and delivery-status transitions (`sent`/`delivered`/`opened`/`bounced`/`failed`) — the schema's own comment already named this as stubbed for MVP; every row this pass writes stays `queued` by design.
+- "Resend failed message" — meaningless until real sending exists to fail in the first place.
+
 ## Shift Management — cash drawer reconciliation, handover, carried-over issues (2026-08-28)
 
 Per the MVP timeline reference (Month 5) and its own frontend-structure doc (the richest single spec any feature this session has had — full request/response shapes, not just prose): shift open/close, cash denomination counting, variance reconciliation against the system's own cash total, handover notes, and an unresolved-issue log that survives shift boundaries. `Shift`/`ShiftIssue` and `Payment.shiftId` were already fully modeled from an earlier pass; nothing read or wrote any of it. This closes the actual module — and, along the way, confirmed two Month 5 items the reference lists as separate work (audit logging, RBAC) were already done globally, not new surface to build.

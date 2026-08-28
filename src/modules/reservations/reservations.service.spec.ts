@@ -9,6 +9,7 @@ import { FoliosService } from '../folios/folios.service';
 import { HousekeepingService } from '../housekeeping/housekeeping.service';
 import { RateResolverService } from '../rate-resolver/rate-resolver.service';
 import { RegistrationCardsService } from '../registration-cards/registration-cards.service';
+import { CommsLogService } from '../comms-log/comms-log.service';
 import { ReservationsService } from './reservations.service';
 
 const TENANT_ID = '11111111-1111-4111-8111-111111111111';
@@ -23,8 +24,10 @@ function reservation(overrides: Partial<Record<string, unknown>> = {}) {
   return {
     id: RESERVATION_ID,
     branchId: BRANCH_ID,
+    guestId: GUEST_ID,
     roomTypeId: TYPE_ID,
     roomId: null,
+    confirmationNumber: 'RES-2026-00001',
     status: 'confirmed',
     checkInDate: new Date('2026-09-01T00:00:00.000Z'),
     checkOutDate: new Date('2026-09-04T00:00:00.000Z'),
@@ -33,6 +36,7 @@ function reservation(overrides: Partial<Record<string, unknown>> = {}) {
     confirmedRate: { toFixed: () => '300.00' },
     deletedAt: null,
     branch: { currency: 'NGN' },
+    roomType: { name: 'Standard' },
     ...overrides,
   };
 }
@@ -88,6 +92,7 @@ describe('ReservationsService', () => {
   let housekeepingService: { createTaskInTx: jest.Mock };
   let rateResolverService: { resolveStay: jest.Mock; linkAuditLogsToReservation: jest.Mock };
   let registrationCardsService: { generateCardInTx: jest.Mock };
+  let commsLogService: { logAutomatedInTx: jest.Mock };
 
   beforeEach(async () => {
     tx = makeTx();
@@ -125,6 +130,7 @@ describe('ReservationsService', () => {
       linkAuditLogsToReservation: jest.fn().mockResolvedValue(undefined),
     };
     registrationCardsService = { generateCardInTx: jest.fn().mockResolvedValue({ id: 'card-1' }) };
+    commsLogService = { logAutomatedInTx: jest.fn().mockResolvedValue({ id: 'comm-1' }) };
 
     const moduleRef = await Test.createTestingModule({
       providers: [
@@ -140,6 +146,7 @@ describe('ReservationsService', () => {
         { provide: HousekeepingService, useValue: housekeepingService },
         { provide: RateResolverService, useValue: rateResolverService },
         { provide: RegistrationCardsService, useValue: registrationCardsService },
+        { provide: CommsLogService, useValue: commsLogService },
       ],
     }).compile();
     service = moduleRef.get(ReservationsService);
@@ -468,6 +475,17 @@ describe('ReservationsService', () => {
       tx.room.count.mockResolvedValue(0);
       await expect(service.createReservation(TENANT_ID, BRANCH_ID, dto, ACTOR_ID)).rejects.toThrow(ConflictException);
     });
+
+    it('logs a booking_confirmation comms row for a real booking', async () => {
+      await service.createReservation(TENANT_ID, BRANCH_ID, dto, ACTOR_ID);
+      expect(commsLogService.logAutomatedInTx).toHaveBeenCalledWith(tx, TENANT_ID, BRANCH_ID, expect.objectContaining({ guestId: GUEST_ID, trigger: 'booking_confirmation' }));
+    });
+
+    it('does NOT log a booking_confirmation for a waitlist join — nothing is confirmed yet', async () => {
+      tx.room.count.mockResolvedValue(0);
+      await service.createReservation(TENANT_ID, BRANCH_ID, { ...dto, joinWaitlist: true }, ACTOR_ID);
+      expect(commsLogService.logAutomatedInTx).not.toHaveBeenCalled();
+    });
   });
 
   describe('walkIn', () => {
@@ -550,6 +568,13 @@ describe('ReservationsService', () => {
       await service.checkIn(TENANT_ID, RESERVATION_ID, { roomId: ROOM_ID }, ACTOR_ID);
       expect(registrationCardsService.generateCardInTx).toHaveBeenCalledWith(tx, TENANT_ID, expect.objectContaining({ branch: { currency: 'NGN', regCardTemplate: null } }), ACTOR_ID);
     });
+
+    it('logs a checkin_receipt comms row', async () => {
+      tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'confirmed', roomId: null }));
+      tx.room.findFirst.mockResolvedValue({ id: ROOM_ID, branchId: BRANCH_ID, roomTypeId: TYPE_ID, occupancyStatus: 'vacant', heldStatus: null, deletedAt: null, number: '204' });
+      await service.checkIn(TENANT_ID, RESERVATION_ID, { roomId: ROOM_ID }, ACTOR_ID);
+      expect(commsLogService.logAutomatedInTx).toHaveBeenCalledWith(tx, TENANT_ID, BRANCH_ID, expect.objectContaining({ guestId: GUEST_ID, trigger: 'checkin_receipt' }));
+    });
   });
 
   describe('checkOut', () => {
@@ -604,6 +629,12 @@ describe('ReservationsService', () => {
       const settleOrder = foliosService.settleIfFullyPaid.mock.invocationCallOrder[0];
       expect(backfillOrder).toBeLessThan(settleOrder);
     });
+
+    it('logs a post_stay comms row', async () => {
+      tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'checked_in', roomId: ROOM_ID }));
+      await service.checkOut(TENANT_ID, RESERVATION_ID, ACTOR_ID);
+      expect(commsLogService.logAutomatedInTx).toHaveBeenCalledWith(tx, TENANT_ID, BRANCH_ID, expect.objectContaining({ guestId: GUEST_ID, trigger: 'post_stay' }));
+    });
   });
 
   describe('cancel', () => {
@@ -621,6 +652,15 @@ describe('ReservationsService', () => {
     it('rejected when already cancelled', async () => {
       tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'cancelled' }));
       await expect(service.cancel(TENANT_ID, RESERVATION_ID, {}, ACTOR_ID)).rejects.toThrow(ConflictException);
+    });
+
+    it('logs a cancellation comms row, including the reason when given', async () => {
+      tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'confirmed' }));
+      await service.cancel(TENANT_ID, RESERVATION_ID, { reason: 'Guest changed plans' }, ACTOR_ID);
+      expect(commsLogService.logAutomatedInTx).toHaveBeenCalledWith(
+        tx, TENANT_ID, BRANCH_ID,
+        expect.objectContaining({ guestId: GUEST_ID, trigger: 'cancellation', body: expect.stringContaining('Guest changed plans') }),
+      );
     });
   });
 
@@ -669,6 +709,18 @@ describe('ReservationsService', () => {
         await service.markNoShow(TENANT_ID, RESERVATION_ID, ACTOR_ID);
         expect(foliosService.postAdHocCharge).not.toHaveBeenCalled();
         expect(foliosService.settleIfFullyPaid).toHaveBeenCalledWith(tx, expect.anything(), expect.any(String), 'noShow');
+      });
+
+      it('logs a no_show_notice comms row, naming the penalty when one was applied', async () => {
+        propertyService.assertBranch.mockResolvedValueOnce({ id: BRANCH_ID, timezone: 'Africa/Lagos', noShowPolicy: { defaultPenalty: 'first_night' } });
+        tx.reservation.findFirst.mockResolvedValue(
+          reservation({ status: 'confirmed', confirmedRate: new Prisma.Decimal('300'), overrideRate: null, checkInDate: new Date('2026-09-01'), checkOutDate: new Date('2026-09-04'), createdBy: ACTOR_ID }),
+        );
+        await service.markNoShow(TENANT_ID, RESERVATION_ID, ACTOR_ID);
+        expect(commsLogService.logAutomatedInTx).toHaveBeenCalledWith(
+          tx, TENANT_ID, BRANCH_ID,
+          expect.objectContaining({ guestId: GUEST_ID, trigger: 'no_show_notice', body: expect.stringContaining('penalty') }),
+        );
       });
     });
 

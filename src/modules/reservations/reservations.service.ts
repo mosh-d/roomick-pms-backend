@@ -11,6 +11,7 @@ import { FoliosService } from '../folios/folios.service';
 import { HousekeepingService } from '../housekeeping/housekeeping.service';
 import { RateResolverService } from '../rate-resolver/rate-resolver.service';
 import { RegistrationCardsService } from '../registration-cards/registration-cards.service';
+import { CommsLogService } from '../comms-log/comms-log.service';
 import {
   AvailabilityCalendarQueryDto,
   AvailabilityQueryDto,
@@ -60,6 +61,7 @@ export class ReservationsService {
     private readonly housekeepingService: HousekeepingService,
     private readonly rateResolverService: RateResolverService,
     private readonly registrationCardsService: RegistrationCardsService,
+    private readonly commsLogService: CommsLogService,
   ) {}
 
   // -------------------------------------------------------------------------
@@ -333,6 +335,16 @@ export class ReservationsService {
         confirmationNumber,
         roomTypeId: dto.roomTypeId,
       });
+      if (!dto.joinWaitlist) {
+        await this.commsLogService.logAutomatedInTx(tx, tenantId, branchId, {
+          reservationId: reservation.id,
+          guestId: guest.id,
+          channel: 'email',
+          subject: `Reservation Confirmed — ${confirmationNumber}`,
+          body: `Your reservation ${confirmationNumber} is confirmed — ${roomType.name}, ${dto.checkInDate} to ${dto.checkOutDate}.`,
+          trigger: 'booking_confirmation',
+        });
+      }
       return reservation;
     });
   }
@@ -402,6 +414,17 @@ export class ReservationsService {
         confirmationNumber,
         roomId: dto.roomId,
       });
+      // A walk-in has no gap between booking and arrival, so only a
+      // check-in receipt makes sense here — no separate "your booking is
+      // confirmed" email the way an advance reservation gets.
+      await this.commsLogService.logAutomatedInTx(tx, tenantId, branchId, {
+        reservationId: reservation.id,
+        guestId: guest.id,
+        channel: 'email',
+        subject: `Welcome — ${confirmationNumber}`,
+        body: `Welcome! You're checked in to room ${room.number} (${roomType.name}). Check-out is ${dto.checkOutDate}.`,
+        trigger: 'checkin_receipt',
+      });
       return reservation;
     });
   }
@@ -456,6 +479,14 @@ export class ReservationsService {
       await this.registrationCardsService.generateCardInTx(tx, tenantId, { ...updated, branch: { currency: updated.branch.currency, regCardTemplate: branch.regCardTemplate } }, actorId);
 
       await this.audit(tx, tenantId, reservation.branchId, actorId, 'reservation.checked_in', reservationId, { roomId });
+      await this.commsLogService.logAutomatedInTx(tx, tenantId, reservation.branchId, {
+        reservationId,
+        guestId: updated.guestId,
+        channel: 'email',
+        subject: `Welcome — ${updated.confirmationNumber}`,
+        body: `Welcome! You're checked in to room ${room.number} (${updated.roomType.name}). Check-out is ${updated.checkOutDate.toISOString().slice(0, 10)}.`,
+        trigger: 'checkin_receipt',
+      });
       return updated;
     });
   }
@@ -530,6 +561,14 @@ export class ReservationsService {
       await this.foliosService.settleIfFullyPaid(tx, folio, actorId, 'checkOut');
 
       await this.audit(tx, tenantId, reservation.branchId, actorId, 'reservation.checked_out', reservationId);
+      await this.commsLogService.logAutomatedInTx(tx, tenantId, reservation.branchId, {
+        reservationId,
+        guestId: updated.guestId,
+        channel: 'email',
+        subject: `Thank You For Staying — ${updated.confirmationNumber}`,
+        body: `Thank you for staying with us. Your stay (${updated.confirmationNumber}) has ended — we hope to see you again.`,
+        trigger: 'post_stay',
+      });
       return updated;
     });
   }
@@ -551,6 +590,14 @@ export class ReservationsService {
         include: RESERVATION_INCLUDE,
       });
       await this.audit(tx, tenantId, reservation.branchId, actorId, 'reservation.cancelled', reservationId, { reason: dto.reason ?? null });
+      await this.commsLogService.logAutomatedInTx(tx, tenantId, reservation.branchId, {
+        reservationId,
+        guestId: updated.guestId,
+        channel: 'email',
+        subject: `Reservation Cancelled — ${updated.confirmationNumber}`,
+        body: `Your reservation ${updated.confirmationNumber} has been cancelled.${dto.reason ? ` Reason: ${dto.reason}` : ''}`,
+        trigger: 'cancellation',
+      });
       return updated;
     });
   }
@@ -664,6 +711,16 @@ export class ReservationsService {
       penaltyType,
       penaltyAmount: penaltyAmount?.toFixed(2) ?? null,
       auto: markedBy === null,
+    });
+    await this.commsLogService.logAutomatedInTx(tx, tenantId, reservation.branchId, {
+      reservationId: reservation.id,
+      guestId: updated.guestId,
+      channel: 'email',
+      subject: `Reservation Marked No-Show — ${updated.confirmationNumber}`,
+      body: `We've marked your reservation ${updated.confirmationNumber} as a no-show.${
+        penaltyAmount && !penaltyAmount.isZero() ? ` A penalty of ${penaltyAmount.toFixed(2)} was applied.` : ''
+      }`,
+      trigger: 'no_show_notice',
     });
     return { reservation: updated, noShowRecord };
   }
