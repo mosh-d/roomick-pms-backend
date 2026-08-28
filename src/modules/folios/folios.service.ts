@@ -131,6 +131,37 @@ export class FoliosService {
   }
 
   /**
+   * The same cross-service, in-transaction posting primitive
+   * `postRoomChargeForDate` is, generalized for a caller that isn't posting
+   * a room night — currently just no-show penalties (`ReservationsService
+   * .markNoShowInTx`) and their waiver reversal (a negative `amount`,
+   * `chargeType: 'correction'` — the append-only ledger discipline
+   * `correctLineItem` uses for a hand-posted charge, applied here too;
+   * taxes reverse proportionally for free since `writeChargeWithTaxes`
+   * computes them off whatever `amount` it's given, signed).
+   */
+  async postAdHocCharge(
+    tx: TenantTx,
+    reservation: Reservation,
+    folio: Folio,
+    chargeType: ChargeType,
+    amount: Prisma.Decimal,
+    description: string,
+    actorId: string,
+  ): Promise<LineItem | null> {
+    return this.writeChargeWithTaxes(tx, {
+      tenantId: reservation.tenantId,
+      branchId: reservation.branchId,
+      folioId: folio.id,
+      description,
+      amount,
+      chargeType,
+      serviceDate: reservation.checkInDate,
+      actorId,
+    });
+  }
+
+  /**
    * Posts every night of the stay that has actually elapsed and isn't
    * already billed. Each night goes through `postRoomChargeForDate`, so
    * the per-date guard makes this safe to call repeatedly.
@@ -396,13 +427,13 @@ export class FoliosService {
   }
 
   /** Settles a folio if it is fully paid, WITHOUT throwing when it isn't — the check-out path (which must never block). Returns whether it settled. */
-  async settleIfFullyPaid(tx: TenantTx, folio: Folio, actorId: string): Promise<boolean> {
+  async settleIfFullyPaid(tx: TenantTx, folio: Folio, actorId: string, via: string): Promise<boolean> {
     const totals = await this.computeTotals(tx, folio.id);
     if (totals.balanceDue.greaterThan(0)) return false;
     await tx.folio.update({ where: { id: folio.id }, data: { status: 'settled', closedAt: new Date() } });
     await this.audit(tx, folio.tenantId, folio.branchId, actorId, 'folio.closed', folio.id, {
       balanceDue: totals.balanceDue.toFixed(2),
-      viaCheckOut: true,
+      via,
     });
     return true;
   }
@@ -636,9 +667,16 @@ export class FoliosService {
     return { subTotal, taxTotal, totalCost, paymentsTotal, depositsTotal, balanceDue: totalCost.minus(paymentsTotal) };
   }
 
+  /**
+   * A no-show who owes an unpaid penalty is a City Ledger receivable too —
+   * arguably more so than a checked-out guest, since there's no ongoing
+   * in-house relationship left at all. Missed originally (found live: a
+   * real no-show penalty left `guestStatus: null` despite a positive
+   * balance, invisible to anyone scanning the folio list for what's owed).
+   */
   private deriveGuestStatus(reservationStatus: string | null, balanceDue: Prisma.Decimal): FolioGuestStatus {
     if (!balanceDue.greaterThan(0)) return null;
-    if (reservationStatus === 'checked_out') return 'city_ledger';
+    if (reservationStatus === 'checked_out' || reservationStatus === 'no_show') return 'city_ledger';
     if (reservationStatus === 'checked_in') return 'in_house';
     return null;
   }

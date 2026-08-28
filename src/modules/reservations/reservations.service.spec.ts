@@ -55,6 +55,11 @@ function makeTx() {
         Promise.resolve(reservation({ ...data })),
       ),
     },
+    noShowRecord: {
+      create: jest.fn().mockImplementation(({ data }: { data: Record<string, unknown> }) => Promise.resolve({ id: 'nsr-1', penaltyWaived: false, ...data })),
+      findFirst: jest.fn(),
+      update: jest.fn().mockImplementation(({ data }: { data: Record<string, unknown> }) => Promise.resolve({ id: 'nsr-1', ...data })),
+    },
     auditLog: { create: jest.fn().mockResolvedValue({}) },
     $queryRaw: jest.fn().mockResolvedValue([]),
     $executeRawUnsafe: jest.fn().mockResolvedValue(0),
@@ -72,13 +77,14 @@ describe('ReservationsService', () => {
     postRoomChargeForDate: jest.Mock;
     backfillRoomCharges: jest.Mock;
     settleIfFullyPaid: jest.Mock;
+    postAdHocCharge: jest.Mock;
   };
   let housekeepingService: { createTaskInTx: jest.Mock };
   let rateResolverService: { resolveStay: jest.Mock; linkAuditLogsToReservation: jest.Mock };
 
   beforeEach(async () => {
     tx = makeTx();
-    propertyService = { assertBranch: jest.fn().mockResolvedValue({ id: BRANCH_ID, timezone: 'Africa/Lagos' }) };
+    propertyService = { assertBranch: jest.fn().mockResolvedValue({ id: BRANCH_ID, timezone: 'Africa/Lagos', noShowPolicy: null }) };
     roomsService = { applyReservationOccupancy: jest.fn().mockResolvedValue({}) };
     guestsService = { findOrCreateGuestInTx: jest.fn().mockResolvedValue({ id: GUEST_ID, name: 'John Doe' }) };
     foliosService = {
@@ -86,6 +92,7 @@ describe('ReservationsService', () => {
       postRoomChargeForDate: jest.fn().mockResolvedValue({ id: 'li-room' }),
       backfillRoomCharges: jest.fn().mockResolvedValue(0),
       settleIfFullyPaid: jest.fn().mockResolvedValue(true),
+      postAdHocCharge: jest.fn().mockResolvedValue({ id: 'li-penalty' }),
     };
     housekeepingService = { createTaskInTx: jest.fn().mockResolvedValue({ id: 'task-1' }) };
     // Mirrors the OLD flat baseRate × nights math the resolver replaced —
@@ -512,6 +519,127 @@ describe('ReservationsService', () => {
     it('rejected when already cancelled', async () => {
       tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'cancelled' }));
       await expect(service.cancel(TENANT_ID, RESERVATION_ID, {}, ACTOR_ID)).rejects.toThrow(ConflictException);
+    });
+  });
+
+  describe('no-show handling', () => {
+    describe('listPendingNoShows', () => {
+      it('queries confirmed reservations at this branch whose check-in date has passed', async () => {
+        await service.listPendingNoShows(TENANT_ID, BRANCH_ID);
+        expect(tx.reservation.findMany).toHaveBeenCalledWith(
+          expect.objectContaining({ where: expect.objectContaining({ branchId: BRANCH_ID, status: 'confirmed' }) }),
+        );
+      });
+    });
+
+    describe('markNoShow', () => {
+      it('rejects a reservation that is not confirmed', async () => {
+        tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'checked_in' }));
+        await expect(service.markNoShow(TENANT_ID, RESERVATION_ID, ACTOR_ID)).rejects.toThrow(ConflictException);
+      });
+
+      it('flips status to no_show, records the branch default penalty, and posts it as a folio charge', async () => {
+        propertyService.assertBranch.mockResolvedValueOnce({ id: BRANCH_ID, timezone: 'Africa/Lagos', noShowPolicy: { defaultPenalty: 'first_night' } });
+        tx.reservation.findFirst.mockResolvedValue(
+          reservation({ status: 'confirmed', confirmedRate: new Prisma.Decimal('300'), overrideRate: null, checkInDate: new Date('2026-09-01'), checkOutDate: new Date('2026-09-04'), createdBy: ACTOR_ID }),
+        );
+        const result = await service.markNoShow(TENANT_ID, RESERVATION_ID, ACTOR_ID);
+        expect(tx.reservation.update).toHaveBeenCalledWith(expect.objectContaining({ data: { status: 'no_show' } }));
+        const createdData = (tx.noShowRecord.create.mock.calls[0] as [{ data: { penaltyType: string; penaltyAmount: Prisma.Decimal } }])[0].data;
+        expect(createdData.penaltyType).toBe('first_night');
+        expect(createdData.penaltyAmount.toFixed(2)).toBe('100.00'); // 300 / 3 nights
+        expect(foliosService.postAdHocCharge).toHaveBeenCalledWith(
+          tx,
+          expect.anything(),
+          expect.anything(),
+          'penalty',
+          expect.objectContaining({ toString: expect.any(Function) }),
+          expect.stringContaining('No-Show'),
+          ACTOR_ID,
+        );
+        expect(result.reservation).toBeDefined();
+        expect(result.noShowRecord).toBeDefined();
+      });
+
+      it('a "none" penalty policy posts no charge, and the folio still gets a settle check (nothing owed → closes)', async () => {
+        propertyService.assertBranch.mockResolvedValueOnce({ id: BRANCH_ID, timezone: 'Africa/Lagos', noShowPolicy: null });
+        tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'confirmed', confirmedRate: new Prisma.Decimal('300'), overrideRate: null, createdBy: ACTOR_ID }));
+        await service.markNoShow(TENANT_ID, RESERVATION_ID, ACTOR_ID);
+        expect(foliosService.postAdHocCharge).not.toHaveBeenCalled();
+        expect(foliosService.settleIfFullyPaid).toHaveBeenCalledWith(tx, expect.anything(), expect.any(String), 'noShow');
+      });
+    });
+
+    describe('waiveNoShowPenalty', () => {
+      it('404s on a missing record', async () => {
+        tx.noShowRecord.findFirst.mockResolvedValue(null);
+        await expect(service.waiveNoShowPenalty(TENANT_ID, 'nsr-x', ACTOR_ID)).rejects.toThrow(NotFoundException);
+      });
+
+      it('is idempotent — a no-op when already waived, nothing reversed twice', async () => {
+        tx.noShowRecord.findFirst.mockResolvedValue({ id: 'nsr-1', penaltyWaived: true, penaltyAmount: new Prisma.Decimal('100'), reservationId: RESERVATION_ID });
+        await service.waiveNoShowPenalty(TENANT_ID, 'nsr-1', ACTOR_ID);
+        expect(tx.noShowRecord.update).not.toHaveBeenCalled();
+        expect(foliosService.postAdHocCharge).not.toHaveBeenCalled();
+      });
+
+      it('reverses a real penalty as a NEGATIVE correction, then re-checks settlement — never mutates the original charge', async () => {
+        tx.noShowRecord.findFirst.mockResolvedValue({ id: 'nsr-1', penaltyWaived: false, penaltyAmount: new Prisma.Decimal('100'), reservationId: RESERVATION_ID });
+        tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'no_show' }));
+        await service.waiveNoShowPenalty(TENANT_ID, 'nsr-1', ACTOR_ID);
+        expect(tx.noShowRecord.update).toHaveBeenCalledWith(
+          expect.objectContaining({ data: expect.objectContaining({ penaltyWaived: true, waivedBy: ACTOR_ID }) }),
+        );
+        const call = foliosService.postAdHocCharge.mock.calls[0] as [unknown, unknown, unknown, string, Prisma.Decimal, string, string];
+        expect(call[3]).toBe('correction');
+        expect(call[4].toFixed(2)).toBe('-100.00');
+        expect(foliosService.settleIfFullyPaid).toHaveBeenCalledWith(tx, expect.anything(), ACTOR_ID, 'noShowWaived');
+      });
+
+      it('a zero/null penalty has nothing to reverse — just marks waived, no folio touched', async () => {
+        tx.noShowRecord.findFirst.mockResolvedValue({ id: 'nsr-1', penaltyWaived: false, penaltyAmount: null, reservationId: RESERVATION_ID });
+        tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'no_show' }));
+        await service.waiveNoShowPenalty(TENANT_ID, 'nsr-1', ACTOR_ID);
+        expect(foliosService.postAdHocCharge).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('reinstateFromNoShow', () => {
+      const dto = { checkInDate: '2026-09-10', checkOutDate: '2026-09-12' };
+
+      it('rejects a reservation that is not a no_show', async () => {
+        tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'confirmed' }));
+        await expect(service.reinstateFromNoShow(TENANT_ID, RESERVATION_ID, dto, ACTOR_ID)).rejects.toThrow(ConflictException);
+      });
+
+      it('re-checks availability and re-resolves the rate for the NEW dates, flips back to confirmed', async () => {
+        tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'no_show' }));
+        const result = await service.reinstateFromNoShow(TENANT_ID, RESERVATION_ID, dto, ACTOR_ID);
+        expect(tx.reservation.update).toHaveBeenCalledWith(
+          expect.objectContaining({ data: expect.objectContaining({ status: 'confirmed', checkInDate: expect.any(Date), checkOutDate: expect.any(Date) }) }),
+        );
+        expect(rateResolverService.resolveStay).toHaveBeenCalled();
+        expect(result).toBeDefined();
+      });
+
+      it('rejects when the new dates have no availability', async () => {
+        tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'no_show' }));
+        tx.room.count.mockResolvedValue(0);
+        await expect(service.reinstateFromNoShow(TENANT_ID, RESERVATION_ID, dto, ACTOR_ID)).rejects.toThrow(ConflictException);
+      });
+
+      it('waivePenalty: true also waives the most recent NoShowRecord for this reservation, atomically in the same transaction', async () => {
+        tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'no_show' }));
+        tx.noShowRecord.findFirst.mockResolvedValue({ id: 'nsr-1', penaltyWaived: false, penaltyAmount: new Prisma.Decimal('50'), reservationId: RESERVATION_ID });
+        await service.reinstateFromNoShow(TENANT_ID, RESERVATION_ID, { ...dto, waivePenalty: true }, ACTOR_ID);
+        expect(tx.noShowRecord.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ penaltyWaived: true }) }));
+      });
+
+      it('waivePenalty: false (default) leaves an existing penalty untouched', async () => {
+        tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'no_show' }));
+        await service.reinstateFromNoShow(TENANT_ID, RESERVATION_ID, dto, ACTOR_ID);
+        expect(tx.noShowRecord.findFirst).not.toHaveBeenCalled();
+      });
     });
   });
 

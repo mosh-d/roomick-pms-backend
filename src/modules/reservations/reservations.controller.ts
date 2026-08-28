@@ -11,6 +11,7 @@ import {
   CreateReservationDto,
   ListReservationsQueryDto,
   ModifyReservationDto,
+  ReinstateNoShowDto,
   WalkInReservationDto,
 } from './dto/reservation.dto';
 import { ReservationsService } from './reservations.service';
@@ -169,5 +170,48 @@ export class ReservationsController {
     @Param('reservationId', ParseUUIDPipe) reservationId: string,
   ): ReturnType<ReservationsService['promoteFromWaitlist']> {
     return this.reservationsService.promoteFromWaitlist(tenantId, reservationId, user.sub);
+  }
+
+  @Get('branches/:branchId/no-shows/pending')
+  @ApiOperation({ summary: 'Confirmed reservations past their check-in date with no check-in yet' })
+  listPendingNoShows(
+    @CurrentTenant() tenantId: string,
+    @Param('branchId', ParseUUIDPipe) branchId: string,
+  ): ReturnType<ReservationsService['listPendingNoShows']> {
+    return this.reservationsService.listPendingNoShows(tenantId, branchId);
+  }
+
+  @Post('reservations/:reservationId/no-show')
+  @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk)
+  @ApiOperation({ summary: 'Mark a confirmed reservation as a no-show now — penalty applied per the branch policy, room released, folio settled if nothing is owed' })
+  markNoShow(
+    @CurrentTenant() tenantId: string,
+    @CurrentUser() user: JwtPayload,
+    @Param('reservationId', ParseUUIDPipe) reservationId: string,
+  ): ReturnType<ReservationsService['markNoShow']> {
+    return this.reservationsService.markNoShow(tenantId, reservationId, user.sub);
+  }
+
+  @Post('no-show-records/:noShowRecordId/waive')
+  @Roles(SystemRole.Owner, SystemRole.Manager)
+  @ApiOperation({ summary: 'Waive a no-show penalty — reverses the charge if one was posted' })
+  waiveNoShowPenalty(
+    @CurrentTenant() tenantId: string,
+    @CurrentUser() user: JwtPayload,
+    @Param('noShowRecordId', ParseUUIDPipe) noShowRecordId: string,
+  ): ReturnType<ReservationsService['waiveNoShowPenalty']> {
+    return this.reservationsService.waiveNoShowPenalty(tenantId, noShowRecordId, user.sub);
+  }
+
+  @Post('reservations/:reservationId/reinstate')
+  @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk)
+  @ApiOperation({ summary: 'Reinstate a no-show with revised dates (late arrival) — optionally waives the penalty' })
+  reinstateFromNoShow(
+    @CurrentTenant() tenantId: string,
+    @CurrentUser() user: JwtPayload,
+    @Param('reservationId', ParseUUIDPipe) reservationId: string,
+    @Body() dto: ReinstateNoShowDto,
+  ): ReturnType<ReservationsService['reinstateFromNoShow']> {
+    return this.reservationsService.reinstateFromNoShow(tenantId, reservationId, dto, user.sub);
   }
 }

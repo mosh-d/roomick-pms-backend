@@ -33,7 +33,7 @@ function reservation(overrides: Partial<Record<string, unknown>> = {}) {
 
 function makeTx() {
   return {
-    folio: { findFirst: jest.fn(), create: jest.fn().mockResolvedValue(folio()), update: jest.fn().mockResolvedValue(folio({ status: 'settled' })) },
+    folio: { findFirst: jest.fn(), findMany: jest.fn().mockResolvedValue([]), create: jest.fn().mockResolvedValue(folio()), update: jest.fn().mockResolvedValue(folio({ status: 'settled' })) },
     lineItem: {
       findFirst: jest.fn().mockResolvedValue(null),
       findMany: jest.fn().mockResolvedValue([]),
@@ -334,10 +334,10 @@ describe('FoliosService', () => {
     });
   });
 
-  describe('settleIfFullyPaid — the check-out path, which must never throw', () => {
+  describe('settleIfFullyPaid — shared by check-out and no-show, which must never throw', () => {
     it('leaves the folio OPEN when a balance is outstanding, instead of throwing (City Ledger)', async () => {
       tx.lineItem.findMany.mockResolvedValue([{ amount: new Prisma.Decimal('100'), chargeType: 'room' }]);
-      const settled = await service.settleIfFullyPaid(tx as never, folio() as never, ACTOR_ID);
+      const settled = await service.settleIfFullyPaid(tx as never, folio() as never, ACTOR_ID, 'checkOut');
       expect(settled).toBe(false);
       expect(tx.folio.update).not.toHaveBeenCalled();
     });
@@ -345,8 +345,77 @@ describe('FoliosService', () => {
     it('settles when fully paid', async () => {
       tx.lineItem.findMany.mockResolvedValue([{ amount: new Prisma.Decimal('100'), chargeType: 'room' }]);
       tx.payment.findMany.mockResolvedValue([{ amount: new Prisma.Decimal('100'), paymentPurpose: 'payment' }]);
-      const settled = await service.settleIfFullyPaid(tx as never, folio() as never, ACTOR_ID);
+      const settled = await service.settleIfFullyPaid(tx as never, folio() as never, ACTOR_ID, 'checkOut');
       expect(settled).toBe(true);
+    });
+
+    it('records which caller closed it, not a hardcoded "via checkout" — a no-show settling at zero balance must not lie about how it closed', async () => {
+      tx.lineItem.findMany.mockResolvedValue([]);
+      await service.settleIfFullyPaid(tx as never, folio() as never, ACTOR_ID, 'noShow');
+      expect(tx.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ after: expect.objectContaining({ via: 'noShow' }) }) }));
+    });
+  });
+
+  describe('postAdHocCharge', () => {
+    const adHocReservation = { tenantId: TENANT_ID, branchId: BRANCH_ID, checkInDate: new Date('2026-09-01') };
+
+    it('posts a positive amount as the given chargeType, taxed like any other charge', async () => {
+      taxesService.computeTaxesForCharge.mockResolvedValue([{ ruleId: 'vat', ruleName: 'VAT', rate: new Prisma.Decimal('0.1'), taxAmount: new Prisma.Decimal('5') }]);
+      const result = await service.postAdHocCharge(tx as never, adHocReservation as never, folio() as never, 'penalty', new Prisma.Decimal('50'), 'No-show penalty', ACTOR_ID);
+      expect(result).not.toBeNull();
+      expect(tx.lineItem.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ amount: expect.objectContaining({ toString: expect.any(Function) }), chargeType: 'penalty' }) }));
+    });
+
+    it('a negative amount reverses the charge as a correction — no lookup of the original row needed', async () => {
+      taxesService.computeTaxesForCharge.mockResolvedValue([{ ruleId: 'vat', ruleName: 'VAT', rate: new Prisma.Decimal('0.1'), taxAmount: new Prisma.Decimal('-5') }]);
+      await service.postAdHocCharge(tx as never, adHocReservation as never, folio() as never, 'correction', new Prisma.Decimal('-50'), 'Penalty waived', ACTOR_ID);
+      // The PARENT charge is the first `lineItem.create` call — the tax
+      // row (a separate line item) is created after it.
+      const call = (tx.lineItem.create.mock.calls[0] as [{ data: { amount: Prisma.Decimal; taxAmount: Prisma.Decimal; chargeType: string } }])[0];
+      expect(call.data.amount.toString()).toBe('-50');
+      expect(call.data.chargeType).toBe('correction');
+      expect(taxesService.computeTaxesForCharge).toHaveBeenCalledWith(tx, BRANCH_ID, 'correction', expect.objectContaining({ toString: expect.any(Function) }));
+    });
+  });
+
+  /**
+   * Found live: a real no-show penalty left `guestStatus: null` in the
+   * folio list despite a positive balance — `deriveGuestStatus` only knew
+   * about `checked_out`/`checked_in`, not `no_show`. A no-show who owes a
+   * penalty is a City Ledger receivable too, arguably more so than a
+   * checked-out guest (no ongoing in-house relationship left at all).
+   */
+  describe('listFolios — deriveGuestStatus', () => {
+    function folioRow(overrides: Partial<Record<string, unknown>> = {}) {
+      return { id: FOLIO_ID, status: 'open', openedAt: new Date(), closedAt: null, guest: { id: 'g-1', name: 'Guest' }, reservation: { id: RESERVATION_ID, status: 'confirmed', checkOutDate: new Date('2026-09-04') }, ...overrides };
+    }
+
+    it('checked_out with a balance owed is city_ledger', async () => {
+      tx.folio.findMany.mockResolvedValue([folioRow({ reservation: { id: RESERVATION_ID, status: 'checked_out', checkOutDate: new Date('2026-09-04') } })]);
+      tx.lineItem.findMany.mockResolvedValue([{ amount: new Prisma.Decimal('100'), chargeType: 'room' }]);
+      const [row] = await service.listFolios(TENANT_ID, BRANCH_ID, 'all');
+      expect(row.guestStatus).toBe('city_ledger');
+    });
+
+    it('checked_in with a balance owed is in_house, not city_ledger', async () => {
+      tx.folio.findMany.mockResolvedValue([folioRow({ reservation: { id: RESERVATION_ID, status: 'checked_in', checkOutDate: new Date('2026-09-04') } })]);
+      tx.lineItem.findMany.mockResolvedValue([{ amount: new Prisma.Decimal('100'), chargeType: 'room' }]);
+      const [row] = await service.listFolios(TENANT_ID, BRANCH_ID, 'all');
+      expect(row.guestStatus).toBe('in_house');
+    });
+
+    it('no_show with an unpaid penalty is ALSO city_ledger — the fix', async () => {
+      tx.folio.findMany.mockResolvedValue([folioRow({ reservation: { id: RESERVATION_ID, status: 'no_show', checkOutDate: new Date('2026-09-04') } })]);
+      tx.lineItem.findMany.mockResolvedValue([{ amount: new Prisma.Decimal('90'), chargeType: 'penalty' }]);
+      const [row] = await service.listFolios(TENANT_ID, BRANCH_ID, 'all');
+      expect(row.guestStatus).toBe('city_ledger');
+    });
+
+    it('a zero balance is never a guest-status concern, regardless of reservation status', async () => {
+      tx.folio.findMany.mockResolvedValue([folioRow({ reservation: { id: RESERVATION_ID, status: 'no_show', checkOutDate: new Date('2026-09-04') } })]);
+      tx.lineItem.findMany.mockResolvedValue([]);
+      const [row] = await service.listFolios(TENANT_ID, BRANCH_ID, 'all');
+      expect(row.guestStatus).toBeNull();
     });
   });
 });

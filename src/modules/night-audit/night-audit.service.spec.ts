@@ -4,6 +4,7 @@ import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { PropertyService } from '../property/property.service';
 import { FoliosService } from '../folios/folios.service';
+import { ReservationsService } from '../reservations/reservations.service';
 import { NightAuditService } from './night-audit.service';
 
 const TENANT_ID = '11111111-1111-4111-8111-111111111111';
@@ -39,7 +40,6 @@ function makeTx() {
       update: jest.fn().mockResolvedValue({ id: BigInt(1) }),
     },
     reservation: { findMany: jest.fn().mockResolvedValue([]), update: jest.fn().mockResolvedValue({}) },
-    noShowRecord: { create: jest.fn().mockResolvedValue({}) },
     folio: { findMany: jest.fn().mockResolvedValue([]) },
   };
 }
@@ -48,6 +48,7 @@ describe('NightAuditService', () => {
   let service: NightAuditService;
   let tx: ReturnType<typeof makeTx>;
   let foliosService: { ensurePrimaryFolio: jest.Mock; postRoomChargeForDate: jest.Mock };
+  let reservationsService: { markNoShowInTx: jest.Mock };
 
   beforeEach(async () => {
     tx = makeTx();
@@ -55,6 +56,7 @@ describe('NightAuditService', () => {
       ensurePrimaryFolio: jest.fn().mockResolvedValue({ id: 'folio-1' }),
       postRoomChargeForDate: jest.fn().mockResolvedValue({ amount: new Prisma.Decimal('100'), taxAmount: new Prisma.Decimal('7.5') }),
     };
+    reservationsService = { markNoShowInTx: jest.fn().mockResolvedValue({ reservation: {}, noShowRecord: {} }) };
     const moduleRef = await Test.createTestingModule({
       providers: [
         NightAuditService,
@@ -67,6 +69,7 @@ describe('NightAuditService', () => {
         },
         { provide: PropertyService, useValue: { assertBranch: jest.fn().mockResolvedValue({ id: BRANCH_ID, timezone: 'Africa/Lagos' }) } },
         { provide: FoliosService, useValue: foliosService },
+        { provide: ReservationsService, useValue: reservationsService },
       ],
     }).compile();
     service = moduleRef.get(NightAuditService);
@@ -131,23 +134,35 @@ describe('NightAuditService', () => {
     });
   });
 
+  /**
+   * The actual marking — status flip, `NoShowRecord`, penalty charge,
+   * folio settle — moved to `ReservationsService.markNoShowInTx` (shared
+   * with the manual "mark as no-show now" entry point) and is tested
+   * there. This batch loop's own job is just: honour `autoMark`, find
+   * who's unarrived, call the shared method with the right penalty
+   * policy, and keep one bad reservation from stopping the rest.
+   */
   describe('no-show marking', () => {
-    it('marks unarrived confirmed reservations and records the penalty', async () => {
+    it('marks unarrived confirmed reservations via the shared ReservationsService method', async () => {
       tx.branch.findFirst.mockResolvedValue({ id: BRANCH_ID, noShowPolicy: { defaultPenalty: 'first_night' } });
       tx.reservation.findMany.mockResolvedValueOnce([]).mockResolvedValueOnce([reservation({ id: 'noshow-1' })]);
       const result = await service.runAudit(TENANT_ID, BRANCH_ID, AUDIT_DATE, ACTOR_ID);
       expect(result.noShowsMarked).toBe(1);
-      expect(tx.reservation.update).toHaveBeenCalledWith({ where: { id: 'noshow-1' }, data: { status: 'no_show' } });
-      const record = tx.noShowRecord.create.mock.calls[0][0].data;
-      expect(record.penaltyType).toBe('first_night');
-      expect(record.penaltyAmount.toFixed(2)).toBe('100.00'); // 300 / 3 nights
+      expect(reservationsService.markNoShowInTx).toHaveBeenCalledWith(
+        tx,
+        TENANT_ID,
+        expect.objectContaining({ id: 'noshow-1' }),
+        'first_night',
+        undefined,
+        ACTOR_ID,
+      );
     });
 
-    it('charges the whole stay when the policy says full_stay', async () => {
-      tx.branch.findFirst.mockResolvedValue({ id: BRANCH_ID, noShowPolicy: { defaultPenalty: 'full_stay' } });
+    it('passes the flat fee amount through when the policy uses it', async () => {
+      tx.branch.findFirst.mockResolvedValue({ id: BRANCH_ID, noShowPolicy: { defaultPenalty: 'flat_fee', flatFeeAmount: 50 } });
       tx.reservation.findMany.mockResolvedValueOnce([]).mockResolvedValueOnce([reservation()]);
       await service.runAudit(TENANT_ID, BRANCH_ID, AUDIT_DATE, ACTOR_ID);
-      expect(tx.noShowRecord.create.mock.calls[0][0].data.penaltyAmount.toFixed(2)).toBe('300.00');
+      expect(reservationsService.markNoShowInTx).toHaveBeenCalledWith(tx, TENANT_ID, expect.anything(), 'flat_fee', 50, ACTOR_ID);
     });
 
     it('respects autoMark:false — leaves the call to front desk', async () => {
@@ -155,15 +170,22 @@ describe('NightAuditService', () => {
       tx.reservation.findMany.mockResolvedValueOnce([]).mockResolvedValueOnce([reservation()]);
       const result = await service.runAudit(TENANT_ID, BRANCH_ID, AUDIT_DATE, ACTOR_ID);
       expect(result.noShowsMarked).toBe(0);
-      expect(tx.reservation.update).not.toHaveBeenCalled();
+      expect(reservationsService.markNoShowInTx).not.toHaveBeenCalled();
     });
 
-    it('records a NULL penalty amount when the policy is "none"', async () => {
+    it('defaults to penaltyType "none" when the branch has no policy set', async () => {
       tx.reservation.findMany.mockResolvedValueOnce([]).mockResolvedValueOnce([reservation()]);
       await service.runAudit(TENANT_ID, BRANCH_ID, AUDIT_DATE, ACTOR_ID);
-      const record = tx.noShowRecord.create.mock.calls[0][0].data;
-      expect(record.penaltyType).toBe('none');
-      expect(record.penaltyAmount).toBeNull();
+      expect(reservationsService.markNoShowInTx).toHaveBeenCalledWith(tx, TENANT_ID, expect.anything(), 'none', undefined, ACTOR_ID);
+    });
+
+    it('one reservation failing to mark does not stop the rest of the batch', async () => {
+      tx.branch.findFirst.mockResolvedValue({ id: BRANCH_ID, noShowPolicy: { defaultPenalty: 'none' } });
+      tx.reservation.findMany.mockResolvedValueOnce([]).mockResolvedValueOnce([reservation({ id: 'bad-1' }), reservation({ id: 'good-1' })]);
+      reservationsService.markNoShowInTx.mockRejectedValueOnce(new Error('boom')).mockResolvedValueOnce({ reservation: {}, noShowRecord: {} });
+      const result = await service.runAudit(TENANT_ID, BRANCH_ID, AUDIT_DATE, ACTOR_ID);
+      expect(result.noShowsMarked).toBe(1);
+      expect(result.errors).toEqual([{ reservationId: 'bad-1', reason: 'boom' }]);
     });
   });
 

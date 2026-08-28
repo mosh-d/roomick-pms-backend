@@ -1,10 +1,11 @@
 import { ConflictException, Injectable, Logger } from '@nestjs/common';
-import { PenaltyType, Prisma, Reservation } from '@prisma/client';
+import { PenaltyType, Prisma } from '@prisma/client';
 import { ErrorCode } from '../../common/errors/error-codes';
 import { todayInTimezone, toBranchDate } from '../../common/utils/branch-date';
 import { PrismaService, TenantTx } from '../../prisma/prisma.service';
 import { PropertyService } from '../property/property.service';
 import { FoliosService } from '../folios/folios.service';
+import { ReservationsService } from '../reservations/reservations.service';
 
 /** `Branch.noShowPolicy` JSON (schema comment: `{cutoffTime, defaultPenalty, autoMark, notifyMinutesBefore}`), plus a flat-fee amount the enum implies but the comment omits. */
 interface NoShowPolicy {
@@ -31,6 +32,7 @@ export class NightAuditService {
     private readonly prisma: PrismaService,
     private readonly propertyService: PropertyService,
     private readonly foliosService: FoliosService,
+    private readonly reservationsService: ReservationsService,
   ) {}
 
   /** The date a run closes: yesterday in the branch's own timezone — the night that just ended. */
@@ -146,6 +148,14 @@ export class NightAuditService {
    * alone rather than having reservations silently cancelled out from
    * under them.
    */
+  /**
+   * `ReservationsService.markNoShowInTx` does the actual work (status
+   * flip, `NoShowRecord`, penalty charge, folio settle) — shared with the
+   * manual "mark as no-show now" entry point so a night-audit-marked
+   * no-show and a front-desk-marked one get identical treatment. This
+   * batch loop's own job is just: honour `autoMark`, find who's unarrived,
+   * and keep one bad reservation from stopping the rest (spec §4.6).
+   */
   private async markNoShows(
     tx: TenantTx,
     tenantId: string,
@@ -161,44 +171,24 @@ export class NightAuditService {
     const penaltyType: PenaltyType = policy.defaultPenalty ?? 'none';
     const unarrived = await tx.reservation.findMany({
       where: { branchId, deletedAt: null, status: 'confirmed', checkInDate: { lte: auditDate } },
-      include: { roomType: { select: { name: true } } },
     });
 
     let marked = 0;
     for (const reservation of unarrived) {
       try {
-        await tx.reservation.update({ where: { id: reservation.id }, data: { status: 'no_show' } });
-        await tx.noShowRecord.create({
-          data: {
-            tenantId,
-            reservationId: reservation.id,
-            penaltyType,
-            penaltyAmount: this.penaltyAmountFor(reservation, penaltyType, policy),
-            markedBy: triggeredBy, // NULL = auto-marked by the scheduled run
-          },
-        });
+        // `triggeredBy` here is whoever triggered THIS AUDIT RUN — `null`
+        // for the scheduled sweep, or a real user id for a manually
+        // triggered run — carried straight through as `markedBy` (the
+        // schema's own "NULL = auto-marked" convention still holds for
+        // the sweep; a human-triggered audit correctly attributes the
+        // no-shows it marks to that human, same as the original code did).
+        await this.reservationsService.markNoShowInTx(tx, tenantId, reservation, penaltyType, policy.flatFeeAmount, triggeredBy);
         marked++;
       } catch (error) {
         errors.push({ reservationId: reservation.id, reason: error instanceof Error ? error.message : 'Unknown error' });
       }
     }
     return marked;
-  }
-
-  private penaltyAmountFor(reservation: Reservation, penaltyType: PenaltyType, policy: NoShowPolicy): Prisma.Decimal | null {
-    const nights = Math.max(1, Math.round((reservation.checkOutDate.getTime() - reservation.checkInDate.getTime()) / 86_400_000));
-    switch (penaltyType) {
-      case 'first_night':
-        return reservation.overrideRate
-          ? new Prisma.Decimal(reservation.overrideRate)
-          : new Prisma.Decimal(reservation.confirmedRate).div(nights).toDecimalPlaces(2);
-      case 'full_stay':
-        return new Prisma.Decimal(reservation.confirmedRate);
-      case 'flat_fee':
-        return policy.flatFeeAmount ? new Prisma.Decimal(policy.flatFeeAmount) : null;
-      default:
-        return null;
-    }
   }
 
   /**

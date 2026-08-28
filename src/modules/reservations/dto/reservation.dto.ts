@@ -261,3 +261,25 @@ export class ModifyReservationDto {
   @MaxLength(500)
   reason!: string;
 }
+
+/**
+ * Revised dates are required, not optional — reinstating a no-show at its
+ * ORIGINAL check-in date makes no sense (that date has already passed by
+ * definition, or the reservation wouldn't be a no-show), so unlike
+ * `ModifyReservationDto` there's no "leave unset, keep the current value"
+ * escape hatch here.
+ */
+export class ReinstateNoShowDto {
+  @ApiProperty({ example: '2026-09-02' })
+  @IsISO8601({ strict: true })
+  checkInDate!: string;
+
+  @ApiProperty({ example: '2026-09-05' })
+  @IsISO8601({ strict: true })
+  checkOutDate!: string;
+
+  @ApiPropertyOptional({ description: 'Also waive the no-show penalty (if any) as part of the reinstatement' })
+  @IsOptional()
+  @IsBoolean()
+  waivePenalty?: boolean;
+}

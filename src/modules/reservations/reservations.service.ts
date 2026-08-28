@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
-import { Prisma, Room, RoomType } from '@prisma/client';
+import { NoShowRecord, PenaltyType, Prisma, Room, RoomType } from '@prisma/client';
 import { ErrorCode } from '../../common/errors/error-codes';
 import { todayInTimezone, toBranchDate } from '../../common/utils/branch-date';
 import { PrismaService, TenantTx } from '../../prisma/prisma.service';
@@ -18,6 +18,7 @@ import {
   CreateReservationDto,
   ListReservationsQueryDto,
   ModifyReservationDto,
+  ReinstateNoShowDto,
   WalkInReservationDto,
 } from './dto/reservation.dto';
 
@@ -35,6 +36,10 @@ const RESERVATION_INCLUDE = {
   // showing `confirmedRate` (e.g. Modify Reservation's cost preview) can
   // format it correctly without a second round-trip to fetch the branch.
   branch: { select: { currency: true } },
+  // Latest mark only — a reinstated-then-re-no-showed reservation could in
+  // theory carry more than one record, but the No-Show Handling screen
+  // (its only consumer) only ever needs the current one to show/waive.
+  noShowRecords: { orderBy: { markedAt: 'desc' as const }, take: 1 },
 } as const;
 
 const MAX_AVAILABILITY_RANGE_DAYS = 92;
@@ -424,7 +429,7 @@ export class ReservationsService {
         'Check-out',
         actorId,
       );
-      await this.foliosService.settleIfFullyPaid(tx, folio, actorId);
+      await this.foliosService.settleIfFullyPaid(tx, folio, actorId, 'checkOut');
 
       await this.audit(tx, tenantId, reservation.branchId, actorId, 'reservation.checked_out', reservationId);
       return updated;
@@ -448,6 +453,245 @@ export class ReservationsService {
         include: RESERVATION_INCLUDE,
       });
       await this.audit(tx, tenantId, reservation.branchId, actorId, 'reservation.cancelled', reservationId, { reason: dto.reason ?? null });
+      return updated;
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // No-Show Handling (ref: MVP timeline Month 3)
+  // -------------------------------------------------------------------------
+
+  /** Front desk's own live view of "who hasn't shown up yet" — the SAME query `NightAuditService.getPreflight`'s `unresolvedNoShows` already runs, exposed here as its own dashboard reachable any time during the day, not just when checking whether night audit is safe to run. */
+  async listPendingNoShows(tenantId: string, branchId: string) {
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const branch = await this.propertyService.assertBranch(tx, branchId);
+      const today = toBranchDate(todayInTimezone(branch.timezone));
+      return tx.reservation.findMany({
+        where: { branchId, deletedAt: null, status: 'confirmed', checkInDate: { lte: today } },
+        include: RESERVATION_INCLUDE,
+        orderBy: { checkInDate: 'asc' },
+      });
+    });
+  }
+
+  /**
+   * The manual entry point (ref: "Mark as no-show: atomic — penalty
+   * posted, room released, folio closed") — front desk marking someone no-
+   * show proactively during the day, not waiting for the automated
+   * midnight sweep `NightAuditService` also runs. Both paths converge on
+   * `markNoShowInTx` so a penalty is applied identically either way.
+   *
+   * "Room released" has no separate step here: a `confirmed` reservation
+   * that never checked in never held a physical room (`roomId` stays NULL
+   * until check-in), so there's nothing to release — the reservation
+   * simply stops appearing in `HOLDING_STATUSES` the instant its status
+   * changes, which is what already frees its inventory everywhere else in
+   * this file. "Folio closed" only happens when true: a zero/no-penalty
+   * no-show settles immediately (nothing owed); a penalized one stays open
+   * as a City Ledger receivable, the exact same rule check-out already
+   * uses — see its own comment for why "never block, never lie about the
+   * balance" beats forcing a close.
+   */
+  async markNoShow(tenantId: string, reservationId: string, actorId: string) {
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const reservation = await this.findReservationOrThrow(tx, reservationId);
+      if (reservation.status !== 'confirmed') {
+        throw new ConflictException({
+          code: ErrorCode.INVALID_STATUS_TRANSITION,
+          message: `Cannot mark a reservation with status "${reservation.status}" as a no-show — only a confirmed reservation can be`,
+        });
+      }
+      const branch = await this.propertyService.assertBranch(tx, reservation.branchId);
+      const policy = (branch.noShowPolicy ?? {}) as { defaultPenalty?: PenaltyType; flatFeeAmount?: number };
+      const penaltyType = policy.defaultPenalty ?? 'none';
+      return this.markNoShowInTx(tx, tenantId, reservation, penaltyType, policy.flatFeeAmount, actorId);
+    });
+  }
+
+  /**
+   * Shared core — also called from `NightAuditService.markNoShows` for the
+   * automated sweep, so a night-audit-marked no-show gets the identical
+   * penalty-charge treatment a manually-marked one does. `markedBy: null`
+   * for that path (the schema's own convention: "NULL = auto-marked").
+   *
+   * `reservation` takes only the fields this actually touches, not the
+   * full `RESERVATION_INCLUDE` shape `findReservationOrThrow` returns —
+   * `NightAuditService`'s own batch query (every unarrived reservation for
+   * a branch) doesn't need to fetch guest/room/ratePlan/branch just to
+   * pass reservations through here, and requiring that shape would force
+   * it to.
+   */
+  async markNoShowInTx(
+    tx: TenantTx,
+    tenantId: string,
+    reservation: {
+      id: string;
+      branchId: string;
+      createdBy: string | null;
+      confirmedRate: Prisma.Decimal;
+      overrideRate: Prisma.Decimal | null;
+      checkInDate: Date;
+      checkOutDate: Date;
+    },
+    penaltyType: PenaltyType,
+    flatFeeAmount: number | undefined,
+    markedBy: string | null,
+  ) {
+    const updated = await tx.reservation.update({
+      where: { id: reservation.id },
+      data: { status: 'no_show' },
+      include: RESERVATION_INCLUDE,
+    });
+
+    const penaltyAmount = this.penaltyAmountFor(reservation, penaltyType, flatFeeAmount);
+    const noShowRecord = await tx.noShowRecord.create({
+      data: { tenantId, reservationId: reservation.id, penaltyType, penaltyAmount, markedBy },
+    });
+
+    const folio = await this.foliosService.ensurePrimaryFolio(tx, updated, markedBy ?? reservation.createdBy ?? '');
+    if (penaltyAmount && !penaltyAmount.isZero()) {
+      await this.foliosService.postAdHocCharge(
+        tx,
+        updated,
+        folio,
+        'penalty',
+        penaltyAmount,
+        `No-Show Penalty (${penaltyType.replace('_', ' ')})`,
+        markedBy ?? reservation.createdBy ?? '',
+      );
+    }
+    await this.foliosService.settleIfFullyPaid(tx, folio, markedBy ?? reservation.createdBy ?? '', 'noShow');
+
+    await this.audit(tx, tenantId, reservation.branchId, markedBy ?? 'system', 'reservation.no_show', reservation.id, {
+      penaltyType,
+      penaltyAmount: penaltyAmount?.toFixed(2) ?? null,
+      auto: markedBy === null,
+    });
+    return { reservation: updated, noShowRecord };
+  }
+
+  /** Mirrors `NightAuditService`'s own (now-removed) private copy — moved here since it's a per-reservation concern both the manual and automated marking paths need identically. */
+  private penaltyAmountFor(
+    reservation: { confirmedRate: Prisma.Decimal; overrideRate: Prisma.Decimal | null; checkInDate: Date; checkOutDate: Date },
+    penaltyType: PenaltyType,
+    flatFeeAmount: number | undefined,
+  ): Prisma.Decimal | null {
+    const nights = Math.max(1, Math.round((reservation.checkOutDate.getTime() - reservation.checkInDate.getTime()) / 86_400_000));
+    switch (penaltyType) {
+      case 'first_night':
+        return reservation.overrideRate
+          ? new Prisma.Decimal(reservation.overrideRate)
+          : new Prisma.Decimal(reservation.confirmedRate).div(nights).toDecimalPlaces(2);
+      case 'full_stay':
+        return new Prisma.Decimal(reservation.confirmedRate);
+      case 'flat_fee':
+        return flatFeeAmount ? new Prisma.Decimal(flatFeeAmount) : null;
+      default:
+        return null;
+    }
+  }
+
+  /**
+   * RBAC-gated at the controller (`@Roles(Owner, Manager)`) — reverses the
+   * penalty charge as a NEW correction line item (never mutates the
+   * original, same append-only discipline `FoliosService.correctLineItem`
+   * uses), then re-checks whether the folio can now settle. Idempotent: a
+   * second waive on an already-waived record is a no-op, not an error —
+   * there's nothing left to reverse.
+   */
+  async waiveNoShowPenalty(tenantId: string, noShowRecordId: string, actorId: string) {
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const record = await tx.noShowRecord.findFirst({ where: { id: noShowRecordId } });
+      if (!record) {
+        throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'No-show record not found' });
+      }
+      return this.waiveNoShowPenaltyInTx(tx, tenantId, record, actorId);
+    });
+  }
+
+  /**
+   * Shared with `reinstateFromNoShow`, which already has its own open
+   * transaction — calling the PUBLIC `waiveNoShowPenalty` from inside it
+   * would open a second, independent `withTenant`/`$transaction` nested
+   * inside the first, breaking atomicity (the waive could commit or fail
+   * separately from the reinstatement) and risking a lock conflict against
+   * the very rows the outer transaction is already holding. Same reason
+   * `markNoShowInTx` exists alongside `markNoShow`.
+   */
+  private async waiveNoShowPenaltyInTx(tx: TenantTx, tenantId: string, record: NoShowRecord, actorId: string) {
+    if (record.penaltyWaived) return record;
+
+    const updated = await tx.noShowRecord.update({
+      where: { id: record.id },
+      data: { penaltyWaived: true, waivedBy: actorId, refundAmount: record.penaltyAmount },
+    });
+
+    const reservation = await this.findReservationOrThrow(tx, record.reservationId);
+    if (record.penaltyAmount && !record.penaltyAmount.isZero()) {
+      const folio = await this.foliosService.ensurePrimaryFolio(tx, reservation, actorId);
+      await this.foliosService.postAdHocCharge(tx, reservation, folio, 'correction', record.penaltyAmount.negated(), 'No-Show Penalty Waived', actorId);
+      await this.foliosService.settleIfFullyPaid(tx, folio, actorId, 'noShowWaived');
+    }
+
+    await this.audit(tx, tenantId, reservation.branchId, actorId, 'no_show.penalty_waived', record.id, {
+      penaltyAmount: record.penaltyAmount?.toFixed(2) ?? null,
+    });
+    return updated;
+  }
+
+  /**
+   * Late-arrival reinstatement (ref: "revised dates + optional penalty
+   * reversal") — the guest's ORIGINAL check-in date has necessarily
+   * already passed (that's what made this a no-show), so new dates are
+   * mandatory, not optional the way `ModifyReservationDto`'s are.
+   * Re-checks availability and re-resolves the rate for the new dates
+   * exactly like Modify does — a reinstatement is a fresh booking in every
+   * way except that it reuses the existing reservation row and guest.
+   */
+  async reinstateFromNoShow(tenantId: string, reservationId: string, dto: ReinstateNoShowDto, actorId: string) {
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const reservation = await this.findReservationOrThrow(tx, reservationId);
+      if (reservation.status !== 'no_show') {
+        throw new ConflictException({
+          code: ErrorCode.INVALID_STATUS_TRANSITION,
+          message: `Cannot reinstate a reservation with status "${reservation.status}" — only a no-show can be`,
+        });
+      }
+      const checkInDate = toBranchDate(dto.checkInDate);
+      const checkOutDate = toBranchDate(dto.checkOutDate);
+      this.assertValidRange(checkInDate, checkOutDate);
+      const roomType = await this.assertRoomType(tx, reservation.branchId, reservation.roomTypeId);
+      await this.assertAvailableForStay(tx, reservation.branchId, reservation.roomTypeId, checkInDate, checkOutDate, reservationId);
+
+      const resolved = await this.rateResolverService.resolveStay(
+        tx,
+        tenantId,
+        reservation.branchId,
+        roomType,
+        checkInDate,
+        checkOutDate,
+        {},
+        { triggeredBy: 'modify', userId: actorId, reservationId },
+      );
+
+      const updated = await tx.reservation.update({
+        where: { id: reservationId },
+        data: { status: 'confirmed', checkInDate, checkOutDate, ratePlanId: resolved.ratePlanId, confirmedRate: resolved.subtotal },
+        include: RESERVATION_INCLUDE,
+      });
+
+      if (dto.waivePenalty) {
+        const record = await tx.noShowRecord.findFirst({ where: { reservationId }, orderBy: { markedAt: 'desc' } });
+        if (record && !record.penaltyWaived) {
+          await this.waiveNoShowPenaltyInTx(tx, tenantId, record, actorId);
+        }
+      }
+
+      await this.audit(tx, tenantId, reservation.branchId, actorId, 'reservation.reinstated', reservationId, {
+        checkInDate: dto.checkInDate,
+        checkOutDate: dto.checkOutDate,
+        waivedPenalty: dto.waivePenalty ?? false,
+      });
       return updated;
     });
   }
