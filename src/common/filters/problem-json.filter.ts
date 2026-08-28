@@ -6,6 +6,7 @@ import {
   HttpStatus,
   Logger,
 } from '@nestjs/common';
+import { SentryExceptionCaptured } from '@sentry/nestjs';
 import { Response } from 'express';
 import { ErrorCode } from '../errors/error-codes';
 
@@ -38,6 +39,8 @@ const STATUS_TO_CODE: Record<number, ErrorCode> = {
 export class ProblemJsonExceptionFilter implements ExceptionFilter {
   private readonly logger = new Logger(ProblemJsonExceptionFilter.name);
 
+  /** No-op when Sentry was never initialized (no `SENTRY_DSN`) — the decorator itself doesn't require an active SDK. */
+  @SentryExceptionCaptured()
   catch(exception: unknown, host: ArgumentsHost): void {
     const ctx = host.switchToHttp();
     const response = ctx.getResponse<Response>();

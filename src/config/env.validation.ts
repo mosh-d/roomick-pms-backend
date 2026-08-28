@@ -15,4 +15,6 @@ export const envValidationSchema = Joi.object({
   // 32 bytes hex — AES-256-GCM key for guest ID document encryption
   ENCRYPTION_KEY: Joi.string().hex().length(64).required(),
   CORS_ORIGINS: Joi.string().allow('').default(''),
+  // Optional — error tracking (src/instrument.ts) stays off entirely until this is set.
+  SENTRY_DSN: Joi.string().uri().allow('').optional(),
 });

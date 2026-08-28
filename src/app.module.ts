@@ -4,6 +4,7 @@ import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { PassportModule } from '@nestjs/passport';
 import { ScheduleModule } from '@nestjs/schedule';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
+import { SentryModule } from '@sentry/nestjs/setup';
 import { CommonModule } from './common/common.module';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import { RolesGuard } from './common/guards/roles.guard';
@@ -32,6 +33,10 @@ import { PrismaModule } from './prisma/prisma.module';
 
 @Module({
   imports: [
+    // Registered first per @sentry/nestjs's own setup docs — a no-op module
+    // when `Sentry.init()` never ran (src/instrument.ts, gated on
+    // SENTRY_DSN being set).
+    SentryModule.forRoot(),
     ConfigModule.forRoot({
       isGlobal: true,
       validationSchema: envValidationSchema,
