@@ -9,6 +9,7 @@ import { GuestsService } from '../guests/guests.service';
 import { CreateGuestDto } from '../guests/dto/guest.dto';
 import { FoliosService } from '../folios/folios.service';
 import { HousekeepingService } from '../housekeeping/housekeeping.service';
+import { RateResolverService } from '../rate-resolver/rate-resolver.service';
 import {
   AvailabilityCalendarQueryDto,
   AvailabilityQueryDto,
@@ -24,6 +25,11 @@ const RESERVATION_INCLUDE = {
   guest: { select: { id: true, name: true, email: true, phone: true } },
   roomType: { select: { id: true, name: true } },
   room: { select: { id: true, number: true } },
+  // The check-in night's winning plan only — see `RateResolverService
+  // .resolveStay`'s own comment on why a single FK can't represent a stay
+  // whose rate changes mid-week. NULL when the stay resolved to the plain
+  // base rate (no cascade/override plan applied).
+  ratePlan: { select: { id: true, name: true, type: true } },
   // Reservations carry no currency field of their own — a reservation's
   // money is always the branch's own currency. Included here so any screen
   // showing `confirmedRate` (e.g. Modify Reservation's cost preview) can
@@ -45,6 +51,7 @@ export class ReservationsService {
     private readonly guestsService: GuestsService,
     private readonly foliosService: FoliosService,
     private readonly housekeepingService: HousekeepingService,
+    private readonly rateResolverService: RateResolverService,
   ) {}
 
   // -------------------------------------------------------------------------
@@ -197,7 +204,16 @@ export class ReservationsService {
         await this.assertAvailableForStay(tx, branchId, dto.roomTypeId, checkInDate, checkOutDate);
       }
 
-      const confirmedRate = this.calculateFlatRate(roomType, checkInDate, checkOutDate);
+      const resolved = await this.rateResolverService.resolveStay(
+        tx,
+        tenantId,
+        branchId,
+        roomType,
+        checkInDate,
+        checkOutDate,
+        { promoCode: dto.promoCode, corporateAccountId: dto.corporateAccountId },
+        { triggeredBy: 'booking_create', userId: actorId },
+      );
       const confirmationNumber = await this.generateConfirmationNumber(tx, tenantId, branchId);
 
       const reservation = await this.createReservationRow(tx, {
@@ -205,8 +221,9 @@ export class ReservationsService {
         branchId,
         guestId: guest.id,
         roomTypeId: dto.roomTypeId,
+        ratePlanId: resolved.ratePlanId,
         confirmationNumber,
-        confirmedRate,
+        confirmedRate: resolved.subtotal,
         status: dto.joinWaitlist ? 'waitlisted' : 'confirmed',
         channel: dto.channel ?? 'direct',
         checkInDate,
@@ -216,6 +233,7 @@ export class ReservationsService {
         specialRequests: dto.specialRequests,
         createdBy: actorId,
       });
+      await this.rateResolverService.linkAuditLogsToReservation(tx, resolved.auditLogIds, reservation.id);
 
       await this.audit(tx, tenantId, branchId, actorId, 'reservation.created', reservation.id, {
         confirmationNumber,
@@ -243,7 +261,16 @@ export class ReservationsService {
       }
       await this.assertRoomCheckInReady(tx, room, branchId, dto.roomTypeId, checkInDate, checkOutDate);
 
-      const confirmedRate = this.calculateFlatRate(roomType, checkInDate, checkOutDate);
+      const resolved = await this.rateResolverService.resolveStay(
+        tx,
+        tenantId,
+        branchId,
+        roomType,
+        checkInDate,
+        checkOutDate,
+        { promoCode: dto.promoCode, corporateAccountId: dto.corporateAccountId },
+        { triggeredBy: 'walkin', userId: actorId },
+      );
       const confirmationNumber = await this.generateConfirmationNumber(tx, tenantId, branchId);
 
       const reservation = await this.createReservationRow(tx, {
@@ -252,8 +279,9 @@ export class ReservationsService {
         guestId: guest.id,
         roomTypeId: dto.roomTypeId,
         roomId: dto.roomId,
+        ratePlanId: resolved.ratePlanId,
         confirmationNumber,
-        confirmedRate,
+        confirmedRate: resolved.subtotal,
         status: 'checked_in',
         channel: 'walk_in',
         checkInDate,
@@ -264,6 +292,7 @@ export class ReservationsService {
         specialRequests: dto.specialRequests,
         createdBy: actorId,
       });
+      await this.rateResolverService.linkAuditLogsToReservation(tx, resolved.auditLogIds, reservation.id);
 
       await this.roomsService.applyReservationOccupancy(tx, tenantId, dto.roomId, { occupancyStatus: 'occupied' }, actorId);
 
@@ -467,7 +496,23 @@ export class ReservationsService {
         await this.assertAvailableForStay(tx, reservation.branchId, roomTypeId, checkInDate, checkOutDate, reservationId);
       }
 
-      const confirmedRate = this.calculateFlatRate(roomType, checkInDate, checkOutDate);
+      // Re-resolves through the base/cascade tiers only — a promo code or
+      // negotiated corporate rate applied at original booking is NOT
+      // reapplied here (ModifyReservationDto carries neither), so a
+      // discounted booking loses that discount on modify. Carrying the
+      // original override forward across a date/room-type change is a real
+      // gap, deliberately deferred rather than half-built — see
+      // PHASE_NOTES.md.
+      const resolved = await this.rateResolverService.resolveStay(
+        tx,
+        tenantId,
+        reservation.branchId,
+        roomType,
+        checkInDate,
+        checkOutDate,
+        {},
+        { triggeredBy: 'modify', userId: actorId, reservationId },
+      );
 
       const updated = await tx.reservation.update({
         where: { id: reservationId },
@@ -475,7 +520,8 @@ export class ReservationsService {
           checkInDate,
           checkOutDate,
           roomTypeId,
-          confirmedRate,
+          ratePlanId: resolved.ratePlanId,
+          confirmedRate: resolved.subtotal,
           adults: dto.adults ?? reservation.adults,
           children: dto.children ?? reservation.children,
         },
@@ -485,7 +531,7 @@ export class ReservationsService {
       await this.audit(tx, tenantId, reservation.branchId, actorId, 'reservation.modified', reservationId, {
         reason: dto.reason,
         before: { checkInDate: reservation.checkInDate, checkOutDate: reservation.checkOutDate, roomTypeId: reservation.roomTypeId, confirmedRate: reservation.confirmedRate.toFixed(2) },
-        after: { checkInDate, checkOutDate, roomTypeId, confirmedRate: confirmedRate.toFixed(2) },
+        after: { checkInDate, checkOutDate, roomTypeId, confirmedRate: resolved.subtotal.toFixed(2) },
       });
       return updated;
     });
@@ -657,14 +703,6 @@ export class ReservationsService {
     if (overlappingBlock) {
       throw new ConflictException({ code: ErrorCode.RESERVATION_NOT_AVAILABLE, message: 'Room is blocked for part of this stay' });
     }
-  }
-
-  private calculateFlatRate(roomType: RoomType, checkInDate: Date, checkOutDate: Date): Prisma.Decimal {
-    const nights = Math.round((checkOutDate.getTime() - checkInDate.getTime()) / 86_400_000);
-    // Flat baseRate × nights — the full Rate Resolver cascade (seasonal/
-    // weekend/corporate tiers, promo codes, negotiated overrides) is
-    // explicitly out of scope this pass; see PHASE_NOTES.md.
-    return new Prisma.Decimal(roomType.baseRate).mul(nights);
   }
 
   /**

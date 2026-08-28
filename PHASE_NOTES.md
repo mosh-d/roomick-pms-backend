@@ -1,5 +1,39 @@
 # Phase Notes
 
+## Rate Resolver Service — cascade/override pricing, replacing flat baseRate × nights (2026-08-28)
+
+Per the MVP timeline reference (`pms-mvp-timeline.html`, Month 2): "RateResolverService in NestJS — pure, stateless, injectable... every screen that shows a price calls it... prevents rate drift and makes all pricing auditable." Every reservation up to this point priced at flat `roomType.baseRate × nights` (named explicitly as a gap in the old Reservations hub comment and `createReservationRow`'s doc comment) — this closes it.
+
+### Reconciling the reference's prose against the actual schema
+The reference's own priority list — "manual override → corporate → promo → negotiated → seasonal → weekend → base" — doesn't literally match `RatePlan`'s already-existing schema (built in an earlier pass, ahead of this one): `type` splits into cascade tiers (`base`/`seasonal`/`weekend`/`corporate`, `cascadeTier` 1–4, layered additively) and overrides (`negotiated`/`promotional`, `isOverride: true`, which "skip the cascade entirely" per the schema's own field comment). Two things needed resolving, not just implementing literally:
+
+- **"Manual override" isn't a `RatePlan` at all.** It's `Reservation.overrideRate` — a manager's absolute-nightly escape hatch, already wired into `FoliosService`/`NightAuditService` at charge-posting time, independent of any rate plan. The resolver doesn't take a "manual override" input; that mechanism was already correct and untouched.
+- **"Corporate" in the prose has no schema counterpart of its own.** `CorporateAccount.ratePlanId` — "negotiated agreement plan" — points at a `type: negotiated` override, not the `type: corporate` cascade tier. Read that way the two lists agree: a caller's corporate account outranks a generic promo code. Implemented as: negotiated (matched via `corporateAccountId`) beats promotional (matched via `promoCode`) when both apply to the same night.
+
+`RateAuditLog.result`'s own schema comment (`{finalRate, isOverride, overrideRatePlanId, cascade:[...]}`) settled the last design question: the resolver operates **per night**, not once per stay — needed anyway since seasonal/weekend tiers can vary night to night, and confirmed by the comment describing a single `finalRate`, not an array.
+
+### What it does
+`resolveNight` (pure, per-date): fetches active plans matching branch + (this room type or branch-wide) + date range + minLOS; an override plan wins outright at its absolute `amount`; otherwise cascade-tier plans apply in `cascadeTier` order, each adjusting a running total from `roomType.baseRate` (fixed = flat delta, percentage = adjusts the running total, not the original base). Two plans colliding at the same tier for the same night (a data-hygiene edge case) resolve to one: room-type-specific over branch-wide, then most recent. `resolveStay` loops every night, sums to `subtotal`, adds tax via `TaxesService.computeTaxesForCharge(..., 'room', subtotal)` for `totalWithTax`, and writes one `RateAuditLog` row per night.
+
+`createReservation`/`walkIn`/`modifyReservation` all call it now instead of the deleted `calculateFlatRate`; `confirmedRate` is the resolved `subtotal` (tax stays a Folios/charge-posting concern, never baked into the stored rate). `Reservation.ratePlanId` gets the check-in night's winning plan — display/reporting only; a stay whose rate changes mid-week has no single "the" plan, the per-night `RateAuditLog` trail is what's authoritative.
+
+New module `rate-resolver/`: rate-plan CRUD (`POST`/`GET /branches/:id/rate-plans`, `PATCH /rate-plans/:id` — `isActive` toggle, never deleted, same as `TaxRule`) and the resolver itself (`POST /branches/:id/rate-resolver/calculate` for a pre-booking quote, `GET /rate-resolver/audit?reservationId=` for the full per-night trace). `cascadeTier` is never client-supplied — derived from `type` alone, enforced server-side (a cascade type without `adjustmentType`, or an override type WITH one, or a promotional plan without a `promoCode`, all reject).
+
+### Two real bugs found live, not by inspection
+1. **`RateAuditLog.id` is a BigInt** (BIGSERIAL, same convention as `NightAuditLog`) — `getAuditTrail` returned raw rows straight from Prisma, and the first real row it ever served crashed with `TypeError: Do not know how to serialize a BigInt`, a genuine `500`. Fixed the same way `NightAuditService.listRuns` already had to: `.toString()` the id before it crosses the HTTP boundary.
+2. **`createReservation`/`walkIn` resolve the rate BEFORE the reservation row exists** — there's no id yet to attach, so those `RateAuditLog` rows wrote `reservationId: null` (the schema's own comment anticipates exactly this: "NULL during pre-booking calculation"). Left there permanently, though, the audit trail for the ONE calculation that actually set the guest's price — the one a real dispute needs — would be unlinkable forever, defeating the endpoint's stated purpose. Fixed by switching `createMany` to individual `create` calls (needed their own returned ids anyway), returning `auditLogIds` from `resolveStay`, and backfilling `reservationId` onto them the moment the reservation is created (`RateResolverService.linkAuditLogsToReservation`, called from both `createReservation` and `walkIn` right after `createReservationRow`). `modifyReservation` never had this problem — the reservation already exists when it resolves.
+
+### Deferred, named
+`ModifyReservationDto` doesn't accept `promoCode`/`corporateAccountId` — a modify re-resolves through base/cascade tiers only, so a promo/negotiated discount active at original booking is silently dropped on a date/room-type change. Carrying it forward is real, deferred work, not a silent gap.
+
+### Verified
+`npx tsc --noEmit`, `npm run lint`, `npm test` — 226 tests (19 new in `rate-resolver.service.spec.ts`: cascade math including percentage-on-running-total and same-tier collision resolution, override precedence including the negotiated-beats-promotional tie-break, tax integration, BigInt-to-string on `getAuditTrail`, the `auditLogIds`/`linkAuditLogsToReservation` backfill mechanism itself; 2 new in `reservations.service.spec.ts` covering the wiring — right args passed to the resolver, `ratePlanId` stored, the backfill actually fires with the resolver's own returned ids and the real new reservation id).
+
+Live, against real Postgres: created a Weekend cascade plan (+25 fixed) through the actual UI, watched `RatePreview` on Create Reservation resolve it live (`115.00/night avg, 230.00 subtotal, 247.25 with tax` — matches `90 baseRate + 25` × 2 nights, tax included correctly), submitted the booking and confirmed `confirmedRate = 230.00` via the API (ground truth, not just the UI). Confirmed a promotional override replaces the rate outright (`ruleApplied.type: "override"`) rather than stacking with the cascade. Retired the plan through the UI and confirmed a fresh quote for the same dates fell back to the plain base rate. Both bugs above were caught and confirmed fixed this same way — a raw `curl` against `/rate-resolver/audit` 500'd before the fix and returned clean, correctly-linked rows after.
+
+### Carried forward
+- Everything from the entry below — unchanged.
+
 ## Fix — confirmationNumber was globally unique, generated from a per-branch counter, and RLS hid the collision from its own check (2026-08-28)
 
 Found live: a real walk-in for Sope Hotel Abijo (0 reservations so far) failed with a generic `409 Could not create reservation`, even against a fully clean, unheld, unblocked room. Traced with direct DB queries (bypassing the app, `set_config('app.tenant_id', ...)` under the real RLS policy) rather than guessing: the room itself was fine. The problem was one layer up, in how confirmation numbers are minted.

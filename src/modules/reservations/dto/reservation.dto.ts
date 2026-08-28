@@ -6,6 +6,7 @@ import {
   IsInt,
   IsISO8601,
   IsOptional,
+  IsString,
   IsUUID,
   Max,
   MaxLength,
@@ -79,6 +80,17 @@ export class CreateReservationDto {
   @IsOptional()
   @IsBoolean()
   joinWaitlist?: boolean;
+
+  @ApiPropertyOptional({ description: 'Matches a promotional RatePlan.promoCode — passed through to the Rate Resolver' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(30)
+  promoCode?: string;
+
+  @ApiPropertyOptional({ description: "Matches the guest's corporate account, which may point to a negotiated RatePlan" })
+  @IsOptional()
+  @IsUUID()
+  corporateAccountId?: string;
 }
 
 export class WalkInReservationDto {
@@ -130,6 +142,17 @@ export class WalkInReservationDto {
   @IsOptional()
   @MaxLength(1000)
   specialRequests?: string;
+
+  @ApiPropertyOptional({ description: 'Matches a promotional RatePlan.promoCode — passed through to the Rate Resolver' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(30)
+  promoCode?: string;
+
+  @ApiPropertyOptional({ description: "Matches the guest's corporate account, which may point to a negotiated RatePlan" })
+  @IsOptional()
+  @IsUUID()
+  corporateAccountId?: string;
 }
 
 export class CheckInDto {

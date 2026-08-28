@@ -23,7 +23,7 @@ export class ReservationsController {
 
   @Post('branches/:branchId/reservations')
   @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk)
-  @ApiOperation({ summary: 'Book a reservation (flat baseRate — no Rate Resolver cascade this pass)' })
+  @ApiOperation({ summary: 'Book a reservation — rate resolved through the Rate Resolver cascade' })
   createReservation(
     @CurrentTenant() tenantId: string,
     @CurrentUser() user: JwtPayload,

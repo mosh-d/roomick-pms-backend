@@ -7,6 +7,7 @@ import { RoomsService } from '../property/rooms.service';
 import { GuestsService } from '../guests/guests.service';
 import { FoliosService } from '../folios/folios.service';
 import { HousekeepingService } from '../housekeeping/housekeeping.service';
+import { RateResolverService } from '../rate-resolver/rate-resolver.service';
 import { ReservationsService } from './reservations.service';
 
 const TENANT_ID = '11111111-1111-4111-8111-111111111111';
@@ -73,6 +74,7 @@ describe('ReservationsService', () => {
     settleIfFullyPaid: jest.Mock;
   };
   let housekeepingService: { createTaskInTx: jest.Mock };
+  let rateResolverService: { resolveStay: jest.Mock; linkAuditLogsToReservation: jest.Mock };
 
   beforeEach(async () => {
     tx = makeTx();
@@ -86,6 +88,28 @@ describe('ReservationsService', () => {
       settleIfFullyPaid: jest.fn().mockResolvedValue(true),
     };
     housekeepingService = { createTaskInTx: jest.fn().mockResolvedValue({ id: 'task-1' }) };
+    // Mirrors the OLD flat baseRate × nights math the resolver replaced —
+    // ReservationsService's own tests only need to prove it wires the
+    // resolver correctly (right roomType/dates in, `subtotal` out as
+    // `confirmedRate`); the cascade/override math itself is
+    // rate-resolver.service.spec.ts's job, not re-proven here.
+    rateResolverService = {
+      resolveStay: jest.fn().mockImplementation((_tx: unknown, _tenantId: string, _branchId: string, roomType: { baseRate: string }, checkInDate: Date, checkOutDate: Date) => {
+        const nights = Math.round((checkOutDate.getTime() - checkInDate.getTime()) / 86_400_000);
+        const subtotal = new Prisma.Decimal(roomType.baseRate).mul(nights);
+        return Promise.resolve({
+          subtotal,
+          nightlyRate: nights ? subtotal.div(nights) : new Prisma.Decimal(0),
+          taxTotal: new Prisma.Decimal(0),
+          totalWithTax: subtotal,
+          ratePlanId: null,
+          ruleApplied: { type: 'base', planName: null, adjustmentApplied: null },
+          perNight: [],
+          auditLogIds: [],
+        });
+      }),
+      linkAuditLogsToReservation: jest.fn().mockResolvedValue(undefined),
+    };
 
     const moduleRef = await Test.createTestingModule({
       providers: [
@@ -99,6 +123,7 @@ describe('ReservationsService', () => {
         { provide: GuestsService, useValue: guestsService },
         { provide: FoliosService, useValue: foliosService },
         { provide: HousekeepingService, useValue: housekeepingService },
+        { provide: RateResolverService, useValue: rateResolverService },
       ],
     }).compile();
     service = moduleRef.get(ReservationsService);
@@ -171,6 +196,59 @@ describe('ReservationsService', () => {
         expect.objectContaining({ data: expect.objectContaining({ confirmedRate: expect.objectContaining({ toString: expect.any(Function) }) }) }),
       );
       expect(String((result as unknown as { confirmedRate: unknown }).confirmedRate)).toBe('300'); // 100 × 3 nights
+    });
+
+    it('resolves the rate through the Rate Resolver, passing promoCode/corporateAccountId through, and stores its winning ratePlanId', async () => {
+      rateResolverService.resolveStay.mockResolvedValueOnce({
+        subtotal: new Prisma.Decimal('270'),
+        nightlyRate: new Prisma.Decimal('90'),
+        taxTotal: new Prisma.Decimal('0'),
+        totalWithTax: new Prisma.Decimal('270'),
+        ratePlanId: 'plan-promo-1',
+        ruleApplied: { type: 'override', planName: 'Labor Day Promo', adjustmentApplied: null },
+        perNight: [],
+        auditLogIds: [],
+      });
+      await service.createReservation(TENANT_ID, BRANCH_ID, { ...dto, promoCode: 'LABORDAY', corporateAccountId: 'corp-1' }, ACTOR_ID);
+
+      expect(rateResolverService.resolveStay).toHaveBeenCalledWith(
+        tx,
+        TENANT_ID,
+        BRANCH_ID,
+        expect.objectContaining({ id: TYPE_ID }),
+        expect.any(Date),
+        expect.any(Date),
+        { promoCode: 'LABORDAY', corporateAccountId: 'corp-1' },
+        { triggeredBy: 'booking_create', userId: ACTOR_ID },
+      );
+      expect(tx.reservation.create).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ ratePlanId: 'plan-promo-1', confirmedRate: expect.objectContaining({ toString: expect.any(Function) }) }) }),
+      );
+    });
+
+    /**
+     * `resolveStay` resolves the rate BEFORE the reservation row exists (no
+     * id yet to attach), so its own RateAuditLog rows are written with
+     * `reservationId: null` — the schema's documented "pre-booking
+     * calculation" state. Left there permanently, the audit trail for the
+     * exact calculation that set the price would be unlinkable, which is
+     * the one a real dispute needs. This proves the backfill actually
+     * fires with the resolver's own returned ids and the real new
+     * reservation id — not just that SOME call happens.
+     */
+    it('backfills the reservationId onto the audit rows the resolver wrote before the reservation existed', async () => {
+      rateResolverService.resolveStay.mockResolvedValueOnce({
+        subtotal: new Prisma.Decimal('300'),
+        nightlyRate: new Prisma.Decimal('100'),
+        taxTotal: new Prisma.Decimal('0'),
+        totalWithTax: new Prisma.Decimal('300'),
+        ratePlanId: null,
+        ruleApplied: { type: 'base', planName: null, adjustmentApplied: null },
+        perNight: [],
+        auditLogIds: [1n, 2n, 3n],
+      });
+      const result = await service.createReservation(TENANT_ID, BRANCH_ID, dto, ACTOR_ID);
+      expect(rateResolverService.linkAuditLogsToReservation).toHaveBeenCalledWith(tx, [1n, 2n, 3n], (result as unknown as { id: string }).id);
     });
 
     it('rejects when any night in the stay has 0 availability', async () => {
@@ -462,6 +540,21 @@ describe('ReservationsService', () => {
       const result = await service.modifyReservation(TENANT_ID, RESERVATION_ID, dto, ACTOR_ID);
       // 2026-09-01 -> 2026-09-05 = 4 nights, baseRate 100 -> 400
       expect(String((result as unknown as { confirmedRate: unknown }).confirmedRate)).toBe('400');
+    });
+
+    it('re-resolves through the Rate Resolver WITHOUT a promo/corporate override — a discount active at original booking is not carried forward', async () => {
+      tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'confirmed' }));
+      await service.modifyReservation(TENANT_ID, RESERVATION_ID, dto, ACTOR_ID);
+      expect(rateResolverService.resolveStay).toHaveBeenCalledWith(
+        tx,
+        TENANT_ID,
+        BRANCH_ID,
+        expect.objectContaining({ id: TYPE_ID }),
+        expect.any(Date),
+        expect.any(Date),
+        {},
+        { triggeredBy: 'modify', userId: ACTOR_ID, reservationId: RESERVATION_ID },
+      );
     });
 
     it('re-checks availability EXCLUDING its own current hold when dates change', async () => {
