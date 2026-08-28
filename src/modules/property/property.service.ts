@@ -361,6 +361,14 @@ export class PropertyService {
     });
   }
 
+  /** The `PATCH` above upserts blind — nothing previously read a branch's current config back, e.g. to show what's already configured before changing it. */
+  async listOverbookingConfigs(tenantId: string, branchId: string): Promise<OverbookingConfig[]> {
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      await this.assertBranch(tx, branchId);
+      return tx.overbookingConfig.findMany({ where: { branchId }, orderBy: { roomTypeId: { sort: 'asc', nulls: 'first' } } });
+    });
+  }
+
   // -------------------------------------------------------------------------
   async assertBranch(tx: TenantTx, branchId: string): Promise<Branch> {
     const branch = await tx.branch.findFirst({ where: { id: branchId, deletedAt: null } });

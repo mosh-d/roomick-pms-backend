@@ -21,6 +21,7 @@ import {
   ModifyReservationDto,
   ReinstateNoShowDto,
   WalkInReservationDto,
+  WalkReservationDto,
 } from './dto/reservation.dto';
 
 const RESERVATION_INCLUDE = {
@@ -105,6 +106,63 @@ export class ReservationsService {
   }
 
   /**
+   * Overbooking exposure (ref: "heatmap data: confirmed vs capacity vs
+   * threshold per date") — every active room type, every night in range,
+   * with the full picture `computeAvailabilityPerNight`'s own `{date,
+   * available}` deliberately doesn't expose (that method stays a plain
+   * gate every other caller — booking creation, modify, the plain
+   * availability calendar — consumes without carrying overbooking detail
+   * they don't need). Some query duplication against that method is
+   * accepted here rather than bending its return shape to also serve this.
+   */
+  async getOverbookingExposure(tenantId: string, branchId: string, dto: AvailabilityCalendarQueryDto) {
+    const from = new Date(Date.UTC(dto.year, dto.month - 1, 1));
+    const to = new Date(Date.UTC(dto.year, dto.month, 1));
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      await this.propertyService.assertBranch(tx, branchId);
+      const roomTypes = await tx.roomType.findMany({ where: { branchId, deletedAt: null }, select: { id: true, name: true }, orderBy: { name: 'asc' } });
+
+      const roomTypesWithExposure = await Promise.all(
+        roomTypes.map(async (roomType) => {
+          const physicalPool = await tx.room.count({ where: { branchId, roomTypeId: roomType.id, deletedAt: null, heldStatus: null } });
+          const blocks = await tx.roomBlock.findMany({
+            where: { room: { branchId, roomTypeId: roomType.id, deletedAt: null, heldStatus: null }, fromDate: { lt: to }, toDate: { gte: from } },
+            select: { roomId: true, fromDate: true, toDate: true },
+          });
+          const reservations = await tx.reservation.findMany({
+            where: { branchId, roomTypeId: roomType.id, deletedAt: null, status: { in: [...HOLDING_STATUSES] }, checkInDate: { lt: to }, checkOutDate: { gt: from } },
+            select: { checkInDate: true, checkOutDate: true },
+          });
+          const overbookingConfigs = await tx.overbookingConfig.findMany({ where: { branchId, OR: [{ roomTypeId: roomType.id }, { roomTypeId: null }] } });
+          const roomTypeConfig = overbookingConfigs.find((c) => c.roomTypeId === roomType.id);
+          const branchConfig = overbookingConfigs.find((c) => c.roomTypeId === null);
+
+          const nights = this.enumerateNights(from, to).map((night) => {
+            const blockedCount = blocks.filter((b) => b.fromDate <= night && b.toDate >= night).length;
+            const reservedCount = reservations.filter((r) => r.checkInDate <= night && r.checkOutDate > night).length;
+            const netCapacity = physicalPool - blockedCount;
+            const governingConfig = this.overbookingConfigFor(roomTypeConfig, branchConfig, night);
+            const ceilingCapacity = governingConfig ? Math.floor(netCapacity * (1 + Number(governingConfig.maxOverbookPct ?? 0) / 100)) : netCapacity;
+            const alertThreshold = governingConfig?.alertAtPct ? Math.floor(netCapacity * (Number(governingConfig.alertAtPct) / 100)) : null;
+            return {
+              date: night.toISOString().slice(0, 10),
+              physicalPool,
+              netCapacity,
+              ceilingCapacity,
+              reservedCount,
+              isOverbooked: reservedCount > netCapacity,
+              isAlerting: alertThreshold !== null && reservedCount >= alertThreshold,
+            };
+          });
+          return { roomTypeId: roomType.id, roomTypeName: roomType.name, nights };
+        }),
+      );
+
+      return { year: dto.year, month: dto.month, roomTypes: roomTypesWithExposure };
+    });
+  }
+
+  /**
    * 3 queries total regardless of range length, then bucketed per night in
    * JS. `Room.heldStatus` (a static flag) and `RoomBlock` (a date-ranged
    * table) are two DIFFERENT mechanisms — both must reduce the pool, not
@@ -116,6 +174,16 @@ export class ReservationsService {
    * room type — mitigated in `createReservation` via a `FOR UPDATE` lock
    * on the room type row, not here (this method is also used for the
    * read-only availability endpoint, which has nothing to lock against).
+   *
+   * Overbooking (ref: Month 4) raises the ceiling a night can book against,
+   * past physical capacity, when `OverbookingConfig.globalEnabled` and the
+   * night falls inside its `validFrom`/`validTo` window — "by default
+   * overbooking is off (hard block); a property must enable and set %"
+   * (ref). A room-type-specific config row governs over the branch-wide
+   * (`roomTypeId: null`) one for a night only if IT it also governs that
+   * night; otherwise the branch-wide row is used. This is the ONE place
+   * that decision is made — every caller (booking creation, modify,
+   * promote, reinstate, the availability calendar) inherits it for free.
    */
   private async computeAvailabilityPerNight(
     tx: TenantTx,
@@ -155,14 +223,33 @@ export class ReservationsService {
       select: { checkInDate: true, checkOutDate: true },
     });
 
+    const overbookingConfigs = await tx.overbookingConfig.findMany({ where: { branchId, OR: [{ roomTypeId }, { roomTypeId: null }] } });
+    const roomTypeConfig = overbookingConfigs.find((c) => c.roomTypeId === roomTypeId);
+    const branchConfig = overbookingConfigs.find((c) => c.roomTypeId === null);
+
     return this.enumerateNights(from, to).map((night) => {
       const blockedRoomIds = new Set(
         blocks.filter((b) => b.fromDate <= night && b.toDate >= night).map((b) => b.roomId),
       );
       const reservedCount = reservations.filter((r) => r.checkInDate <= night && r.checkOutDate > night).length;
-      const available = Math.max(0, physicalPool - blockedRoomIds.size - reservedCount);
+      const netCapacity = physicalPool - blockedRoomIds.size;
+      const governingConfig = this.overbookingConfigFor(roomTypeConfig, branchConfig, night);
+      const capacity = governingConfig
+        ? Math.floor(netCapacity * (1 + Number(governingConfig.maxOverbookPct ?? 0) / 100))
+        : netCapacity;
+      const available = Math.max(0, capacity - reservedCount);
       return { date: night.toISOString().slice(0, 10), available };
     });
+  }
+
+  private overbookingConfigFor<
+    T extends { globalEnabled: boolean; validFrom: Date | null; validTo: Date | null; maxOverbookPct: Prisma.Decimal | null },
+  >(roomTypeConfig: T | undefined, branchConfig: T | undefined, night: Date): T | null {
+    const governs = (c: T | undefined): c is T =>
+      !!c && c.globalEnabled && (!c.validFrom || c.validFrom <= night) && (!c.validTo || c.validTo >= night);
+    if (governs(roomTypeConfig)) return roomTypeConfig;
+    if (governs(branchConfig)) return branchConfig;
+    return null;
   }
 
   private assertValidRange(from: Date, to: Date): void {
@@ -816,6 +903,84 @@ export class ReservationsService {
       });
       await this.audit(tx, tenantId, reservation.branchId, actorId, 'reservation.promoted', reservationId);
       return updated;
+    });
+  }
+
+  /**
+   * Overbooking's walk flow (ref: "Record walk — relocation, compensation,
+   * auto-cancel + refund") — the guest whose room genuinely isn't there at
+   * arrival, relocated to another property. Sets status `walked`, not
+   * `cancelled` — `ReservationStatus` already has its own dedicated value
+   * for exactly this (the reference's prose says "auto-cancel" loosely;
+   * the schema's own enum is more precise, and a walked guest is a
+   * meaningfully different outcome from a plain cancellation for
+   * reporting). Restricted to `confirmed`: walking someone already
+   * `checked_in` is a mid-stay room-change problem, a different (unbuilt)
+   * flow, not this one.
+   *
+   * "Refund" reverses whatever was actually paid — one negative `Payment`
+   * per original payment, same method/currency, never a blind lump sum.
+   * In THIS system's current data that's usually nothing: payment/deposit
+   * at booking time isn't built yet (named in the Reservations phase's own
+   * carried-forward list), so a `confirmed` reservation essentially never
+   * has a folio yet. The check is still correct, not dead code — it just
+   * rarely fires today, and starts mattering the moment deposit-at-booking
+   * lands.
+   */
+  async walkReservation(tenantId: string, reservationId: string, dto: WalkReservationDto, actorId: string) {
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const reservation = await this.findReservationOrThrow(tx, reservationId);
+      if (reservation.status !== 'confirmed') {
+        throw new ConflictException({
+          code: ErrorCode.INVALID_STATUS_TRANSITION,
+          message: `Cannot walk a reservation with status "${reservation.status}" — only a confirmed reservation (not yet arrived) can be`,
+        });
+      }
+
+      const walkRecord = await tx.walkRecord.create({
+        data: {
+          tenantId,
+          reservationId,
+          relocationProperty: dto.relocationProperty,
+          transportProvided: dto.transportProvided ?? false,
+          transportCost: dto.transportCost !== undefined ? new Prisma.Decimal(dto.transportCost) : null,
+          compensationOffered: dto.compensationOffered,
+          approvedBy: actorId,
+        },
+      });
+
+      const updated = await tx.reservation.update({
+        where: { id: reservationId },
+        data: { status: 'walked' },
+        include: RESERVATION_INCLUDE,
+      });
+
+      const folio = await tx.folio.findFirst({ where: { reservationId, deletedAt: null } });
+      let refundedTotal = new Prisma.Decimal(0);
+      if (folio) {
+        const payments = await tx.payment.findMany({ where: { folioId: folio.id, isVoid: false, amount: { gt: 0 } } });
+        for (const payment of payments) {
+          await tx.payment.create({
+            data: {
+              tenantId,
+              folioId: folio.id,
+              method: payment.method,
+              amount: payment.amount.negated(),
+              currency: payment.currency,
+              paymentPurpose: 'payment',
+              reference: `Walk refund — reversing payment ${payment.id}`,
+              recordedBy: actorId,
+            },
+          });
+          refundedTotal = refundedTotal.add(payment.amount);
+        }
+      }
+
+      await this.audit(tx, tenantId, reservation.branchId, actorId, 'reservation.walked', reservationId, {
+        relocationProperty: dto.relocationProperty,
+        refundedTotal: refundedTotal.toFixed(2),
+      });
+      return { reservation: updated, walkRecord, refundedTotal: refundedTotal.toFixed(2) };
     });
   }
 

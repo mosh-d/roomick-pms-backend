@@ -13,6 +13,7 @@ import {
   ModifyReservationDto,
   ReinstateNoShowDto,
   WalkInReservationDto,
+  WalkReservationDto,
 } from './dto/reservation.dto';
 import { ReservationsService } from './reservations.service';
 
@@ -64,6 +65,17 @@ export class ReservationsController {
     @Query() query: AvailabilityCalendarQueryDto,
   ): ReturnType<ReservationsService['getAvailabilityCalendar']> {
     return this.reservationsService.getAvailabilityCalendar(tenantId, branchId, query);
+  }
+
+  @Get('branches/:branchId/overbooking/exposure')
+  @Roles(SystemRole.Owner, SystemRole.Manager)
+  @ApiOperation({ summary: 'Overbooking heatmap: confirmed vs capacity vs threshold, every room type, every night in the given month' })
+  getOverbookingExposure(
+    @CurrentTenant() tenantId: string,
+    @Param('branchId', ParseUUIDPipe) branchId: string,
+    @Query() query: AvailabilityCalendarQueryDto,
+  ): ReturnType<ReservationsService['getOverbookingExposure']> {
+    return this.reservationsService.getOverbookingExposure(tenantId, branchId, query);
   }
 
   @Get('branches/:branchId/reservations')
@@ -213,5 +225,17 @@ export class ReservationsController {
     @Body() dto: ReinstateNoShowDto,
   ): ReturnType<ReservationsService['reinstateFromNoShow']> {
     return this.reservationsService.reinstateFromNoShow(tenantId, reservationId, dto, user.sub);
+  }
+
+  @Post('reservations/:reservationId/walk')
+  @Roles(SystemRole.Owner, SystemRole.Manager)
+  @ApiOperation({ summary: 'Walk a confirmed reservation — relocate to another property, refund any payment already recorded, auto-cancel here' })
+  walkReservation(
+    @CurrentTenant() tenantId: string,
+    @CurrentUser() user: JwtPayload,
+    @Param('reservationId', ParseUUIDPipe) reservationId: string,
+    @Body() dto: WalkReservationDto,
+  ): ReturnType<ReservationsService['walkReservation']> {
+    return this.reservationsService.walkReservation(tenantId, reservationId, dto, user.sub);
   }
 }

@@ -28,6 +28,7 @@ function makeTx() {
     floor: { findFirst: jest.fn(), create: jest.fn().mockResolvedValue({ id: 'floor-default' }) },
     overbookingConfig: {
       findFirst: jest.fn().mockResolvedValue(null),
+      findMany: jest.fn().mockResolvedValue([]),
       create: jest.fn().mockResolvedValue({ id: 'ob-1' }),
       update: jest.fn().mockResolvedValue({ id: 'ob-1' }),
     },
@@ -179,6 +180,15 @@ describe('PropertyService', () => {
       await service.updateOverbookingConfig(TENANT_ID, BRANCH_ID, { maxOverbookPct: 10 }, ACTOR);
       expect(tx.overbookingConfig.update).toHaveBeenCalled();
       expect(tx.overbookingConfig.create).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('listOverbookingConfigs', () => {
+    it('reads back what the PATCH route upserts — nothing previously could', async () => {
+      tx.overbookingConfig.findMany.mockResolvedValue([{ id: 'ob-1', roomTypeId: null }, { id: 'ob-2', roomTypeId: 'type-1' }]);
+      const result = await service.listOverbookingConfigs(TENANT_ID, BRANCH_ID);
+      expect(tx.overbookingConfig.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { branchId: BRANCH_ID } }));
+      expect(result).toHaveLength(2);
     });
   });
 });

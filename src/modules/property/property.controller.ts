@@ -124,6 +124,16 @@ export class PropertyController {
     return this.propertyService.setRegCardTemplate(tenantId, branchId, dto, user.sub);
   }
 
+  @Get('branches/:branchId/overbooking-config')
+  @Roles(SystemRole.Owner, SystemRole.Manager)
+  @ApiOperation({ summary: "A branch's overbooking config rows (branch-wide plus any per-room-type overrides)" })
+  listOverbookingConfigs(
+    @CurrentTenant() tenantId: string,
+    @Param('branchId', ParseUUIDPipe) branchId: string,
+  ): ReturnType<PropertyService['listOverbookingConfigs']> {
+    return this.propertyService.listOverbookingConfigs(tenantId, branchId);
+  }
+
   @Patch('branches/:branchId/overbooking-config')
   @Roles(SystemRole.Owner, SystemRole.Manager)
   @ApiOperation({ summary: 'Upsert overbooking config (branch-wide or per room type)' })

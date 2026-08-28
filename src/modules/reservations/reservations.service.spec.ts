@@ -45,6 +45,10 @@ function makeTx() {
       findMany: jest.fn().mockResolvedValue([{ id: TYPE_ID, name: 'Standard' }]),
     },
     roomBlock: { findMany: jest.fn().mockResolvedValue([]), findFirst: jest.fn().mockResolvedValue(null) },
+    overbookingConfig: { findMany: jest.fn().mockResolvedValue([]) },
+    walkRecord: { create: jest.fn().mockImplementation(({ data }: { data: Record<string, unknown> }) => Promise.resolve({ id: 'walk-1', ...data })) },
+    folio: { findFirst: jest.fn().mockResolvedValue(null) },
+    payment: { findMany: jest.fn().mockResolvedValue([]), create: jest.fn().mockResolvedValue({}) },
     reservation: {
       findMany: jest.fn().mockResolvedValue([]),
       findFirst: jest.fn(),
@@ -196,6 +200,86 @@ describe('ReservationsService', () => {
       await expect(
         service.getAvailability(TENANT_ID, BRANCH_ID, { from: '2026-09-03', to: '2026-09-01', roomTypeId: TYPE_ID }),
       ).rejects.toThrow(BadRequestException);
+    });
+
+    describe('overbooking', () => {
+      it('by default (no config row), the physical pool is a hard ceiling — no overbooking', async () => {
+        tx.room.count.mockResolvedValue(2);
+        tx.reservation.findMany.mockResolvedValue([
+          { checkInDate: new Date('2026-09-01T00:00:00.000Z'), checkOutDate: new Date('2026-09-02T00:00:00.000Z') },
+          { checkInDate: new Date('2026-09-01T00:00:00.000Z'), checkOutDate: new Date('2026-09-02T00:00:00.000Z') },
+        ]);
+        const result = await service.getAvailability(TENANT_ID, BRANCH_ID, { from: '2026-09-01', to: '2026-09-02', roomTypeId: TYPE_ID });
+        expect(result).toEqual([{ date: '2026-09-01', available: 0 }]);
+      });
+
+      it('globalEnabled + maxOverbookPct raises the ceiling past physical capacity', async () => {
+        tx.room.count.mockResolvedValue(2);
+        tx.overbookingConfig.findMany.mockResolvedValue([
+          { roomTypeId: TYPE_ID, globalEnabled: true, maxOverbookPct: new Prisma.Decimal('50'), alertAtPct: null, validFrom: null, validTo: null },
+        ]);
+        // 2 physical + 50% = ceiling 3 — 2 already reserved leaves 1 available, past physical capacity.
+        tx.reservation.findMany.mockResolvedValue([
+          { checkInDate: new Date('2026-09-01T00:00:00.000Z'), checkOutDate: new Date('2026-09-02T00:00:00.000Z') },
+          { checkInDate: new Date('2026-09-01T00:00:00.000Z'), checkOutDate: new Date('2026-09-02T00:00:00.000Z') },
+        ]);
+        const result = await service.getAvailability(TENANT_ID, BRANCH_ID, { from: '2026-09-01', to: '2026-09-02', roomTypeId: TYPE_ID });
+        expect(result).toEqual([{ date: '2026-09-01', available: 1 }]);
+      });
+
+      it('a config row that exists but is NOT globalEnabled does not raise the ceiling', async () => {
+        tx.room.count.mockResolvedValue(2);
+        tx.overbookingConfig.findMany.mockResolvedValue([
+          { roomTypeId: TYPE_ID, globalEnabled: false, maxOverbookPct: new Prisma.Decimal('50'), alertAtPct: null, validFrom: null, validTo: null },
+        ]);
+        tx.reservation.findMany.mockResolvedValue([
+          { checkInDate: new Date('2026-09-01T00:00:00.000Z'), checkOutDate: new Date('2026-09-02T00:00:00.000Z') },
+          { checkInDate: new Date('2026-09-01T00:00:00.000Z'), checkOutDate: new Date('2026-09-02T00:00:00.000Z') },
+        ]);
+        const result = await service.getAvailability(TENANT_ID, BRANCH_ID, { from: '2026-09-01', to: '2026-09-02', roomTypeId: TYPE_ID });
+        expect(result).toEqual([{ date: '2026-09-01', available: 0 }]);
+      });
+
+      it('a night outside the config\'s validFrom/validTo window is NOT overbooked, even with globalEnabled true', async () => {
+        tx.room.count.mockResolvedValue(2);
+        tx.overbookingConfig.findMany.mockResolvedValue([
+          { roomTypeId: TYPE_ID, globalEnabled: true, maxOverbookPct: new Prisma.Decimal('50'), alertAtPct: null, validFrom: new Date('2026-12-01'), validTo: new Date('2026-12-31') },
+        ]);
+        tx.reservation.findMany.mockResolvedValue([
+          { checkInDate: new Date('2026-09-01T00:00:00.000Z'), checkOutDate: new Date('2026-09-02T00:00:00.000Z') },
+          { checkInDate: new Date('2026-09-01T00:00:00.000Z'), checkOutDate: new Date('2026-09-02T00:00:00.000Z') },
+        ]);
+        const result = await service.getAvailability(TENANT_ID, BRANCH_ID, { from: '2026-09-01', to: '2026-09-02', roomTypeId: TYPE_ID });
+        expect(result).toEqual([{ date: '2026-09-01', available: 0 }]);
+      });
+
+      it('a room-type-specific config governs over the branch-wide one when both apply to the same night', async () => {
+        tx.room.count.mockResolvedValue(2);
+        tx.overbookingConfig.findMany.mockResolvedValue([
+          { roomTypeId: null, globalEnabled: true, maxOverbookPct: new Prisma.Decimal('10'), alertAtPct: null, validFrom: null, validTo: null },
+          { roomTypeId: TYPE_ID, globalEnabled: true, maxOverbookPct: new Prisma.Decimal('50'), alertAtPct: null, validFrom: null, validTo: null },
+        ]);
+        // If the branch-wide 10% won, ceiling would be floor(2*1.1)=2, leaving 0 available. The room-type 50% should win: ceiling floor(2*1.5)=3.
+        tx.reservation.findMany.mockResolvedValue([
+          { checkInDate: new Date('2026-09-01T00:00:00.000Z'), checkOutDate: new Date('2026-09-02T00:00:00.000Z') },
+          { checkInDate: new Date('2026-09-01T00:00:00.000Z'), checkOutDate: new Date('2026-09-02T00:00:00.000Z') },
+        ]);
+        const result = await service.getAvailability(TENANT_ID, BRANCH_ID, { from: '2026-09-01', to: '2026-09-02', roomTypeId: TYPE_ID });
+        expect(result).toEqual([{ date: '2026-09-01', available: 1 }]);
+      });
+
+      it('falls back to the branch-wide config when no room-type-specific row exists', async () => {
+        tx.room.count.mockResolvedValue(2);
+        tx.overbookingConfig.findMany.mockResolvedValue([
+          { roomTypeId: null, globalEnabled: true, maxOverbookPct: new Prisma.Decimal('50'), alertAtPct: null, validFrom: null, validTo: null },
+        ]);
+        tx.reservation.findMany.mockResolvedValue([
+          { checkInDate: new Date('2026-09-01T00:00:00.000Z'), checkOutDate: new Date('2026-09-02T00:00:00.000Z') },
+          { checkInDate: new Date('2026-09-01T00:00:00.000Z'), checkOutDate: new Date('2026-09-02T00:00:00.000Z') },
+        ]);
+        const result = await service.getAvailability(TENANT_ID, BRANCH_ID, { from: '2026-09-01', to: '2026-09-02', roomTypeId: TYPE_ID });
+        expect(result).toEqual([{ date: '2026-09-01', available: 1 }]);
+      });
     });
   });
 
@@ -658,6 +742,83 @@ describe('ReservationsService', () => {
         await service.reinstateFromNoShow(TENANT_ID, RESERVATION_ID, dto, ACTOR_ID);
         expect(tx.noShowRecord.findFirst).not.toHaveBeenCalled();
       });
+    });
+  });
+
+  describe('walkReservation', () => {
+    const dto = { relocationProperty: 'Sister Hotel Downtown', transportProvided: true, transportCost: 20, compensationOffered: 'One free night' };
+
+    it('rejects a reservation that is not confirmed', async () => {
+      tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'checked_in' }));
+      await expect(service.walkReservation(TENANT_ID, RESERVATION_ID, dto, ACTOR_ID)).rejects.toThrow(ConflictException);
+    });
+
+    it('creates a WalkRecord and sets status to "walked" — a distinct status from a plain cancellation', async () => {
+      tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'confirmed' }));
+      await service.walkReservation(TENANT_ID, RESERVATION_ID, dto, ACTOR_ID);
+      expect(tx.walkRecord.create).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ relocationProperty: 'Sister Hotel Downtown', approvedBy: ACTOR_ID }) }),
+      );
+      expect(tx.reservation.update).toHaveBeenCalledWith(expect.objectContaining({ data: { status: 'walked' } }));
+    });
+
+    it('no folio exists yet (the common case — no deposit-at-booking) — nothing to refund, no payment rows touched', async () => {
+      tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'confirmed' }));
+      tx.folio.findFirst.mockResolvedValue(null);
+      const result = await service.walkReservation(TENANT_ID, RESERVATION_ID, dto, ACTOR_ID);
+      expect(tx.payment.create).not.toHaveBeenCalled();
+      expect(result.refundedTotal).toBe('0.00');
+    });
+
+    it('a folio WITH a real payment gets it reversed as a negative payment, same method/currency as the original — never a blind lump sum', async () => {
+      tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'confirmed' }));
+      tx.folio.findFirst.mockResolvedValue({ id: 'folio-1' });
+      tx.payment.findMany.mockResolvedValue([
+        { id: 'pay-1', method: 'card', amount: new Prisma.Decimal('150'), currency: 'NGN' },
+      ]);
+      const result = await service.walkReservation(TENANT_ID, RESERVATION_ID, dto, ACTOR_ID);
+      expect(tx.payment.create).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ method: 'card', currency: 'NGN', amount: expect.objectContaining({ toString: expect.any(Function) }) }) }),
+      );
+      const call = (tx.payment.create.mock.calls[0] as [{ data: { amount: Prisma.Decimal } }])[0];
+      expect(call.data.amount.toString()).toBe('-150');
+      expect(result.refundedTotal).toBe('150.00');
+    });
+  });
+
+  describe('getOverbookingExposure', () => {
+    it('flags a night as overbooked once reservedCount exceeds physical capacity', async () => {
+      tx.room.count.mockResolvedValue(2);
+      tx.reservation.findMany.mockResolvedValue([
+        { checkInDate: new Date('2026-09-01T00:00:00.000Z'), checkOutDate: new Date('2026-09-02T00:00:00.000Z') },
+        { checkInDate: new Date('2026-09-01T00:00:00.000Z'), checkOutDate: new Date('2026-09-02T00:00:00.000Z') },
+        { checkInDate: new Date('2026-09-01T00:00:00.000Z'), checkOutDate: new Date('2026-09-02T00:00:00.000Z') },
+      ]);
+      tx.overbookingConfig.findMany.mockResolvedValue([
+        { roomTypeId: TYPE_ID, globalEnabled: true, maxOverbookPct: new Prisma.Decimal('100'), alertAtPct: null, validFrom: null, validTo: null },
+      ]);
+      const result = await service.getOverbookingExposure(TENANT_ID, BRANCH_ID, { year: 2026, month: 9 });
+      const sep1 = result.roomTypes[0].nights.find((n) => n.date === '2026-09-01');
+      expect(sep1?.isOverbooked).toBe(true);
+      expect(sep1?.reservedCount).toBe(3);
+      expect(sep1?.physicalPool).toBe(2);
+    });
+
+    it('flags a night as alerting once reservedCount crosses alertAtPct of physical capacity', async () => {
+      tx.room.count.mockResolvedValue(4);
+      tx.reservation.findMany.mockResolvedValue([
+        { checkInDate: new Date('2026-09-01T00:00:00.000Z'), checkOutDate: new Date('2026-09-02T00:00:00.000Z') },
+        { checkInDate: new Date('2026-09-01T00:00:00.000Z'), checkOutDate: new Date('2026-09-02T00:00:00.000Z') },
+        { checkInDate: new Date('2026-09-01T00:00:00.000Z'), checkOutDate: new Date('2026-09-02T00:00:00.000Z') },
+      ]);
+      tx.overbookingConfig.findMany.mockResolvedValue([
+        { roomTypeId: TYPE_ID, globalEnabled: true, maxOverbookPct: new Prisma.Decimal('50'), alertAtPct: new Prisma.Decimal('70'), validFrom: null, validTo: null },
+      ]);
+      // physical 4, alert threshold floor(4 * 0.7) = 2 — 3 reserved crosses it, but not yet overbooked (ceiling floor(4*1.5)=6).
+      const result = await service.getOverbookingExposure(TENANT_ID, BRANCH_ID, { year: 2026, month: 9 });
+      const sep1 = result.roomTypes[0].nights.find((n) => n.date === '2026-09-01');
+      expect(sep1?.isAlerting).toBe(true);
+      expect(sep1?.isOverbooked).toBe(false);
     });
   });
 

@@ -5,6 +5,7 @@ import {
   IsIn,
   IsInt,
   IsISO8601,
+  IsNumber,
   IsOptional,
   IsString,
   IsUUID,
@@ -282,4 +283,29 @@ export class ReinstateNoShowDto {
   @IsOptional()
   @IsBoolean()
   waivePenalty?: boolean;
+}
+
+export class WalkReservationDto {
+  @ApiProperty({ example: 'Grand Lagos Hotel (sister property, 2 blocks away)' })
+  @IsString()
+  @MaxLength(200)
+  relocationProperty!: string;
+
+  @ApiPropertyOptional({ description: 'Whether the property arranged/paid for the guest’s transport to the relocation property' })
+  @IsOptional()
+  @IsBoolean()
+  transportProvided?: boolean;
+
+  @ApiPropertyOptional({ example: 25.0 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  transportCost?: number;
+
+  @ApiPropertyOptional({ example: 'One free night + breakfast on next stay' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  compensationOffered?: string;
 }

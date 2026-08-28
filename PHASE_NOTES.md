@@ -1,5 +1,31 @@
 # Phase Notes
 
+## Overbooking Management — availability ceiling, exposure heatmap, walk flow (2026-08-28)
+
+Per the MVP timeline reference (Month 4): thresholds, a walk flow, and an exposure dashboard. `OverbookingConfig` and `WalkRecord` were already fully modeled from an earlier pass, and `PropertyService.updateOverbookingConfig` (the config upsert) already existed with a working route — this closes the three pieces that made the config a dead end: nothing read it back, nothing checked it during booking, and there was no way to actually walk a guest.
+
+### The core piece: teaching the availability engine to honour the config
+`ReservationsService.computeAvailabilityPerNight` is the SINGLE place every caller — booking creation, modify, promote-from-waitlist, reinstate-from-no-show, the plain availability calendar — asks "is there room". It used to hard-block at `physicalPool - blocked - reserved`, full stop. Now, per night, it resolves whichever `OverbookingConfig` row governs THAT specific night (a room-type-specific row wins over the branch-wide `roomTypeId: null` one only if it also governs that night — falls back to branch-wide otherwise) and, if `globalEnabled` and the night falls inside its `validFrom`/`validTo` window, raises the ceiling to `floor(netCapacity × (1 + maxOverbookPct/100))`. Every caller gets this for free — no separate "overbooking-aware" booking path was built alongside the normal one, because there isn't a second one; wiring it here was the whole point.
+
+### `getOverbookingExposure` — a dedicated read, not a stretched shared shape
+The reference's "heatmap data: confirmed vs capacity vs threshold per date" needs `physicalPool`/`ceilingCapacity`/`isOverbooked`/`isAlerting` per night — richer than `computeAvailabilityPerNight`'s own `{date, available}`, which every OTHER caller correctly doesn't need bloated. Rather than reshape that method's return for one caller, this is its own method with some accepted query duplication — the same "duplication over bending a shared shape to fit a new, genuinely different need" call this codebase already makes elsewhere (`RESERVATION_INCLUDE` vs. Registration Cards' own narrower include).
+
+### The walk flow, and a real reconciliation with the reference's own wording
+`walkReservation` sets status **`walked`**, not `cancelled` — `ReservationStatus` already carries a dedicated value for exactly this outcome (the reference's own prose says "auto-cancel" loosely; the schema is more precise, and a walked guest is a meaningfully different outcome from a plain cancellation for reporting). Restricted to `confirmed` — walking someone already `checked_in` is a different, unbuilt mid-stay room-change problem. "Refund" reverses whatever was ACTUALLY paid — one negative `Payment` per original payment, same method/currency as each, never a blind lump sum. In this system's current data that's usually nothing: payment/deposit at booking isn't built yet (already named in the Reservations phase's own carried-forward list), so a `confirmed` reservation essentially never has a folio to refund from today. The check is still correct, not dead code — verified live it correctly identifies "nothing to refund" now and will start mattering the moment deposit-at-booking lands.
+
+### Other pieces
+`GET /branches/:id/overbooking-config` — the `PATCH` had nothing to read its own state back with.
+
+### Verified
+`npx tsc --noEmit`, `npm run lint`, `npm test` — 273 tests (13 new: 6 for the availability-ceiling logic itself — no config, disabled config, out-of-window config, room-type-specific overriding branch-wide, and the branch-wide fallback; 4 for `walkReservation` including the exact per-payment refund reversal; 2 for `getOverbookingExposure`'s `isOverbooked`/`isAlerting` flags; 1 for the new `listOverbookingConfigs` read).
+
+Live, against real Postgres: found a room type's exact physical room count via the API, booked it to EXACTLY that capacity, confirmed the next booking hard-blocks with `409` — overbooking OFF, as designed. Enabled overbooking for that room type at 50% through the actual UI, confirmed it persisted via the API. Attempted the identical overflow booking again — it now succeeds with `201`, past physical capacity, proving the availability engine genuinely reads the config live, not just at the config layer. Confirmed the exposure heatmap correctly flags that exact night `isOverbooked: true`. Walked the overbooked guest through the actual UI — confirmed the reservation status flipped and the flow correctly reported nothing to refund (no folio existed, exactly the expected current-data-state case named above).
+
+### Carried forward
+- Everything from the entry below — unchanged.
+- Payment/deposit at booking — once built, `walkReservation`'s refund path (already correct, currently rarely exercised) starts actually reversing real money.
+- Mid-stay room changes for an already-`checked_in` guest — a different flow than walking, not this one, still unbuilt.
+
 ## Guest Registration Card — auto-generated at check-in, DB-only by explicit choice (2026-08-28)
 
 Per the MVP timeline reference (Month 3): "a legal document, not an afterthought" — auto-generated when check-in is triggered, pre-filled guest/room/rate/house-rules, a digital signature pad, and a signed document stored encrypted and retrievable. `RegistrationCard` and `Branch.regCardTemplate` were already fully modeled in the schema from an earlier pass; `PropertyService.setRegCardTemplate` and its `PATCH` route already existed too. This closes the actual card-generation and signing flow.
