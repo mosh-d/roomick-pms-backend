@@ -1,5 +1,6 @@
-import { Controller, Get, Param, ParseUUIDPipe, Query } from '@nestjs/common';
+import { Controller, Get, Param, ParseUUIDPipe, Query, Res } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import type { Response } from 'express';
 import { CurrentTenant } from '../../common/decorators';
 import { ReportQueryDto } from './dto/report-query.dto';
 import { ReportsService } from './reports.service';
@@ -48,5 +49,36 @@ export class ReportsController {
     @Query() query: ReportQueryDto,
   ): ReturnType<ReportsService['getRevenue']> {
     return this.reportsService.getRevenue(tenantId, branchId, query);
+  }
+
+  @Get('occupancy/pdf')
+  @ApiOperation({ summary: 'Occupancy report as a PDF' })
+  getOccupancyPdf(@CurrentTenant() tenantId: string, @Param('branchId', ParseUUIDPipe) branchId: string, @Query() query: ReportQueryDto, @Res() res: Response) {
+    return this.sendPdf(res, 'occupancy-report', this.reportsService.getOccupancyPdf(tenantId, branchId, query));
+  }
+
+  @Get('adr/pdf')
+  @ApiOperation({ summary: 'ADR report as a PDF' })
+  getAdrPdf(@CurrentTenant() tenantId: string, @Param('branchId', ParseUUIDPipe) branchId: string, @Query() query: ReportQueryDto, @Res() res: Response) {
+    return this.sendPdf(res, 'adr-report', this.reportsService.getAdrPdf(tenantId, branchId, query));
+  }
+
+  @Get('revpar/pdf')
+  @ApiOperation({ summary: 'RevPAR report as a PDF' })
+  getRevparPdf(@CurrentTenant() tenantId: string, @Param('branchId', ParseUUIDPipe) branchId: string, @Query() query: ReportQueryDto, @Res() res: Response) {
+    return this.sendPdf(res, 'revpar-report', this.reportsService.getRevparPdf(tenantId, branchId, query));
+  }
+
+  @Get('revenue/pdf')
+  @ApiOperation({ summary: 'Revenue report as a PDF' })
+  getRevenuePdf(@CurrentTenant() tenantId: string, @Param('branchId', ParseUUIDPipe) branchId: string, @Query() query: ReportQueryDto, @Res() res: Response) {
+    return this.sendPdf(res, 'revenue-report', this.reportsService.getRevenuePdf(tenantId, branchId, query));
+  }
+
+  private async sendPdf(res: Response, filenameBase: string, pdf: Promise<Buffer>): Promise<void> {
+    const buffer = await pdf;
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${filenameBase}.pdf"`);
+    res.send(buffer);
   }
 }

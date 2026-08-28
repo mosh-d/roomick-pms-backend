@@ -154,4 +154,29 @@ describe('ReportsService', () => {
       expect(result.trend).toEqual([{ period: '2026-09-01', amount: '100.00' }, { period: '2026-09-02', amount: '200.00' }]);
     });
   });
+
+  describe('PDF export', () => {
+    beforeEach(() => {
+      tx.room.count.mockResolvedValue(2);
+      tx.reservation.findMany.mockResolvedValue([
+        { roomTypeId: TYPE_A, checkInDate: new Date('2026-09-01T00:00:00.000Z'), checkOutDate: new Date('2026-09-02T00:00:00.000Z') },
+      ]);
+      tx.lineItem.findMany.mockResolvedValue([
+        { amount: new Prisma.Decimal('100.00'), chargeType: 'room', serviceDate: new Date('2026-09-01'), folio: { reservation: { roomTypeId: TYPE_A } } },
+      ]);
+      tx.payment.findMany.mockResolvedValue([{ amount: new Prisma.Decimal('100.00'), method: 'cash' }]);
+    });
+
+    it.each([
+      ['getOccupancyPdf'] as const,
+      ['getAdrPdf'] as const,
+      ['getRevparPdf'] as const,
+      ['getRevenuePdf'] as const,
+    ])('%s renders a real, non-empty PDF', async (method) => {
+      const pdf = await service[method](TENANT_ID, BRANCH_ID, { from: '2026-09-01', to: '2026-09-03' });
+      expect(Buffer.isBuffer(pdf)).toBe(true);
+      expect(pdf.subarray(0, 4).toString('latin1')).toBe('%PDF');
+      expect(pdf.length).toBeGreaterThan(500);
+    });
+  });
 });

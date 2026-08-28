@@ -32,4 +32,15 @@ export class GuestsController {
   ): ReturnType<GuestsService['getGuestById']> {
     return this.guestsService.getGuestById(tenantId, guestId);
   }
+
+  @Get('guests/:guestId/id-document')
+  @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk)
+  @ApiOperation({ summary: 'Get a guest\'s ID-document state — masked idDocNumber unless ?reveal=true (audited as pii.reveal)' })
+  getGuestIdDocument(
+    @CurrentTenant() tenantId: string,
+    @Param('guestId', ParseUUIDPipe) guestId: string,
+    @Query('reveal') reveal?: string,
+  ): ReturnType<GuestsService['getGuestDetail']> {
+    return this.guestsService.getGuestDetail(tenantId, guestId, reveal === 'true');
+  }
 }

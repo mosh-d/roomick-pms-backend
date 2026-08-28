@@ -17,4 +17,14 @@ export class BackupsScheduler {
       this.logger.error('Nightly backup sweep failed', error);
     }
   }
+
+  /** "Restore test procedure (documented + run monthly)" — noon on the 1st, clear of the nightly 2 AM backup and midnight demo-sweep crons. */
+  @Cron(CronExpression.EVERY_1ST_DAY_OF_MONTH_AT_NOON)
+  async monthlyRestoreDrill(): Promise<void> {
+    try {
+      await this.backupsService.runRestoreDrillForAllTenants();
+    } catch (error) {
+      this.logger.error('Monthly restore drill sweep failed', error);
+    }
+  }
 }

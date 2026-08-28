@@ -1,8 +1,11 @@
-import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma, RegistrationCard } from '@prisma/client';
+import { EncryptionService } from '../../common/crypto/encryption.service';
+import { DOCUMENT_STORAGE_ADAPTER, DocumentStorageAdapter } from '../../common/documents/document-storage.interface';
 import { ErrorCode } from '../../common/errors/error-codes';
 import { PrismaService, TenantTx } from '../../prisma/prisma.service';
 import { SignRegistrationCardDto } from './dto/registration-card.dto';
+import { renderRegistrationCardPdf } from './registration-card-pdf.util';
 
 /** Fields `generateCardInTx` needs off a reservation — a subset of `RESERVATION_INCLUDE`'s own shape, not the full thing, so callers with a narrower fetch (this module's own standalone `generateCard`) don't have to over-fetch to match it. */
 interface ReservationForCard {
@@ -31,7 +34,11 @@ const CARD_INCLUDE = {
 
 @Injectable()
 export class RegistrationCardsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly encryption: EncryptionService,
+    @Inject(DOCUMENT_STORAGE_ADAPTER) private readonly documentStorage: DocumentStorageAdapter,
+  ) {}
 
   /**
    * Called from `ReservationsService.checkIn`/`walkIn`, inside their own
@@ -129,13 +136,42 @@ export class RegistrationCardsService {
       if (card.signedAt) {
         throw new ConflictException({ code: ErrorCode.CONFLICT, message: 'This card is already signed' });
       }
-      const updated = await tx.registrationCard.update({
+      const signed = await tx.registrationCard.update({
         where: { id: cardId },
         data: { signatureData: dto.signatureData, signedAt: new Date(), witnessedBy: actorId },
       });
+
+      // The legal document is final at signature — generate and persist the
+      // PDF now, not lazily, so `documentUrl` is never stale relative to
+      // `signedAt`. Encrypted the same way an ID document photo is
+      // (`EncryptionService.encryptBuffer` → `DocumentStorageAdapter`).
+      const pdf = await renderRegistrationCardPdf(signed);
+      const documentUrl = await this.documentStorage.write(
+        `${tenantId}/registration-cards/${cardId}.pdf.enc`,
+        this.encryption.encryptBuffer(pdf),
+      );
+      const updated = await tx.registrationCard.update({ where: { id: cardId }, data: { documentUrl } });
+
       await this.audit(tx, tenantId, card.branchId, actorId, 'registration_card.signed', cardId, { reservationId: card.reservationId });
       return updated;
     });
+  }
+
+  /**
+   * Signed cards serve the PDF persisted at sign-time (`documentUrl`,
+   * decrypted on read). An unsigned card has no persisted document yet —
+   * `signCard` is the only writer of `documentUrl` — so this renders one
+   * live instead, matching what `window.print()` already showed as a
+   * preview before this pass, without persisting a document for a card
+   * that might still never get signed.
+   */
+  async getCardPdf(tenantId: string, cardId: string): Promise<Buffer> {
+    const card = await this.getCard(tenantId, cardId);
+    if (!card.documentUrl) {
+      return renderRegistrationCardPdf(card);
+    }
+    const encrypted = await this.documentStorage.read(card.documentUrl);
+    return this.encryption.decryptBuffer(encrypted);
   }
 
   private async audit(tx: TenantTx, tenantId: string, branchId: string, userId: string, action: string, entityId: string, after?: Prisma.InputJsonValue): Promise<void> {

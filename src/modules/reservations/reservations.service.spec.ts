@@ -81,7 +81,7 @@ describe('ReservationsService', () => {
   let tx: ReturnType<typeof makeTx>;
   let propertyService: { assertBranch: jest.Mock };
   let roomsService: { applyReservationOccupancy: jest.Mock };
-  let guestsService: { findOrCreateGuestInTx: jest.Mock };
+  let guestsService: { findOrCreateGuestInTx: jest.Mock; recordIdDocumentInTx: jest.Mock };
   let foliosService: {
     ensurePrimaryFolio: jest.Mock;
     postRoomChargeForDate: jest.Mock;
@@ -98,7 +98,10 @@ describe('ReservationsService', () => {
     tx = makeTx();
     propertyService = { assertBranch: jest.fn().mockResolvedValue({ id: BRANCH_ID, timezone: 'Africa/Lagos', noShowPolicy: null, regCardTemplate: null }) };
     roomsService = { applyReservationOccupancy: jest.fn().mockResolvedValue({}) };
-    guestsService = { findOrCreateGuestInTx: jest.fn().mockResolvedValue({ id: GUEST_ID, name: 'John Doe' }) };
+    guestsService = {
+      findOrCreateGuestInTx: jest.fn().mockResolvedValue({ id: GUEST_ID, name: 'John Doe' }),
+      recordIdDocumentInTx: jest.fn().mockResolvedValue(undefined),
+    };
     foliosService = {
       ensurePrimaryFolio: jest.fn().mockResolvedValue({ id: 'folio-1', status: 'open' }),
       postRoomChargeForDate: jest.fn().mockResolvedValue({ id: 'li-room' }),
@@ -515,6 +518,19 @@ describe('ReservationsService', () => {
       await service.walkIn(TENANT_ID, BRANCH_ID, dto, ACTOR_ID);
       expect(registrationCardsService.generateCardInTx).toHaveBeenCalledWith(tx, TENANT_ID, expect.objectContaining({ branch: { currency: 'NGN', regCardTemplate: null } }), ACTOR_ID);
     });
+
+    it('does not record an ID document when none is given', async () => {
+      tx.room.findFirst.mockResolvedValue({ id: ROOM_ID, branchId: BRANCH_ID, roomTypeId: TYPE_ID, occupancyStatus: 'vacant', heldStatus: null, deletedAt: null });
+      await service.walkIn(TENANT_ID, BRANCH_ID, dto, ACTOR_ID);
+      expect(guestsService.recordIdDocumentInTx).not.toHaveBeenCalled();
+    });
+
+    it('records the ID document against the walked-in guest when given', async () => {
+      tx.room.findFirst.mockResolvedValue({ id: ROOM_ID, branchId: BRANCH_ID, roomTypeId: TYPE_ID, occupancyStatus: 'vacant', heldStatus: null, deletedAt: null });
+      const idDocument = { idDocType: 'passport' as const, idDocNumber: 'P1234567' };
+      await service.walkIn(TENANT_ID, BRANCH_ID, { ...dto, idDocument }, ACTOR_ID);
+      expect(guestsService.recordIdDocumentInTx).toHaveBeenCalledWith(tx, TENANT_ID, BRANCH_ID, GUEST_ID, idDocument, ACTOR_ID);
+    });
   });
 
   describe('checkIn', () => {
@@ -574,6 +590,21 @@ describe('ReservationsService', () => {
       tx.room.findFirst.mockResolvedValue({ id: ROOM_ID, branchId: BRANCH_ID, roomTypeId: TYPE_ID, occupancyStatus: 'vacant', heldStatus: null, deletedAt: null, number: '204' });
       await service.checkIn(TENANT_ID, RESERVATION_ID, { roomId: ROOM_ID }, ACTOR_ID);
       expect(commsLogService.logAutomatedInTx).toHaveBeenCalledWith(tx, TENANT_ID, BRANCH_ID, expect.objectContaining({ guestId: GUEST_ID, trigger: 'checkin_receipt' }));
+    });
+
+    it('never blocks check-in when no ID document is given', async () => {
+      tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'confirmed', roomId: null }));
+      tx.room.findFirst.mockResolvedValue({ id: ROOM_ID, branchId: BRANCH_ID, roomTypeId: TYPE_ID, occupancyStatus: 'vacant', heldStatus: null, deletedAt: null });
+      await expect(service.checkIn(TENANT_ID, RESERVATION_ID, { roomId: ROOM_ID }, ACTOR_ID)).resolves.toBeDefined();
+      expect(guestsService.recordIdDocumentInTx).not.toHaveBeenCalled();
+    });
+
+    it('records the ID document against the reservation guest when given', async () => {
+      tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'confirmed', roomId: null }));
+      tx.room.findFirst.mockResolvedValue({ id: ROOM_ID, branchId: BRANCH_ID, roomTypeId: TYPE_ID, occupancyStatus: 'vacant', heldStatus: null, deletedAt: null });
+      const idDocument = { idDocType: 'national_id' as const, idDocNumber: 'N9988776' };
+      await service.checkIn(TENANT_ID, RESERVATION_ID, { roomId: ROOM_ID, idDocument }, ACTOR_ID);
+      expect(guestsService.recordIdDocumentInTx).toHaveBeenCalledWith(tx, TENANT_ID, BRANCH_ID, GUEST_ID, idDocument, ACTOR_ID);
     });
   });
 

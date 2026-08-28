@@ -1,5 +1,6 @@
-import { Body, Controller, Get, Param, ParseUUIDPipe, Post } from '@nestjs/common';
+import { Body, Controller, Get, Param, ParseUUIDPipe, Post, Res } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import type { Response } from 'express';
 import { CurrentTenant, CurrentUser } from '../../common/decorators';
 import { Roles, SystemRole } from '../../common/decorators/roles.decorator';
 import { JwtPayload } from '../../common/types/request-context';
@@ -36,6 +37,19 @@ export class RegistrationCardsController {
   @ApiOperation({ summary: 'Get a registration card' })
   getCard(@CurrentTenant() tenantId: string, @Param('cardId', ParseUUIDPipe) cardId: string): ReturnType<RegistrationCardsService['getCard']> {
     return this.registrationCardsService.getCard(tenantId, cardId);
+  }
+
+  @Get('registration-cards/:cardId/download')
+  @ApiOperation({ summary: 'Download the registration card as a PDF — the persisted signed document if signed, a live-rendered preview otherwise' })
+  async downloadCard(
+    @CurrentTenant() tenantId: string,
+    @Param('cardId', ParseUUIDPipe) cardId: string,
+    @Res() res: Response,
+  ): Promise<void> {
+    const pdf = await this.registrationCardsService.getCardPdf(tenantId, cardId);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="registration-card-${cardId}.pdf"`);
+    res.send(pdf);
   }
 
   @Post('registration-cards/:cardId/sign')

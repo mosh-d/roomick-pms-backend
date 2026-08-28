@@ -19,4 +19,6 @@ export const envValidationSchema = Joi.object({
   SENTRY_DSN: Joi.string().uri().allow('').optional(),
   // Optional — defaults to <os temp dir>/roomick-backups (see LocalFilesystemBackupStorage).
   BACKUP_STORAGE_DIR: Joi.string().allow('').optional(),
+  // Optional — defaults to <os temp dir>/roomick-documents (see LocalFilesystemDocumentStorage).
+  DOCUMENT_STORAGE_DIR: Joi.string().allow('').optional(),
 });

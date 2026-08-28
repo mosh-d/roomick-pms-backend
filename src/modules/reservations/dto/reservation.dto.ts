@@ -15,7 +15,7 @@ import {
   ValidateNested,
 } from 'class-validator';
 import { ReservationChannel, ReservationStatus } from '@prisma/client';
-import { CreateGuestDto } from '../../guests/dto/guest.dto';
+import { CreateGuestDto, RecordIdDocumentDto } from '../../guests/dto/guest.dto';
 
 /**
  * `guestId` (existing guest) and `guest` (inline create) are both optional
@@ -106,6 +106,12 @@ export class WalkInReservationDto {
   @Type(() => CreateGuestDto)
   guest?: CreateGuestDto;
 
+  @ApiPropertyOptional({ type: RecordIdDocumentDto, description: 'Optional — a walk-in IS an immediate check-in, so ID capture belongs here too' })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => RecordIdDocumentDto)
+  idDocument?: RecordIdDocumentDto;
+
   @ApiProperty()
   @IsUUID()
   roomTypeId!: string;
@@ -161,6 +167,12 @@ export class CheckInDto {
   @IsOptional()
   @IsUUID()
   roomId?: string;
+
+  @ApiPropertyOptional({ type: RecordIdDocumentDto, description: 'Optional — front desk may capture it later; never blocks check-in' })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => RecordIdDocumentDto)
+  idDocument?: RecordIdDocumentDto;
 }
 
 export class CancelReservationDto {

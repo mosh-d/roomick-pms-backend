@@ -406,6 +406,10 @@ export class ReservationsService {
       const folio = await this.foliosService.ensurePrimaryFolio(tx, reservation, actorId);
       await this.foliosService.postRoomChargeForDate(tx, reservation, folio, checkInDate, 'Walk-in', actorId);
 
+      if (dto.idDocument) {
+        await this.guestsService.recordIdDocumentInTx(tx, tenantId, branchId, guest.id, dto.idDocument, actorId);
+      }
+
       // A walk-in IS a check-in (create + immediate check-in in one call) — same "auto-generated when check-in is triggered" rule `checkIn` follows.
       await this.registrationCardsService.generateCardInTx(tx, tenantId, { ...reservation, branch: { currency: reservation.branch.currency, regCardTemplate: branch.regCardTemplate } }, actorId);
 
@@ -471,6 +475,10 @@ export class ReservationsService {
       // off the reservation rather than the room type.
       const folio = await this.foliosService.ensurePrimaryFolio(tx, updated, actorId);
       await this.foliosService.postRoomChargeForDate(tx, updated, folio, updated.checkInDate, 'Check-in', actorId);
+
+      if (dto.idDocument) {
+        await this.guestsService.recordIdDocumentInTx(tx, tenantId, reservation.branchId, updated.guestId, dto.idDocument, actorId);
+      }
 
       // "Auto-generated when check-in is triggered" (ref) — a legal
       // document, not an afterthought, so it's part of THIS transaction,

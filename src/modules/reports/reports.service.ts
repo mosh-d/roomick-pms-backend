@@ -4,6 +4,7 @@ import { toBranchDate } from '../../common/utils/branch-date';
 import { PrismaService, TenantTx } from '../../prisma/prisma.service';
 import { PropertyService } from '../property/property.service';
 import { ReportGroupBy, ReportQueryDto } from './dto/report-query.dto';
+import { renderReportPdf } from './report-pdf.util';
 
 const ZERO = new Prisma.Decimal(0);
 
@@ -321,6 +322,117 @@ export class ReportsService {
         byPaymentMethod: [...byPaymentMethod.entries()].map(([method, amount]) => ({ method, amount: amount.toFixed(2) })),
         trend,
       };
+    });
+  }
+
+  // --- PDF export — one `renderReportPdf` layout shared by all four report
+  // types (`report-pdf.util.ts`'s own header comment). Each method here is
+  // just the adapter from that report's own JSON shape to the generic
+  // {summary, tables} spec; the getX() call above it is the single source
+  // of truth for the numbers themselves — never recomputed here.
+
+  async getOccupancyPdf(tenantId: string, branchId: string, dto: ReportQueryDto): Promise<Buffer> {
+    const r = await this.getOccupancy(tenantId, branchId, dto);
+    return renderReportPdf({
+      title: 'Occupancy Report',
+      from: r.from,
+      to: r.to,
+      summary: [
+        { label: 'Room Nights Available', value: String(r.summary.roomNightsAvailable) },
+        { label: 'Room Nights Sold', value: String(r.summary.roomNightsSold) },
+        { label: 'Occupancy', value: `${r.summary.occupancyPct}%` },
+      ],
+      tables: [
+        {
+          heading: 'By Room Type',
+          columns: ['Room Type', 'Available', 'Sold', 'Occupancy %'],
+          rows: r.byRoomType.map((row) => [row.roomTypeName, String(row.roomNightsAvailable), String(row.roomNightsSold), `${row.occupancyPct}%`]),
+        },
+        {
+          heading: `Trend (${r.groupBy})`,
+          columns: ['Period', 'Available', 'Sold', 'Occupancy %'],
+          rows: r.trend.map((row) => [row.period, String(row.roomNightsAvailable), String(row.roomNightsSold), `${row.occupancyPct}%`]),
+        },
+      ],
+    });
+  }
+
+  async getAdrPdf(tenantId: string, branchId: string, dto: ReportQueryDto): Promise<Buffer> {
+    const r = await this.getAdr(tenantId, branchId, dto);
+    return renderReportPdf({
+      title: 'ADR Report (Average Daily Rate)',
+      from: r.from,
+      to: r.to,
+      summary: [
+        { label: 'Room Nights Sold', value: String(r.summary.roomNightsSold) },
+        { label: 'Room Revenue', value: `${r.currency} ${r.summary.roomRevenue}` },
+        { label: 'ADR', value: `${r.currency} ${r.summary.adr}` },
+      ],
+      tables: [
+        {
+          heading: 'By Room Type',
+          columns: ['Room Type', 'Sold', 'Revenue', 'ADR'],
+          rows: r.byRoomType.map((row) => [row.roomTypeName, String(row.roomNightsSold), row.roomRevenue, row.adr]),
+        },
+        {
+          heading: 'Daily Trend',
+          columns: ['Date', 'Sold', 'Revenue', 'ADR'],
+          rows: r.trend.map((row) => [row.period, String(row.roomNightsSold), row.roomRevenue, row.adr]),
+        },
+      ],
+    });
+  }
+
+  async getRevparPdf(tenantId: string, branchId: string, dto: ReportQueryDto): Promise<Buffer> {
+    const r = await this.getRevpar(tenantId, branchId, dto);
+    return renderReportPdf({
+      title: 'RevPAR Report (Revenue Per Available Room)',
+      from: r.from,
+      to: r.to,
+      summary: [
+        { label: 'Room Nights Available', value: String(r.summary.roomNightsAvailable) },
+        { label: 'Room Revenue', value: `${r.currency} ${r.summary.roomRevenue}` },
+        { label: 'RevPAR', value: `${r.currency} ${r.summary.revpar}` },
+      ],
+      tables: [
+        {
+          heading: 'By Room Type',
+          columns: ['Room Type', 'Available', 'Revenue', 'RevPAR'],
+          rows: r.byRoomType.map((row) => [row.roomTypeName, String(row.roomNightsAvailable), row.roomRevenue, row.revpar]),
+        },
+        {
+          heading: 'Daily Trend',
+          columns: ['Date', 'Available', 'Revenue', 'RevPAR'],
+          rows: r.trend.map((row) => [row.period, String(row.roomNightsAvailable), row.roomRevenue, row.revpar]),
+        },
+      ],
+    });
+  }
+
+  async getRevenuePdf(tenantId: string, branchId: string, dto: ReportQueryDto): Promise<Buffer> {
+    const r = await this.getRevenue(tenantId, branchId, dto);
+    return renderReportPdf({
+      title: 'Revenue Report',
+      from: r.from,
+      to: r.to,
+      summary: [{ label: 'Total Revenue', value: `${r.currency} ${r.summary.totalRevenue}` }],
+      tables: [
+        {
+          heading: 'By Department',
+          columns: ['Department', 'Amount'],
+          rows: r.byDepartment.map((row) => [row.chargeType, `${r.currency} ${row.amount}`]),
+        },
+        {
+          heading: 'By Payment Method',
+          columns: ['Method', 'Amount'],
+          rows: r.byPaymentMethod.map((row) => [row.method, `${r.currency} ${row.amount}`]),
+        },
+        {
+          heading: 'Daily Trend',
+          columns: ['Date', 'Amount'],
+          rows: r.trend.map((row) => [row.period, `${r.currency} ${row.amount}`]),
+        },
+      ],
     });
   }
 }
