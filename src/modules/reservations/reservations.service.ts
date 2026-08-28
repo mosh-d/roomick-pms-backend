@@ -9,10 +9,13 @@ import { GuestsService } from '../guests/guests.service';
 import { CreateGuestDto } from '../guests/dto/guest.dto';
 import { FoliosService } from '../folios/folios.service';
 import {
+  AvailabilityCalendarQueryDto,
   AvailabilityQueryDto,
   CancelReservationDto,
   CheckInDto,
   CreateReservationDto,
+  ListReservationsQueryDto,
+  ModifyReservationDto,
   WalkInReservationDto,
 } from './dto/reservation.dto';
 
@@ -20,6 +23,11 @@ const RESERVATION_INCLUDE = {
   guest: { select: { id: true, name: true, email: true, phone: true } },
   roomType: { select: { id: true, name: true } },
   room: { select: { id: true, number: true } },
+  // Reservations carry no currency field of their own — a reservation's
+  // money is always the branch's own currency. Included here so any screen
+  // showing `confirmedRate` (e.g. Modify Reservation's cost preview) can
+  // format it correctly without a second round-trip to fetch the branch.
+  branch: { select: { currency: true } },
 } as const;
 
 const MAX_AVAILABILITY_RANGE_DAYS = 92;
@@ -51,6 +59,36 @@ export class ReservationsService {
   }
 
   /**
+   * The Availability Calendar (ref p21): every active room type at the
+   * branch, per-night available counts across a full month. Loops
+   * `computeAvailabilityPerNight` per room type rather than a single
+   * combined query — branches have a handful of room types (single digits
+   * in practice), and reusing the already-correct, already-tested
+   * per-room-type logic beats a riskier rewrite for what's still 3 queries
+   * per room type, not per day.
+   */
+  async getAvailabilityCalendar(tenantId: string, branchId: string, dto: AvailabilityCalendarQueryDto) {
+    const from = new Date(Date.UTC(dto.year, dto.month - 1, 1));
+    const to = new Date(Date.UTC(dto.year, dto.month, 1));
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      await this.propertyService.assertBranch(tx, branchId);
+      const roomTypes = await tx.roomType.findMany({
+        where: { branchId, deletedAt: null },
+        select: { id: true, name: true },
+        orderBy: { name: 'asc' },
+      });
+      const roomTypesWithAvailability = await Promise.all(
+        roomTypes.map(async (roomType) => ({
+          roomTypeId: roomType.id,
+          roomTypeName: roomType.name,
+          nights: await this.computeAvailabilityPerNight(tx, branchId, roomType.id, from, to),
+        })),
+      );
+      return { year: dto.year, month: dto.month, roomTypes: roomTypesWithAvailability };
+    });
+  }
+
+  /**
    * 3 queries total regardless of range length, then bucketed per night in
    * JS. `Room.heldStatus` (a static flag) and `RoomBlock` (a date-ranged
    * table) are two DIFFERENT mechanisms — both must reduce the pool, not
@@ -69,6 +107,7 @@ export class ReservationsService {
     roomTypeId: string,
     from: Date,
     to: Date,
+    excludeReservationId?: string,
   ): Promise<Array<{ date: string; available: number }>> {
     const physicalPool = await tx.room.count({
       where: { branchId, roomTypeId, deletedAt: null, heldStatus: null },
@@ -91,6 +130,11 @@ export class ReservationsService {
         status: { in: [...HOLDING_STATUSES] },
         checkInDate: { lt: to },
         checkOutDate: { gt: from },
+        // Modifying a reservation re-checks availability for its (possibly
+        // unchanged) dates — without this exclusion, the reservation would
+        // count as occupying a room against itself, wrongly reporting no
+        // availability for a change that doesn't actually need a new room.
+        ...(excludeReservationId ? { id: { not: excludeReservationId } } : {}),
       },
       select: { checkInDate: true, checkOutDate: true },
     });
@@ -144,7 +188,12 @@ export class ReservationsService {
       // the common "double-book the last room" race without needing a
       // specific room to lock (none is assigned until check-in).
       await tx.$queryRaw`SELECT id FROM room_types WHERE id = ${dto.roomTypeId}::uuid FOR UPDATE`;
-      await this.assertAvailableForStay(tx, branchId, dto.roomTypeId, checkInDate, checkOutDate);
+      // `joinWaitlist` is an explicit request to skip the availability
+      // check, not an automatic fallback — a plain booking that finds no
+      // rooms still throws `RESERVATION_NOT_AVAILABLE`, same as before.
+      if (!dto.joinWaitlist) {
+        await this.assertAvailableForStay(tx, branchId, dto.roomTypeId, checkInDate, checkOutDate);
+      }
 
       const confirmedRate = this.calculateFlatRate(roomType, checkInDate, checkOutDate);
       const confirmationNumber = await this.generateConfirmationNumber(tx, branchId);
@@ -156,7 +205,7 @@ export class ReservationsService {
         roomTypeId: dto.roomTypeId,
         confirmationNumber,
         confirmedRate,
-        status: 'confirmed',
+        status: dto.joinWaitlist ? 'waitlisted' : 'confirmed',
         channel: dto.channel ?? 'direct',
         checkInDate,
         checkOutDate,
@@ -362,6 +411,101 @@ export class ReservationsService {
     });
   }
 
+  /**
+   * Modify Reservation (ref p23) — dates, room type, and party size, for a
+   * reservation that hasn't happened yet. Deliberately restricted to
+   * `confirmed`/`waitlisted`: a `checked_in` stay already has folio charges
+   * posted against its original dates/rate (§4.5's append-only ledger), so
+   * shortening or extending it needs charge corrections, not a plain field
+   * update — a real, separate piece of work, explicitly deferred (see
+   * PHASE_NOTES.md). A `checked_out`/`cancelled`/`no_show` reservation is
+   * history, not something to edit.
+   *
+   * Every field is optional (only what's actually changing needs to be
+   * sent), but a rate/availability change always re-derives from the
+   * reservation's CURRENT stored values for anything not provided — never
+   * from stale client-supplied echoes of them.
+   */
+  async modifyReservation(tenantId: string, reservationId: string, dto: ModifyReservationDto, actorId: string) {
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const reservation = await this.findReservationOrThrow(tx, reservationId);
+      if (!['confirmed', 'waitlisted'].includes(reservation.status)) {
+        throw new ConflictException({
+          code: ErrorCode.INVALID_STATUS_TRANSITION,
+          message: `Cannot modify a reservation with status "${reservation.status}" — only confirmed or waitlisted reservations can be changed here`,
+        });
+      }
+
+      const checkInDate = dto.checkInDate ? toBranchDate(dto.checkInDate) : reservation.checkInDate;
+      const checkOutDate = dto.checkOutDate ? toBranchDate(dto.checkOutDate) : reservation.checkOutDate;
+      this.assertValidRange(checkInDate, checkOutDate);
+      const roomTypeId = dto.roomTypeId ?? reservation.roomTypeId;
+      const roomType = await this.assertRoomType(tx, reservation.branchId, roomTypeId);
+
+      const datesOrRoomTypeChanged =
+        checkInDate.getTime() !== reservation.checkInDate.getTime() ||
+        checkOutDate.getTime() !== reservation.checkOutDate.getTime() ||
+        roomTypeId !== reservation.roomTypeId;
+      // A waitlisted reservation holds no inventory (not in HOLDING_STATUSES),
+      // so it never needs to pass this check against itself — but a
+      // confirmed one is checked EXCLUDING its own current hold, so
+      // shrinking a stay or nudging it by a day doesn't get rejected for
+      // "conflicting" with the booking being changed.
+      if (datesOrRoomTypeChanged && reservation.status === 'confirmed') {
+        await this.assertAvailableForStay(tx, reservation.branchId, roomTypeId, checkInDate, checkOutDate, reservationId);
+      }
+
+      const confirmedRate = this.calculateFlatRate(roomType, checkInDate, checkOutDate);
+
+      const updated = await tx.reservation.update({
+        where: { id: reservationId },
+        data: {
+          checkInDate,
+          checkOutDate,
+          roomTypeId,
+          confirmedRate,
+          adults: dto.adults ?? reservation.adults,
+          children: dto.children ?? reservation.children,
+        },
+        include: RESERVATION_INCLUDE,
+      });
+
+      await this.audit(tx, tenantId, reservation.branchId, actorId, 'reservation.modified', reservationId, {
+        reason: dto.reason,
+        before: { checkInDate: reservation.checkInDate, checkOutDate: reservation.checkOutDate, roomTypeId: reservation.roomTypeId, confirmedRate: reservation.confirmedRate.toFixed(2) },
+        after: { checkInDate, checkOutDate, roomTypeId, confirmedRate: confirmedRate.toFixed(2) },
+      });
+      return updated;
+    });
+  }
+
+  /**
+   * Waitlist Management's "Promote" action — re-checks availability for the
+   * reservation's own dates/room type and, if a room has since opened up,
+   * flips it to `confirmed`. Throws `RESERVATION_NOT_AVAILABLE` (same code
+   * a normal booking attempt throws) if nothing has opened up yet — the
+   * caller stays waitlisted, nothing changes.
+   */
+  async promoteFromWaitlist(tenantId: string, reservationId: string, actorId: string) {
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const reservation = await this.findReservationOrThrow(tx, reservationId);
+      if (reservation.status !== 'waitlisted') {
+        throw new ConflictException({
+          code: ErrorCode.INVALID_STATUS_TRANSITION,
+          message: `Cannot promote a reservation with status "${reservation.status}" — only a waitlisted one can be promoted`,
+        });
+      }
+      await this.assertAvailableForStay(tx, reservation.branchId, reservation.roomTypeId, reservation.checkInDate, reservation.checkOutDate);
+      const updated = await tx.reservation.update({
+        where: { id: reservationId },
+        data: { status: 'confirmed' },
+        include: RESERVATION_INCLUDE,
+      });
+      await this.audit(tx, tenantId, reservation.branchId, actorId, 'reservation.promoted', reservationId);
+      return updated;
+    });
+  }
+
   // -------------------------------------------------------------------------
   // Reads
   // -------------------------------------------------------------------------
@@ -389,6 +533,38 @@ export class ReservationsService {
         where: { branchId, deletedAt: null, status: 'checked_in', checkOutDate: day },
         include: RESERVATION_INCLUDE,
         orderBy: { createdAt: 'asc' },
+      });
+    });
+  }
+
+  /**
+   * The general search/filter behind Modify Reservation, Cancel
+   * Reservation, and Waitlist Management's "find the reservation" step,
+   * and the Reservations hub's own stat cards — the one thing "Reservations"
+   * being a sidebar item with no page behind it was missing since Phase 24.
+   * Capped at 100 rows: a real search field, not a full-table browse.
+   */
+  async listReservations(tenantId: string, branchId: string, dto: ListReservationsQueryDto) {
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      await this.propertyService.assertBranch(tx, branchId);
+      const search = dto.search?.trim();
+      return tx.reservation.findMany({
+        where: {
+          branchId,
+          deletedAt: null,
+          ...(dto.status ? { status: dto.status } : {}),
+          ...(search
+            ? {
+                OR: [
+                  { confirmationNumber: { contains: search, mode: 'insensitive' } },
+                  { guest: { name: { contains: search, mode: 'insensitive' } } },
+                ],
+              }
+            : {}),
+        },
+        include: RESERVATION_INCLUDE,
+        orderBy: { createdAt: 'desc' },
+        take: 100,
       });
     });
   }
@@ -433,8 +609,9 @@ export class ReservationsService {
     roomTypeId: string,
     checkInDate: Date,
     checkOutDate: Date,
+    excludeReservationId?: string,
   ): Promise<void> {
-    const perNight = await this.computeAvailabilityPerNight(tx, branchId, roomTypeId, checkInDate, checkOutDate);
+    const perNight = await this.computeAvailabilityPerNight(tx, branchId, roomTypeId, checkInDate, checkOutDate, excludeReservationId);
     if (perNight.some((n) => n.available < 1)) {
       throw new ConflictException({ code: ErrorCode.RESERVATION_NOT_AVAILABLE, message: 'No rooms of this type are available for the full requested stay' });
     }

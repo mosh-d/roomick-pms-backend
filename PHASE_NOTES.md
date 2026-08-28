@@ -1,5 +1,34 @@
 # Phase Notes
 
+## Reservations module — search, availability calendar, modify, waitlist (2026-08-28)
+
+Frontend half in `roomick-pms-frontend/PHASE_NOTES.md`. The reference's own sequence is Front Desk → Reservations → Housekeeping → Billing and Payments; Billing was done, so this is Reservations — six cards (Availability Calendar, Create, Modify, Cancel, Waitlist, Rate Plan Management), and the sidebar's "Reservations" row had pointed nowhere since Phase 24 flagged it inert.
+
+### Delivered
+- **`GET /branches/:branchId/reservations`** — general search/filter (status, and/or confirmation number or guest name, case-insensitive, capped at 100 rows). The one thing missing for Modify/Cancel/Waitlist's own "find the reservation" step and the hub's own stat cards.
+- **`GET /branches/:branchId/availability-calendar`** — every active room type at the branch, per-night available counts across a full month. Loops the existing `computeAvailabilityPerNight` per room type rather than a combined query — branches have a handful of room types, and reusing already-correct logic beat a riskier rewrite.
+- **`PATCH /reservations/:reservationId/modify`** — dates, room type, party size, on a `confirmed`/`waitlisted` reservation only. Re-checks availability EXCLUDING the reservation's own current hold (new `excludeReservationId` param threaded through `computeAvailabilityPerNight`/`assertAvailableForStay`) so changing something about a booking doesn't get rejected for "conflicting" with itself. Recomputes `confirmedRate` from the (possibly new) room type's `baseRate × nights` — same flat-rate derivation everything else in this app uses. `reason` is mandatory, mirroring `FoliosService.correctLineItem`'s append-only discipline applied to the reservation itself.
+- **Waitlist, end to end**: `CreateReservationDto.joinWaitlist` skips the availability check and books as `waitlisted` instead of `confirmed` — an explicit request, not an automatic fallback when a normal booking fails. **`POST /reservations/:reservationId/promote`** re-checks availability for a waitlisted reservation's own dates/room type and confirms it if a room has opened up; throws the same `RESERVATION_NOT_AVAILABLE` a normal booking would if nothing has, and the reservation stays waitlisted.
+- **`RESERVATION_INCLUDE` gained `branch: { select: { currency } }`** — reservations carry no currency of their own (a reservation's money is always the branch's), and Modify Reservation's cost preview needed one without a second round-trip.
+
+### Decisions & deviations (the full reference vs. what shipped)
+The reference's Create/Modify/Cancel screens are each a full page of machinery this pass doesn't build — named explicitly, not silently dropped:
+1. **No rate-plan resolver.** Every price here is flat `baseRate × nights`, same as Walk-In Booking and check-in already use. The reference's promotional-code/negotiated-rate/base-rate picker needs a cascade-tier resolver — a module on the scale of Taxes or Folios, not a slice of this one. **Rate Plan Management stays inert** on the hub for exactly this reason, even though `RatePlan` already exists as a schema model.
+2. **Create Reservation is individual-only** — no group/multi-room booking, no ID capture, no payment/deposit collection at booking time. Each of those is a real subsystem (group-booking semantics, encrypted ID-document storage, a payments-at-booking flow) that doesn't exist yet.
+3. **Modify Reservation is pre-check-in only** (`confirmed`/`waitlisted`). A `checked_in` stay already has folio charges posted against its original dates (§4.5's append-only ledger) — shortening or extending it needs charge corrections, not a plain field update. That's real, separate work, deferred here.
+4. **Cancel Reservation has no cancellation-policy or penalty/refund calculation.** The reference's Cancellation Policy Summary and Penalty & Refund section both assume a branch-level cancellation-policy concept that doesn't exist in the schema — nothing like `Branch.noShowPolicy` for cancellations. `ReservationsService.cancel` (already built, unchanged this pass) does exactly what it always did: flip to `cancelled` with an optional reason.
+5. **The Availability Calendar is per-room-TYPE, not per-room.** The reference draws a Gantt chart — individual room rows, guest-name bars spanning their exact stay. This returns per-night AVAILABLE COUNTS per room type instead; the full per-room view is a real visualization project (the same day-by-day occupancy data the Room Status Board already renders live, but for TODAY only — extending that to an arbitrary month of individual reservation bars wasn't a slice of this phase).
+
+### Verified
+`npx tsc --noEmit`, `npm run lint`, `npm test` (174 tests total, 18 new for reservations: `joinWaitlist` skips the availability check and creates as waitlisted, still rejects an invalid range, a normal booking's zero-availability rejection is unchanged; `modifyReservation` rejects checked_in/cancelled, recomputes the rate for the new night count, re-checks availability excluding its own hold, skips that check entirely for a waitlisted reservation or when nothing that affects availability changed, rejects an invalid range, rejects when the new dates/room type have no room, leaves unset fields unchanged; `promoteFromWaitlist` rejects non-waitlisted, promotes when available, stays waitlisted (throws) when not; `listReservations` filters by status, searches confirmation number OR guest name case-insensitively, caps at 100; `getAvailabilityCalendar` returns every active room type's per-night availability for the requested month).
+
+Live, against real data, including two paths that only prove anything under a GENUINELY exhausted room type (not a mocked failure — every unit of a real room type was actually booked out first via direct API calls): Create Reservation against a full room type returns `RESERVATION_NOT_AVAILABLE` and offers the waitlist path; joining the waitlist creates a real `waitlisted` reservation; promoting it while still full correctly fails and leaves it waitlisted.
+
+### Carried forward
+- Rate Plan Management, group/multi-room bookings, ID capture, payment/deposit at booking, cancellation policy + penalty/refund, per-room Gantt-view availability, Modify for an already-checked-in stay — all named above, all deferred.
+- Housekeeping (Task Board, Staff Assignment, Inspection Workflow, Room Blocking/OOO — ref p27-31) is next in the reference's own sequence and hasn't been started.
+- Everything else already carried forward from the Split Billing entry below — unchanged.
+
 ## Split billing — additional folios and charge transfer (2026-08-27)
 
 Ref p34. A reservation can now carry more than one folio, and posted charges can move between them — the company pays the room, the guest pays the minibar.

@@ -1,6 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
+  IsBoolean,
   IsIn,
   IsInt,
   IsISO8601,
@@ -11,7 +12,7 @@ import {
   Min,
   ValidateNested,
 } from 'class-validator';
-import { ReservationChannel } from '@prisma/client';
+import { ReservationChannel, ReservationStatus } from '@prisma/client';
 import { CreateGuestDto } from '../../guests/dto/guest.dto';
 
 /**
@@ -70,6 +71,14 @@ export class CreateReservationDto {
   @IsOptional()
   @IsIn(Object.values(ReservationChannel))
   channel?: ReservationChannel;
+
+  @ApiPropertyOptional({
+    description:
+      'When true, skips the availability check and creates the reservation as `waitlisted` instead of `confirmed` — the explicit "join the waitlist" path (ref: Waitlist Management), not an automatic fallback when a normal booking happens to fail.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  joinWaitlist?: boolean;
 }
 
 export class WalkInReservationDto {
@@ -149,4 +158,83 @@ export class AvailabilityQueryDto {
   @ApiProperty()
   @IsUUID()
   roomTypeId!: string;
+}
+
+export class AvailabilityCalendarQueryDto {
+  @ApiProperty({ example: 2026 })
+  @Type(() => Number)
+  @IsInt()
+  @Min(2000)
+  @Max(2100)
+  year!: number;
+
+  @ApiProperty({ example: 6, description: '1-12' })
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(12)
+  month!: number;
+}
+
+/**
+ * Backs Modify Reservation, Cancel Reservation, and Waitlist Management's
+ * shared "find the reservation" step, and the Reservations hub's own
+ * stat cards — one general list endpoint rather than three near-identical
+ * ones. `search` matches confirmation number or guest name, case-
+ * insensitively, on the DB side (not fetch-everything-then-filter).
+ */
+export class ListReservationsQueryDto {
+  @ApiPropertyOptional({ enum: ReservationStatus })
+  @IsOptional()
+  @IsIn(Object.values(ReservationStatus))
+  status?: ReservationStatus;
+
+  @ApiPropertyOptional({ example: 'John Doe or RES-2026-00001' })
+  @IsOptional()
+  @MaxLength(200)
+  search?: string;
+}
+
+/**
+ * Pre-check-in only (§ see `ReservationsService.modifyReservation`'s own
+ * comment for why): every field is optional so a caller can change just
+ * one thing, but `reason` is mandatory — same "append-only ledger, no
+ * silent edits" discipline `FoliosService.correctLineItem` already
+ * enforces, applied here to the reservation itself.
+ */
+export class ModifyReservationDto {
+  @ApiPropertyOptional({ example: '2026-09-02' })
+  @IsOptional()
+  @IsISO8601({ strict: true })
+  checkInDate?: string;
+
+  @ApiPropertyOptional({ example: '2026-09-05' })
+  @IsOptional()
+  @IsISO8601({ strict: true })
+  checkOutDate?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsUUID()
+  roomTypeId?: string;
+
+  @ApiPropertyOptional({ example: 2 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(20)
+  adults?: number;
+
+  @ApiPropertyOptional({ example: 0 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(20)
+  children?: number;
+
+  @ApiProperty({ example: 'Guest requested an extra night' })
+  @MaxLength(500)
+  reason!: string;
 }

@@ -1,13 +1,16 @@
-import { Body, Controller, Get, Param, ParseUUIDPipe, Post, Query } from '@nestjs/common';
+import { Body, Controller, Get, Param, ParseUUIDPipe, Patch, Post, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentTenant, CurrentUser } from '../../common/decorators';
 import { Roles, SystemRole } from '../../common/decorators/roles.decorator';
 import { JwtPayload } from '../../common/types/request-context';
 import {
+  AvailabilityCalendarQueryDto,
   AvailabilityQueryDto,
   CancelReservationDto,
   CheckInDto,
   CreateReservationDto,
+  ListReservationsQueryDto,
+  ModifyReservationDto,
   WalkInReservationDto,
 } from './dto/reservation.dto';
 import { ReservationsService } from './reservations.service';
@@ -50,6 +53,26 @@ export class ReservationsController {
     @Query() query: AvailabilityQueryDto,
   ): ReturnType<ReservationsService['getAvailability']> {
     return this.reservationsService.getAvailability(tenantId, branchId, query);
+  }
+
+  @Get('branches/:branchId/availability-calendar')
+  @ApiOperation({ summary: 'Every room type at this branch, per-night available counts across a full month' })
+  getAvailabilityCalendar(
+    @CurrentTenant() tenantId: string,
+    @Param('branchId', ParseUUIDPipe) branchId: string,
+    @Query() query: AvailabilityCalendarQueryDto,
+  ): ReturnType<ReservationsService['getAvailabilityCalendar']> {
+    return this.reservationsService.getAvailabilityCalendar(tenantId, branchId, query);
+  }
+
+  @Get('branches/:branchId/reservations')
+  @ApiOperation({ summary: 'Search/filter reservations at this branch (by status, and/or confirmation number or guest name)' })
+  listReservations(
+    @CurrentTenant() tenantId: string,
+    @Param('branchId', ParseUUIDPipe) branchId: string,
+    @Query() query: ListReservationsQueryDto,
+  ): ReturnType<ReservationsService['listReservations']> {
+    return this.reservationsService.listReservations(tenantId, branchId, query);
   }
 
   @Get('branches/:branchId/arrivals')
@@ -123,5 +146,28 @@ export class ReservationsController {
     @Body() dto: CancelReservationDto,
   ): ReturnType<ReservationsService['cancel']> {
     return this.reservationsService.cancel(tenantId, reservationId, dto, user.sub);
+  }
+
+  @Patch('reservations/:reservationId/modify')
+  @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk)
+  @ApiOperation({ summary: 'Change dates, room type, or party size on a confirmed or waitlisted reservation (pre-check-in only)' })
+  modifyReservation(
+    @CurrentTenant() tenantId: string,
+    @CurrentUser() user: JwtPayload,
+    @Param('reservationId', ParseUUIDPipe) reservationId: string,
+    @Body() dto: ModifyReservationDto,
+  ): ReturnType<ReservationsService['modifyReservation']> {
+    return this.reservationsService.modifyReservation(tenantId, reservationId, dto, user.sub);
+  }
+
+  @Post('reservations/:reservationId/promote')
+  @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk)
+  @ApiOperation({ summary: 'Promote a waitlisted reservation to confirmed, if a room has opened up' })
+  promoteFromWaitlist(
+    @CurrentTenant() tenantId: string,
+    @CurrentUser() user: JwtPayload,
+    @Param('reservationId', ParseUUIDPipe) reservationId: string,
+  ): ReturnType<ReservationsService['promoteFromWaitlist']> {
+    return this.reservationsService.promoteFromWaitlist(tenantId, reservationId, user.sub);
   }
 }

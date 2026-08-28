@@ -24,6 +24,9 @@ function reservation(overrides: Partial<Record<string, unknown>> = {}) {
     status: 'confirmed',
     checkInDate: new Date('2026-09-01T00:00:00.000Z'),
     checkOutDate: new Date('2026-09-04T00:00:00.000Z'),
+    adults: 2,
+    children: 0,
+    confirmedRate: { toFixed: () => '300.00' },
     deletedAt: null,
     ...overrides,
   };
@@ -32,7 +35,10 @@ function reservation(overrides: Partial<Record<string, unknown>> = {}) {
 function makeTx() {
   return {
     room: { count: jest.fn().mockResolvedValue(5), findFirst: jest.fn() },
-    roomType: { findFirst: jest.fn().mockResolvedValue({ id: TYPE_ID, branchId: BRANCH_ID, baseRate: '100.00' }) },
+    roomType: {
+      findFirst: jest.fn().mockResolvedValue({ id: TYPE_ID, branchId: BRANCH_ID, baseRate: '100.00' }),
+      findMany: jest.fn().mockResolvedValue([{ id: TYPE_ID, name: 'Standard' }]),
+    },
     roomBlock: { findMany: jest.fn().mockResolvedValue([]), findFirst: jest.fn().mockResolvedValue(null) },
     reservation: {
       findMany: jest.fn().mockResolvedValue([]),
@@ -195,6 +201,23 @@ describe('ReservationsService', () => {
       await service.createReservation(TENANT_ID, BRANCH_ID, dto, ACTOR_ID);
       expect(tx.reservation.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ channel: 'direct' }) }));
     });
+
+    it('joinWaitlist SKIPS the availability check and creates as waitlisted', async () => {
+      tx.room.count.mockResolvedValue(0); // zero availability — would reject a normal booking
+      await service.createReservation(TENANT_ID, BRANCH_ID, { ...dto, joinWaitlist: true }, ACTOR_ID);
+      expect(tx.reservation.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: 'waitlisted' }) }));
+    });
+
+    it('joinWaitlist still rejects an invalid date range', async () => {
+      await expect(
+        service.createReservation(TENANT_ID, BRANCH_ID, { ...dto, joinWaitlist: true, checkOutDate: '2026-09-01' }, ACTOR_ID),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('without joinWaitlist, zero availability is still rejected as before', async () => {
+      tx.room.count.mockResolvedValue(0);
+      await expect(service.createReservation(TENANT_ID, BRANCH_ID, dto, ACTOR_ID)).rejects.toThrow(ConflictException);
+    });
   });
 
   describe('walkIn', () => {
@@ -332,6 +355,131 @@ describe('ReservationsService', () => {
     it('404s on a missing reservation', async () => {
       tx.reservation.findFirst.mockResolvedValue(null);
       await expect(service.getById(TENANT_ID, RESERVATION_ID)).rejects.toThrow(NotFoundException);
+    });
+  });
+
+  describe('modifyReservation', () => {
+    const dto = { checkInDate: '2026-09-01', checkOutDate: '2026-09-05', reason: 'Guest requested an extra night' };
+
+    it('rejects a checked_in reservation — needs folio reconciliation, out of scope here', async () => {
+      tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'checked_in' }));
+      await expect(service.modifyReservation(TENANT_ID, RESERVATION_ID, dto, ACTOR_ID)).rejects.toThrow(ConflictException);
+    });
+
+    it('rejects a cancelled reservation', async () => {
+      tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'cancelled' }));
+      await expect(service.modifyReservation(TENANT_ID, RESERVATION_ID, dto, ACTOR_ID)).rejects.toThrow(ConflictException);
+    });
+
+    it('recomputes confirmedRate = baseRate × the NEW night count', async () => {
+      tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'confirmed' }));
+      const result = await service.modifyReservation(TENANT_ID, RESERVATION_ID, dto, ACTOR_ID);
+      // 2026-09-01 -> 2026-09-05 = 4 nights, baseRate 100 -> 400
+      expect(String((result as unknown as { confirmedRate: unknown }).confirmedRate)).toBe('400');
+    });
+
+    it('re-checks availability EXCLUDING its own current hold when dates change', async () => {
+      tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'confirmed' }));
+      await service.modifyReservation(TENANT_ID, RESERVATION_ID, dto, ACTOR_ID);
+      expect(tx.reservation.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: expect.objectContaining({ id: { not: RESERVATION_ID } }) }),
+      );
+    });
+
+    it('does NOT re-check availability for a waitlisted reservation (it holds no inventory)', async () => {
+      tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'waitlisted' }));
+      await service.modifyReservation(TENANT_ID, RESERVATION_ID, dto, ACTOR_ID);
+      expect(tx.reservation.findMany).not.toHaveBeenCalled();
+    });
+
+    it('skips the availability check entirely when neither dates nor room type change', async () => {
+      tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'confirmed' }));
+      await service.modifyReservation(TENANT_ID, RESERVATION_ID, { adults: 3, reason: 'One more guest' }, ACTOR_ID);
+      expect(tx.reservation.findMany).not.toHaveBeenCalled();
+      expect(tx.reservation.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ adults: 3 }) }));
+    });
+
+    it('rejects checkOutDate <= checkInDate', async () => {
+      tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'confirmed' }));
+      await expect(
+        service.modifyReservation(TENANT_ID, RESERVATION_ID, { checkInDate: '2026-09-05', checkOutDate: '2026-09-01', reason: 'x' }, ACTOR_ID),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('rejects when the new dates/room type have no availability', async () => {
+      tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'confirmed' }));
+      tx.room.count.mockResolvedValue(0);
+      await expect(service.modifyReservation(TENANT_ID, RESERVATION_ID, dto, ACTOR_ID)).rejects.toThrow(ConflictException);
+    });
+
+    it('a field left unset keeps its current value', async () => {
+      tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'confirmed', adults: 2, children: 1 }));
+      await service.modifyReservation(TENANT_ID, RESERVATION_ID, { adults: 4, reason: 'x' }, ACTOR_ID);
+      expect(tx.reservation.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ adults: 4, children: 1 }) }));
+    });
+  });
+
+  describe('promoteFromWaitlist', () => {
+    it('rejects a non-waitlisted reservation', async () => {
+      tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'confirmed' }));
+      await expect(service.promoteFromWaitlist(TENANT_ID, RESERVATION_ID, ACTOR_ID)).rejects.toThrow(ConflictException);
+    });
+
+    it('promotes to confirmed when a room has opened up', async () => {
+      tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'waitlisted' }));
+      tx.room.count.mockResolvedValue(3);
+      await service.promoteFromWaitlist(TENANT_ID, RESERVATION_ID, ACTOR_ID);
+      expect(tx.reservation.update).toHaveBeenCalledWith(expect.objectContaining({ data: { status: 'confirmed' } }));
+    });
+
+    it('stays waitlisted (throws) when nothing has opened up yet', async () => {
+      tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'waitlisted' }));
+      tx.room.count.mockResolvedValue(0);
+      await expect(service.promoteFromWaitlist(TENANT_ID, RESERVATION_ID, ACTOR_ID)).rejects.toThrow(ConflictException);
+      expect(tx.reservation.update).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('listReservations', () => {
+    it('filters by status when given', async () => {
+      await service.listReservations(TENANT_ID, BRANCH_ID, { status: 'waitlisted' });
+      expect(tx.reservation.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: expect.objectContaining({ status: 'waitlisted' }) }),
+      );
+    });
+
+    it('searches confirmation number OR guest name, case-insensitively', async () => {
+      await service.listReservations(TENANT_ID, BRANCH_ID, { search: 'John' });
+      expect(tx.reservation.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            OR: [
+              { confirmationNumber: { contains: 'John', mode: 'insensitive' } },
+              { guest: { name: { contains: 'John', mode: 'insensitive' } } },
+            ],
+          }),
+        }),
+      );
+    });
+
+    it('caps results at 100', async () => {
+      await service.listReservations(TENANT_ID, BRANCH_ID, {});
+      expect(tx.reservation.findMany).toHaveBeenCalledWith(expect.objectContaining({ take: 100 }));
+    });
+  });
+
+  describe('getAvailabilityCalendar', () => {
+    it('returns per-night availability for every active room type at the branch', async () => {
+      tx.roomType.findMany.mockResolvedValue([
+        { id: TYPE_ID, name: 'Standard' },
+        { id: 'other-type', name: 'Deluxe' },
+      ]);
+      tx.room.count.mockResolvedValue(5);
+      const result = await service.getAvailabilityCalendar(TENANT_ID, BRANCH_ID, { year: 2026, month: 6 });
+      expect(result.roomTypes).toHaveLength(2);
+      expect(result.roomTypes[0]).toEqual(expect.objectContaining({ roomTypeId: TYPE_ID, roomTypeName: 'Standard' }));
+      // June 2026 has 30 nights
+      expect(result.roomTypes[0].nights).toHaveLength(30);
     });
   });
 });
