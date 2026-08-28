@@ -204,6 +204,24 @@ describe('ReservationsService', () => {
     });
 
     /**
+     * confirmationNumber used to be a bare global `@unique`, checked with a
+     * plain `findUnique({ where: { confirmationNumber } })`. Under RLS that
+     * check is blind to every OTHER tenant's rows — on a shared DB it would
+     * report a candidate as free when it was really already claimed by an
+     * unrelated tenant, and the real insert would then collide every time
+     * (found live against Sope Hotel's data). The fix scopes the constraint
+     * itself to `(tenantId, confirmationNumber)`; this asserts the
+     * generator's own collision probe was updated to match — using the
+     * composite key, not the bare column, and keyed to THIS tenant.
+     */
+    it('checks confirmation-number collisions scoped to this tenant, not globally', async () => {
+      await service.createReservation(TENANT_ID, BRANCH_ID, dto, ACTOR_ID);
+      expect(tx.reservation.findUnique).toHaveBeenCalledWith({
+        where: { tenantId_confirmationNumber: { tenantId: TENANT_ID, confirmationNumber: expect.any(String) } },
+      });
+    });
+
+    /**
      * The TOCTOU case `createReservationRow`'s own comment names: the
      * predicted number looked free, but the real INSERT collides anyway.
      * This is the path that was actually broken — Postgres aborts the

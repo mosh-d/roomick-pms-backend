@@ -198,7 +198,7 @@ export class ReservationsService {
       }
 
       const confirmedRate = this.calculateFlatRate(roomType, checkInDate, checkOutDate);
-      const confirmationNumber = await this.generateConfirmationNumber(tx, branchId);
+      const confirmationNumber = await this.generateConfirmationNumber(tx, tenantId, branchId);
 
       const reservation = await this.createReservationRow(tx, {
         tenantId,
@@ -244,7 +244,7 @@ export class ReservationsService {
       await this.assertRoomCheckInReady(tx, room, branchId, dto.roomTypeId, checkInDate, checkOutDate);
 
       const confirmedRate = this.calculateFlatRate(roomType, checkInDate, checkOutDate);
-      const confirmationNumber = await this.generateConfirmationNumber(tx, branchId);
+      const confirmationNumber = await this.generateConfirmationNumber(tx, tenantId, branchId);
 
       const reservation = await this.createReservationRow(tx, {
         tenantId,
@@ -668,19 +668,25 @@ export class ReservationsService {
   }
 
   /**
-   * `confirmationNumber` is globally `@unique` despite its own schema
-   * comment reading "sequence per branch" — a real discrepancy. Predicts a
-   * per-branch sequential number, verifies with `findUnique`, retries on
-   * collision. The actual `create()` call is ALSO wrapped in a retry loop
-   * (see `createReservationRow`) as defense against the TOCTOU window
-   * between this probe and the real insert.
+   * `confirmationNumber` is unique per TENANT (`@@unique([tenantId,
+   * confirmationNumber])`), not globally — it used to be a bare `@unique`,
+   * which was a real bug: this collision check runs under the caller's own
+   * tenant context, so RLS hides every other tenant's rows from it. On a
+   * shared DB with many tenants, a low-activity branch's first few
+   * candidates (RES-2026-00001, 00002, …) reliably already belonged to some
+   * OTHER tenant — invisible to this `findUnique`, but still hit by the
+   * real global index underneath, so every "verified free" candidate
+   * collided on insert anyway, deterministically, not as a rare race. The
+   * actual `create()` call is ALSO wrapped in a retry loop (see
+   * `createReservationRow`) as defense against the TOCTOU window between
+   * this probe and the real insert — that part was always correct.
    */
-  private async generateConfirmationNumber(tx: TenantTx, branchId: string): Promise<string> {
+  private async generateConfirmationNumber(tx: TenantTx, tenantId: string, branchId: string): Promise<string> {
     const year = new Date().getFullYear();
     const count = await tx.reservation.count({ where: { branchId } });
     for (let attempt = 0; attempt < 5; attempt++) {
       const candidate = `RES-${year}-${String(count + 1 + attempt).padStart(5, '0')}`;
-      const clash = await tx.reservation.findUnique({ where: { confirmationNumber: candidate } });
+      const clash = await tx.reservation.findUnique({ where: { tenantId_confirmationNumber: { tenantId, confirmationNumber: candidate } } });
       if (!clash) return candidate;
     }
     throw new ConflictException({ code: ErrorCode.CONFLICT, message: 'Could not generate a unique confirmation number' });
@@ -722,7 +728,7 @@ export class ReservationsService {
         if (attempt === 2) {
           throw new ConflictException({ code: ErrorCode.CONFLICT, message: 'Could not create reservation' });
         }
-        data.confirmationNumber = await this.generateConfirmationNumber(tx, data.branchId);
+        data.confirmationNumber = await this.generateConfirmationNumber(tx, data.tenantId, data.branchId);
       }
     }
     throw new ConflictException({ code: ErrorCode.CONFLICT, message: 'Could not create reservation' });

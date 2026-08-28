@@ -723,7 +723,7 @@ model GuestProfile {
 
 model Reservation {
   id                 String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  confirmationNumber String             @unique @db.VarChar(20) // RES-2024-00001, sequence per branch
+  confirmationNumber String             @db.VarChar(20) // RES-2024-00001, sequence per branch — unique per tenant, see @@unique below
   tenantId           String             @db.Uuid
   branchId           String             @db.Uuid
   guestId            String             @db.Uuid
@@ -764,6 +764,7 @@ model Reservation {
   registrationCards          RegistrationCard[]
   communicationLogs          CommunicationLog[]
 
+  @@unique([tenantId, confirmationNumber])
   @@index([branchId, checkInDate, status])
   @@index([branchId, checkOutDate, status])
   @@index([roomId, checkInDate, checkOutDate])

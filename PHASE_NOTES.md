@@ -1,5 +1,23 @@
 # Phase Notes
 
+## Fix — confirmationNumber was globally unique, generated from a per-branch counter, and RLS hid the collision from its own check (2026-08-28)
+
+Found live: a real walk-in for Sope Hotel Abijo (0 reservations so far) failed with a generic `409 Could not create reservation`, even against a fully clean, unheld, unblocked room. Traced with direct DB queries (bypassing the app, `set_config('app.tenant_id', ...)` under the real RLS policy) rather than guessing: the room itself was fine. The problem was one layer up, in how confirmation numbers are minted.
+
+### The bug
+`confirmationNumber` was a bare `@unique` column — unique across the ENTIRE database, all tenants. But `generateConfirmationNumber` predicts candidates (`RES-2026-00001`, `00002`, …) from a purely per-branch count, with no tenant or branch identifier in the string itself. On this dev DB, dozens of other test tenants exist, and one of them (`lodgic-test-hotel-group-6705d1`) already held `RES-2026-00001` through `00010` — the exact range a fresh, low-activity branch would generate first.
+
+The check meant to catch this collision couldn't: `generateConfirmationNumber`'s `findUnique({ where: { confirmationNumber: candidate } })` runs under the caller's own tenant context, and Row-Level Security filters out every row belonging to another tenant — so the probe legitimately saw "no clash" and returned a candidate that was, from a different angle, already taken. The real `INSERT` then hit the actual Postgres unique index, which isn't RLS-filtered, and threw a genuine `P2002`. `createReservationRow`'s retry (see the entry below) caught it correctly and asked for a new number — but the branch's own reservation count hadn't changed, so `generateConfirmationNumber` produced the *identical* doomed candidates and collided identically, three times in a row, every time. Not a rare race: fully deterministic given this DB's existing data, and — more importantly — a latent bug for production too, since any two real hotel tenants can independently mint the same low confirmation number for the same year.
+
+### The fix
+Scoped the constraint to match what the number was always meant to mean ("sequence per branch"): `@@unique([tenantId, confirmationNumber])` in place of the bare `@unique` (migration `20260828000000_confirmation_number_scoped_to_tenant`, hand-written — `prisma migrate dev`'s shadow-database diffing isn't available against this DB user, same constraint noted for the earlier RLS migrations). `generateConfirmationNumber` now takes `tenantId` and probes via the composite key (`tenantId_confirmationNumber`), so the check is scoped to exactly what the index enforces and can't be blinded by RLS again. All three call sites updated: `createReservation`, `walkIn`, and `createReservationRow`'s own retry (which only had `data.tenantId` in scope, not a bound variable — used that).
+
+### Verified
+`npx tsc --noEmit`, `npm run lint`, `npm test` (199 tests, 1 new: asserts the collision probe is called with the composite key, scoped to the calling tenant, not the bare column). Live against real Postgres, in a single transaction that was always rolled back afterward (no data persisted): confirmed Sope Hotel can now claim `RES-2026-00001` even though `lodgic-test-hotel-group-6705d1` already owns that exact string — the reported bug — and confirmed a second `RES-2026-00001` for Sope Hotel itself still correctly fails unique-constraint validation, so scoping was tightened, not removed.
+
+### Carried forward
+- Everything from the entry below — unchanged.
+
 ## Fix — confirmation-number collision retry poisoned its own transaction (2026-08-28)
 
 Found live, not by inspection: a real dev-server log showing `PrismaClientUnknownRequestError` / `25P02 "current transaction is aborted, commands ignored until end of transaction block"` at `generateConfirmationNumber`'s own `tx.reservation.count()` — a query with nothing wrong with it, which was the first clue the real failure was upstream.
