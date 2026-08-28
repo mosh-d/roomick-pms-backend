@@ -1,5 +1,31 @@
 # Phase Notes
 
+## Production Readiness (Month 6) — per-tenant backups, resolved rather than deferred (2026-08-28)
+
+Last phase's own Production Readiness entry deferred scheduled backups outright: "`pg_dump` isn't on PATH anywhere in this dev environment... a backup job written here would be unverifiable code." That framing turned out to be only half right — checked again rather than left standing, and the real issue wasn't the missing binary at all.
+
+### `pg_dump` was never going to be the right tool for "per tenant" — that's the actual insight, not a workaround for a missing binary
+The reference's own wording is "Scheduled PostgreSQL pg_dump **per tenant**." `pg_dump` operates at the database/schema/table level — it has no concept of "only this tenant's rows" under RLS. A literal per-tenant `pg_dump` isn't a tool that exists to invoke, missing binary or not. What actually achieves the reference's real goal — a restorable snapshot of one tenant's own data — is querying every RLS-scoped table through the exact same `withTenant` transaction every other tenant-scoped operation in this codebase already goes through. That's fully buildable and fully testable here, with nothing missing.
+
+### `BackupsService.runTenantBackup` — one pass over every tenant-scoped model, discovered from the schema itself
+`Prisma.dmmf.datamodel.models` filtered to models carrying a `tenantId` field (37 of 41) gives the table list dynamically — no hand-maintained array to drift out of sync the next time a phase adds a new tenant-scoped model. Two are deliberately excluded: `UserEmailIndex` (a global lookup table with no RLS policy applied to it at all — not really "this tenant's data") and `BackupRecord` itself (the ledger backups write to — including it in its own snapshot would be circular). Each model's full `findMany({})` result lands in one JSON object, BigInt ids (`RateAuditLog`, `NightAuditLog`) stringified the same way this codebase already fixes that everywhere else JSON serialization would otherwise crash on one, gzipped, and written through a `BackupStorageAdapter` interface — `LocalFilesystemBackupStorage` is the only implementation today (writes under `BACKUP_STORAGE_DIR`, defaulting to the OS temp dir, deliberately never inside the repo), the same "real interface, stubbed implementation" shape `CommsLogService`'s sending adapter already established. Runs nightly at 2 AM (`BackupsScheduler`, offset from `TenantsService`'s own midnight demo-tenant sweep) across every `trial`/`active` tenant; one tenant failing marks that `BackupRecord` `'failed'` and moves on rather than aborting the whole sweep, matching `sweepExpiredDemoTenants`'s own per-item error isolation.
+
+### `verifyBackup` — the automatable half of "restore test procedure, run monthly"
+A full restore-into-a-fresh-database needs somewhere real to restore into — genuine infrastructure this pass doesn't build. What it verifies instead: the stored file is actually readable, decompresses, parses as valid JSON, and contains every expected table (a real integrity check a corrupted or partial write would fail) — the concrete, automatable part of "prove this backup isn't silently corrupt," runnable today with nothing new.
+
+### A real bug, caught by the live run unit tests couldn't reach
+`LocalFilesystemBackupStorage.write()` originally `mkdir`'d only the base storage directory, not the file's own tenant-scoped subdirectory (`key` is `<tenantId>/<recordId>.json.gz`) — every unit test mocks the storage adapter entirely, so nothing exercised a real filesystem write until the live run did, and a fresh tenant's very first backup would have ENOENT'd in production. Fixed to `mkdir(dirname(filePath))`, confirmed by re-running the same live backup successfully.
+
+### Verified
+`npx tsc --noEmit`, `npm run lint`, `npm test` — 322 tests (8 new: every tenant-scoped model queried, the two exclusions genuinely never touched, a real gzip round-trip, failure marks the record `'failed'` without throwing, the all-tenants sweep survives one failure, and `verifyBackup`'s three outcomes). `npm run test:e2e` — 11/11, unaffected.
+
+Live, against real Postgres: ran a real backup for this session's own long-lived dev tenant (not a toy fixture) through a genuine `NestFactory.createApplicationContext` invocation — 88 reservations, 535 audit log rows, 6 shifts, and every other one of the 37 tenant-scoped tables, captured correctly including the two known BigInt-id models (`RateAuditLog`, `NightAuditLog` — 58 and 8 rows, no serialization crash). Caught the `mkdir` bug above on the first run; the second run, after the fix, produced a real 46,750-byte gzipped file on disk and `verifyBackup` correctly read it back and confirmed every table's row count.
+
+### Carried forward
+- Real object storage (S3 or equivalent) — `BackupStorageAdapter` is the seam; swapping in a real implementation needs a new class and a one-line provider change in `backups.module.ts`, nothing else.
+- Full restore tooling (a one-command "rebuild a tenant from its backup") — needs somewhere real to restore into; `verifyBackup`'s integrity check is this pass's honest substitute.
+- Uptime monitoring + on-call alerting — the one item still genuinely blocked: inherently about watching a deployed production URL, not applicable to a local dev environment at all.
+
 ## Production Readiness (Month 6) — persisted e2e suite, RBAC boundary tests, Sentry scaffold (2026-08-28)
 
 Per the MVP timeline reference (Month 6): "No new features. This month is entirely about making what's built reliable enough for a paying hotel to use every day." Every Month 1–5 feature is now built (Operational Reports, the prior entry, closed Month 5) — this is the first pass at Month 6's own checklist.

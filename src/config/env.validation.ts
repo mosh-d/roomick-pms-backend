@@ -17,4 +17,6 @@ export const envValidationSchema = Joi.object({
   CORS_ORIGINS: Joi.string().allow('').default(''),
   // Optional — error tracking (src/instrument.ts) stays off entirely until this is set.
   SENTRY_DSN: Joi.string().uri().allow('').optional(),
+  // Optional — defaults to <os temp dir>/roomick-backups (see LocalFilesystemBackupStorage).
+  BACKUP_STORAGE_DIR: Joi.string().allow('').optional(),
 });
