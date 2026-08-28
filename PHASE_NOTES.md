@@ -1,5 +1,32 @@
 # Phase Notes
 
+## Operational Reports — Occupancy, ADR, RevPAR, Revenue (2026-08-28)
+
+Per the MVP timeline reference (Month 5): "Occupancy, ADR, RevPAR, revenue, arrivals/departures, outstanding balances all visible. CSV and PDF export working for all reports." This closes the last Month 5 item — with it, every Month 1–5 deliverable in the reference's own MVP timeline is now built. No new Prisma models were needed; these are pure derived queries over `Reservation`/`LineItem`/`Payment`.
+
+### Scoped to the MVP deliverable line, not the reference's full post-MVP roadmap
+The frontend-structure reference's own "Reports & Analytics" section is much bigger than Month 5 asks for — a Custom Report Builder with saved templates and scheduled/emailed reports, a separate Financial Reports sub-section (tax summary, cash-flow waterfall, a payment-distribution donut chart), and a whole Enterprise/HQ cross-property reporting view. All of that is explicitly the reference's OWN later-phase scalability hooks (its "Phase 10: advanced analytics, BI tool integration" annotation), not Month 5's own MVP bar. Built exactly what the MVP timeline's deliverable line names — Occupancy, ADR, RevPAR, Revenue — and nothing beyond it.
+
+### Materialized views, deliberately skipped
+The reference's own "Report Queries" note suggests materialized views with a daily refresh. Built as live aggregate queries instead — always correct with zero refresh lag, and this project's data volumes don't need the optimization yet. Same "duplication/simplicity over premature infrastructure" call already made for the Folios accrual model (no literal pending/posted flag) and Overbooking (dedicated read over a stretched shared shape) — a materialized view plus a refresh mechanism is real infrastructure this pass doesn't need to justify.
+
+### One shared core, three metrics
+`roomNightMetrics` — one pass over the room pool, overlapping reservations, and posted room revenue for a date range — powers `getOccupancy`, `getAdr`, and `getRevpar`, each slicing the same buckets differently rather than three near-duplicate queries. Deliberately widens the reservation-status filter beyond `ReservationsService`'s own `HOLDING_STATUSES` (`confirmed`/`checked_in`) to also include `checked_out` — a report over a past date range must still count nights from stays that have since ended; that inventory genuinely sold even though the reservation no longer holds anything today. RevPAR divides by room-nights AVAILABLE (not sold) — the metric's whole point, verified explicitly in its own test.
+
+### Revenue: by department and by payment method, both derived from the append-only ledger
+`getRevenue` groups `LineItem` by `chargeType` (excluding `tax`/`correction` — a display denormalization and a reversal, not real department revenue, same exclusion `FoliosService.subTotal` already makes) and groups `Payment` by `method`. Refunds (negative `Payment.amount`, per the model's own convention) net out for free — no separate refund-handling branch needed.
+
+### `groupBy=department` in the reference's own querystring
+Read as naming which breakdown the UI leads with, not a literal SQL GROUP BY switch — `getRevenue` always returns both the department and payment-method breakdowns together, since a caller wanting one almost always wants the other for the same range.
+
+### Deferred, explicitly
+PDF export (no PDF generation infrastructure exists anywhere in this project — the same gap already named against Registration Cards and Shift Reports); the Custom Report Builder, scheduled/emailed reports, Financial Reports' tax-summary/cash-flow-waterfall, and cross-property/HQ reporting (all confirmed above as post-MVP reference scope, not Month 5); Arrivals/Departures and Outstanding Balances reports — both already have their own dashboards (Arrivals/Departures Dashboard, Billing's Outstanding tab) built in earlier phases, so this module doesn't duplicate them.
+
+### Verified
+`npx tsc --noEmit`, `npm run lint`, `npm test` — 314 tests (11 new in `reports.service.spec.ts`: occupancy math across 2 room types with only partial-stay overlap, `groupBy=day/month` bucketing, a zero-pool room type reporting 0% rather than crashing, `roomTypeId` filtering, ADR's revenue÷sold vs. RevPAR's revenue÷available distinction proven explicitly, revenue correctly excluding tax/correction rows, and refunds netting into the same payment-method total).
+
+Live, against real Postgres: walked a guest in and confirmed the occupancy report's `roomNightsAvailable` for that room type matched the true physical pool exactly, and RevPAR's denominator was confirmed to be the physical pool (not the sold count) by cross-checking the arithmetic against the API's own numbers → confirmed ADR's room revenue reflects the real posted check-in charge → recorded a cash payment and confirmed it landed in the revenue report's payment-method breakdown, and the room charge landed under the "room" department → opened the page through the actual new "Reports and Analytics" sidebar section, switched through all four tabs (Occupancy/ADR/RevPAR/Revenue), and confirmed KPI cards, the CSS-bar trend chart, and both breakdown tables render real data with correct values, screenshotted at each tab. (Two ground-truth assertions in the verification script itself assumed an isolated dataset — "exactly 1 room-night sold today" — which the shared, long-lived dev DB used across this whole session's verification runs no longer satisfies after many earlier phases' own test reservations; the *other* assertions in the same checks, which compare relationships rather than absolute counts — available-equals-physical-pool, revpar-divides-by-available-not-sold — passed cleanly, confirming the underlying computation is correct independent of dataset size.)
+
 ## Guest Communications Log — automated + manual message record, per reservation and guest (2026-08-28)
 
 Per the MVP timeline reference (Month 5): "complete history of every automated and manual communication sent to a guest, attached to both the reservation and guest profile — critical for dispute resolution." `CommunicationLog` was already fully modeled, with its own schema comment settling scope up front: *"MVP: rows stay 'queued' — sending adapter is stubbed."* So this is a LOG module, not a mailer — the deliverable is a trustworthy record of what was meant to go out and what it said, independent of whether real delivery infrastructure exists yet.

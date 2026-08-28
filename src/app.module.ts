@@ -23,6 +23,7 @@ import { RegistrationCardsModule } from './modules/registration-cards/registrati
 import { ReservationsModule } from './modules/reservations/reservations.module';
 import { ShiftsModule } from './modules/shifts/shifts.module';
 import { CommsLogModule } from './modules/comms-log/comms-log.module';
+import { ReportsModule } from './modules/reports/reports.module';
 import { TaxesModule } from './modules/taxes/taxes.module';
 import { SystemModule } from './modules/system/system.module';
 import { TenantsModule } from './modules/tenants/tenants.module';
@@ -65,6 +66,7 @@ import { PrismaModule } from './prisma/prisma.module';
     HousekeepingModule,
     ShiftsModule,
     CommsLogModule,
+    ReportsModule,
   ],
   providers: [
     JwtStrategy,
