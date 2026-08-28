@@ -42,4 +42,8 @@ export enum ErrorCode {
 
   // night audit
   AUDIT_ALREADY_RAN = 'AUDIT_ALREADY_RAN',
+
+  // shifts
+  SHIFT_ALREADY_OPEN = 'SHIFT_ALREADY_OPEN',
+  SHIFT_ALREADY_CLOSED = 'SHIFT_ALREADY_CLOSED',
 }

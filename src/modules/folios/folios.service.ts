@@ -228,6 +228,16 @@ export class FoliosService {
       this.assertFolioOpen(folio);
       const branch = await this.propertyService.assertBranch(tx, folio.branchId);
 
+      // Cash reconciliation (Shift Management) needs every cash payment
+      // attributed to the drawer it landed in — the recording agent's own
+      // currently open shift on this branch, if they have one. Non-cash
+      // methods never touch a shift; a card/bank/voucher payment isn't
+      // counted-cash at close, so linking it would just be noise.
+      const openShift =
+        dto.method === 'cash'
+          ? await tx.shift.findFirst({ where: { branchId: folio.branchId, agentId: actorId, closedAt: null } })
+          : null;
+
       const payment = await tx.payment.create({
         data: {
           tenantId,
@@ -236,6 +246,7 @@ export class FoliosService {
           amount: new Prisma.Decimal(dto.amount),
           currency: branch.currency,
           reference: dto.reference,
+          shiftId: openShift?.id,
           paymentPurpose: dto.paymentPurpose ?? 'payment',
           recordedBy: actorId,
         },

@@ -43,6 +43,7 @@ function makeTx() {
     payment: { findMany: jest.fn().mockResolvedValue([]), create: jest.fn().mockResolvedValue({ id: 'pay-1' }) },
     folioTransfer: { create: jest.fn().mockResolvedValue({ id: 'transfer-1' }), findMany: jest.fn().mockResolvedValue([]) },
     taxRule: { findMany: jest.fn().mockResolvedValue([]) },
+    shift: { findFirst: jest.fn().mockResolvedValue(null) },
     auditLog: { create: jest.fn().mockResolvedValue({}) },
   };
 }
@@ -188,6 +189,29 @@ describe('FoliosService', () => {
       await expect(
         service.postCharge(TENANT_ID, FOLIO_ID, { description: 'Dinner', amount: 100, chargeType: 'fnb' }, ACTOR_ID),
       ).rejects.toThrow(ConflictException);
+    });
+  });
+
+  describe('recordPayment — shift attribution', () => {
+    beforeEach(() => tx.folio.findFirst.mockResolvedValue(folio()));
+
+    it('attaches the agent\'s open shift to a cash payment', async () => {
+      tx.shift.findFirst.mockResolvedValue({ id: 'shift-1' });
+      await service.recordPayment(TENANT_ID, FOLIO_ID, { amount: 5000, method: 'cash' } as never, ACTOR_ID);
+      expect(tx.shift.findFirst).toHaveBeenCalledWith({ where: { branchId: BRANCH_ID, agentId: ACTOR_ID, closedAt: null } });
+      expect(tx.payment.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ shiftId: 'shift-1' }) }));
+    });
+
+    it('leaves shiftId undefined for a cash payment when the agent has no open shift', async () => {
+      tx.shift.findFirst.mockResolvedValue(null);
+      await service.recordPayment(TENANT_ID, FOLIO_ID, { amount: 5000, method: 'cash' } as never, ACTOR_ID);
+      expect(tx.payment.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ shiftId: undefined }) }));
+    });
+
+    it('never looks up a shift for a non-cash payment', async () => {
+      await service.recordPayment(TENANT_ID, FOLIO_ID, { amount: 5000, method: 'card' } as never, ACTOR_ID);
+      expect(tx.shift.findFirst).not.toHaveBeenCalled();
+      expect(tx.payment.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ shiftId: undefined }) }));
     });
   });
 
