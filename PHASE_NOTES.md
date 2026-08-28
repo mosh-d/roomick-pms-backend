@@ -1,5 +1,23 @@
 # Phase Notes
 
+## Fix — confirmation-number collision retry poisoned its own transaction (2026-08-28)
+
+Found live, not by inspection: a real dev-server log showing `PrismaClientUnknownRequestError` / `25P02 "current transaction is aborted, commands ignored until end of transaction block"` at `generateConfirmationNumber`'s own `tx.reservation.count()` — a query with nothing wrong with it, which was the first clue the real failure was upstream.
+
+### The bug
+`createReservationRow`'s retry loop catches a `P2002` (confirmation-number collision) from `tx.reservation.create()` and, on catching it, calls `generateConfirmationNumber(tx, ...)` again to pick a new candidate — issuing more queries on the **same** Prisma interactive transaction. Postgres aborts the entire surrounding transaction the instant any statement inside it fails, unique-constraint violations included; every later statement on that same transaction then errors with `25P02`, no matter how unrelated it is to whatever actually failed. So the retry's own recovery queries were guaranteed to fail with a confusing, misattributed error — not a second, cleaner collision retry — the moment a real confirmation-number collision ever happened. The existing test for this path only simulated a collision during `generateConfirmationNumber`'s own *prediction* step (a `findUnique` mock), never an actual `tx.reservation.create()` failure — the one path that actually exercises the retry-after-INSERT-failure logic — so it gave false confidence.
+
+### The fix
+A `SAVEPOINT` per attempt. `ROLLBACK TO SAVEPOINT` undoes only the failed insert, leaving the outer `withTenant` transaction healthy for the retry's own queries and for whatever the caller does next; `RELEASE SAVEPOINT` on success. Standard Postgres pattern for "catch an error and keep using the same transaction," which Prisma's interactive transactions don't do automatically. Also fixed a second, smaller issue while in this code: on the final (3rd) attempt, a real collision was rethrowing the **raw Prisma error** instead of the app's own clean `ConflictException` — a caller saw an unwrapped Prisma exception rather than a proper problem+json `409 CONFLICT`. Non-collision errors (a real connection failure, a different constraint) still roll back their savepoint and rethrow immediately, unwrapped and unretried — those are someone else's problem, not a confirmation-number issue.
+
+### Verified
+`npx tsc --noEmit`, `npm run lint`, `npm test` (198 tests, 3 new: a real insert-time collision recovers via a savepoint and the SAVEPOINT/ROLLBACK/RELEASE calls happen in the correct order relative to the retry; exhausting all 3 attempts on real collisions throws the clean `ConflictException`, not the raw Prisma error; a non-collision error still rolls back its savepoint but rethrows immediately without retrying).
+
+Live, against real Postgres — 15 truly concurrent `POST .../reservations` calls for the same room type and date window (a genuine stress test, not a mock): every single response came back either a clean `201` with a real, unique confirmation number, or a clean `409`; zero raw errors, zero mentions of the transaction-abort message anywhere in any response. Before this fix, that same concurrent load was what produced the original leaked `25P02`.
+
+### Carried forward
+- Everything from the Housekeeping entry below — unchanged.
+
 ## Housekeeping module — tasks, staff assignment, room blocking (2026-08-28)
 
 Frontend half in `roomick-pms-frontend/PHASE_NOTES.md`. Next in the reference's own sequence after Reservations (ref p27-31): Task Board, Staff Assignment, Inspection Workflow, Room Blocking/OOO.

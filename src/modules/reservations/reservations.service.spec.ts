@@ -1,5 +1,6 @@
 import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { PropertyService } from '../property/property.service';
 import { RoomsService } from '../property/rooms.service';
@@ -55,6 +56,7 @@ function makeTx() {
     },
     auditLog: { create: jest.fn().mockResolvedValue({}) },
     $queryRaw: jest.fn().mockResolvedValue([]),
+    $executeRawUnsafe: jest.fn().mockResolvedValue(0),
   };
 }
 
@@ -193,12 +195,64 @@ describe('ReservationsService', () => {
       ).rejects.toThrow(BadRequestException);
     });
 
-    it('retries confirmation-number generation on a collision, not throw', async () => {
+    it('retries confirmation-number generation on a PREDICTED collision (findUnique), not throw', async () => {
       tx.reservation.findUnique
         .mockResolvedValueOnce({ id: 'clash' }) // first candidate taken
         .mockResolvedValueOnce(null); // second candidate free
       await service.createReservation(TENANT_ID, BRANCH_ID, dto, ACTOR_ID);
       expect(tx.reservation.create).toHaveBeenCalled();
+    });
+
+    /**
+     * The TOCTOU case `createReservationRow`'s own comment names: the
+     * predicted number looked free, but the real INSERT collides anyway.
+     * This is the path that was actually broken — Postgres aborts the
+     * WHOLE transaction the instant `create()` throws, so the retry's own
+     * `generateConfirmationNumber` queries on that same transaction would
+     * fail with `25P02` regardless of what they asked for, unless the
+     * failed insert is first rolled back to a savepoint. Found live
+     * against real Postgres, not by inspection — this mock can't
+     * reproduce Postgres's own abort-the-transaction behavior, so it only
+     * proves the SAVEPOINT/ROLLBACK calls happen in the right order and
+     * that a genuine INSERT-time collision still recovers.
+     */
+    it('recovers from a REAL insert-time collision via a savepoint, not just a predicted one', async () => {
+      const p2002 = new Prisma.PrismaClientKnownRequestError('Unique constraint failed on confirmationNumber', {
+        code: 'P2002',
+        clientVersion: '5.0.0',
+      });
+      tx.reservation.create.mockRejectedValueOnce(p2002).mockImplementationOnce(({ data }: { data: Record<string, unknown> }) =>
+        Promise.resolve(reservation({ ...data })),
+      );
+      const result = await service.createReservation(TENANT_ID, BRANCH_ID, dto, ACTOR_ID);
+      expect(result).toBeDefined();
+      expect(tx.reservation.create).toHaveBeenCalledTimes(2);
+      expect(tx.$executeRawUnsafe).toHaveBeenCalledWith('SAVEPOINT create_reservation_attempt');
+      expect(tx.$executeRawUnsafe).toHaveBeenCalledWith('ROLLBACK TO SAVEPOINT create_reservation_attempt');
+      expect(tx.$executeRawUnsafe).toHaveBeenCalledWith('RELEASE SAVEPOINT create_reservation_attempt');
+      // Rollback must happen before the retry re-derives a confirmation
+      // number — on real Postgres, calling generateConfirmationNumber
+      // (its own count/findUnique queries) on a still-aborted transaction
+      // is exactly the bug this fixes.
+      const calls = tx.$executeRawUnsafe.mock.calls.map((c: unknown[]) => c[0]);
+      const rollbackIndex = calls.indexOf('ROLLBACK TO SAVEPOINT create_reservation_attempt');
+      const secondSavepointIndex = calls.indexOf('SAVEPOINT create_reservation_attempt', rollbackIndex + 1);
+      expect(rollbackIndex).toBeGreaterThanOrEqual(0);
+      expect(secondSavepointIndex).toBeGreaterThan(rollbackIndex);
+    });
+
+    it('exhausting all 3 attempts on real collisions throws the app\'s own clean error, not the raw Prisma one', async () => {
+      const p2002 = () => new Prisma.PrismaClientKnownRequestError('Unique constraint failed on confirmationNumber', { code: 'P2002', clientVersion: '5.0.0' });
+      tx.reservation.create.mockRejectedValue(p2002()); // every attempt collides for real
+      await expect(service.createReservation(TENANT_ID, BRANCH_ID, dto, ACTOR_ID)).rejects.toThrow(ConflictException);
+      expect(tx.reservation.create).toHaveBeenCalledTimes(3);
+    });
+
+    it('a non-collision error still rolls back its savepoint but rethrows immediately, without retrying', async () => {
+      tx.reservation.create.mockRejectedValueOnce(new Error('connection reset'));
+      await expect(service.createReservation(TENANT_ID, BRANCH_ID, dto, ACTOR_ID)).rejects.toThrow('connection reset');
+      expect(tx.reservation.create).toHaveBeenCalledTimes(1);
+      expect(tx.$executeRawUnsafe).toHaveBeenCalledWith('ROLLBACK TO SAVEPOINT create_reservation_attempt');
     });
 
     it('defaults channel to direct when omitted', async () => {

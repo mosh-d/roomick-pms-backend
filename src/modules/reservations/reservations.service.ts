@@ -686,13 +686,42 @@ export class ReservationsService {
     throw new ConflictException({ code: ErrorCode.CONFLICT, message: 'Could not generate a unique confirmation number' });
   }
 
+  /**
+   * A `SAVEPOINT` per attempt — not optional. Postgres aborts the ENTIRE
+   * surrounding transaction the instant any statement inside it fails
+   * (a unique-constraint violation included); every later statement on
+   * that same transaction then errors with `25P02 "current transaction is
+   * aborted"`, no matter how unrelated it is. Without the savepoint here,
+   * catching the `P2002` from a confirmation-number collision and then
+   * calling `generateConfirmationNumber` again — which issues its own
+   * `count`/`findUnique` queries on the SAME transaction — was guaranteed
+   * to fail with that exact 25P02, not a second, cleaner collision retry.
+   * Found live: a genuine collision under real concurrent bookings hit
+   * this path, and the retry itself was what broke, not the collision.
+   * `ROLLBACK TO SAVEPOINT` undoes only the failed insert, leaving the
+   * outer `withTenant` transaction healthy for the retry's own queries and
+   * for whatever the caller does next.
+   */
   private async createReservationRow(tx: TenantTx, data: Prisma.ReservationUncheckedCreateInput) {
     for (let attempt = 0; attempt < 3; attempt++) {
+      await tx.$executeRawUnsafe('SAVEPOINT create_reservation_attempt');
       try {
-        return await tx.reservation.create({ data, include: RESERVATION_INCLUDE });
+        const created = await tx.reservation.create({ data, include: RESERVATION_INCLUDE });
+        await tx.$executeRawUnsafe('RELEASE SAVEPOINT create_reservation_attempt');
+        return created;
       } catch (error) {
+        await tx.$executeRawUnsafe('ROLLBACK TO SAVEPOINT create_reservation_attempt');
         const isUniqueViolation = error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002';
-        if (!isUniqueViolation || attempt === 2) throw error;
+        // A non-collision failure (a real connection error, a different
+        // constraint) is someone else's problem — rethrow it verbatim, not
+        // wrapped, so it isn't mistaken for "ran out of confirmation
+        // numbers to try". Only a genuine exhausted-retries collision gets
+        // the app's own clean error; the raw Prisma error was leaking
+        // straight to callers before this.
+        if (!isUniqueViolation) throw error;
+        if (attempt === 2) {
+          throw new ConflictException({ code: ErrorCode.CONFLICT, message: 'Could not create reservation' });
+        }
         data.confirmationNumber = await this.generateConfirmationNumber(tx, data.branchId);
       }
     }
