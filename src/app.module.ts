@@ -15,6 +15,7 @@ import { envValidationSchema } from './config/env.validation';
 import { AuthModule } from './modules/auth/auth.module';
 import { FoliosModule } from './modules/folios/folios.module';
 import { GuestsModule } from './modules/guests/guests.module';
+import { HousekeepingModule } from './modules/housekeeping/housekeeping.module';
 import { NightAuditModule } from './modules/night-audit/night-audit.module';
 import { PropertyModule } from './modules/property/property.module';
 import { ReservationsModule } from './modules/reservations/reservations.module';
@@ -55,6 +56,7 @@ import { PrismaModule } from './prisma/prisma.module';
     TaxesModule,
     FoliosModule,
     NightAuditModule,
+    HousekeepingModule,
   ],
   providers: [
     JwtStrategy,

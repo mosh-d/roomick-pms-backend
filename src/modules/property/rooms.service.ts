@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { CleanlinessStatus, OccupancyStatus, Prisma, Room, RoomBlock, RoomType } from '@prisma/client';
 import { ErrorCode } from '../../common/errors/error-codes';
+import { todayInTimezone, toBranchDate } from '../../common/utils/branch-date';
 import { JwtPayload } from '../../common/types/request-context';
 import { PrismaService, TenantTx } from '../../prisma/prisma.service';
 import { CreateRoomTypeDto } from './dto/room-type.dto';
@@ -17,9 +18,17 @@ import { PropertyService } from './property.service';
  *  touch occupancy/held axes manually. */
 const SUPERVISOR_ROLES = new Set(['owner', 'manager']);
 
-/** §4.1 housekeeping ladder: dirty → cleaning → clean → inspected.
- *  Any state may drop back to dirty (checkout, spill, re-clean request). */
-const CLEANLINESS_TRANSITIONS: Record<CleanlinessStatus, CleanlinessStatus[]> = {
+/**
+ * §4.1 housekeeping ladder: dirty → cleaning → clean → inspected. Any state
+ * may drop back to dirty (checkout, spill, re-clean request).
+ *
+ * Exported (not module-private) so `HousekeepingService`'s task actions —
+ * "Start Cleaning" drives dirty→cleaning, "Complete" drives cleaning→clean —
+ * validate against this exact ladder rather than a second hand-copied one
+ * that could drift out of sync. Same reuse discipline `CARD_TONE_CLASSES` on
+ * the frontend already follows for the same reason.
+ */
+export const CLEANLINESS_TRANSITIONS: Record<CleanlinessStatus, CleanlinessStatus[]> = {
   dirty: ['cleaning'],
   cleaning: ['clean', 'dirty'],
   clean: ['inspected', 'dirty'],
@@ -381,6 +390,43 @@ export class RoomsService {
         toDate: dto.toDate,
       });
       return block;
+    });
+  }
+
+  /** Room Blocking / OOO (ref p31) — every block still in effect today or later, for display and the "N blocked rooms" stat. Past blocks are real history, not shown here, but never deleted. */
+  async listActiveBlocks(tenantId: string, branchId: string) {
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const branch = await this.propertyService.assertBranch(tx, branchId);
+      const today = toBranchDate(todayInTimezone(branch.timezone));
+      return tx.roomBlock.findMany({
+        where: { room: { branchId, deletedAt: null }, toDate: { gte: today } },
+        include: { room: { select: { id: true, number: true } } },
+        orderBy: { fromDate: 'asc' },
+      });
+    });
+  }
+
+  /**
+   * Ends a block early by pulling `toDate` back to today, rather than
+   * deleting the row — the block's own history (who created it, why, when)
+   * stays queryable, same "correct forward, don't erase" preference the
+   * append-only ledger uses for money, applied here to inventory. A block
+   * already in the past is left alone; there's nothing to end.
+   */
+  async unblockRoom(tenantId: string, blockId: string, actorId: string): Promise<RoomBlock> {
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const block = await tx.roomBlock.findFirst({ where: { id: blockId }, include: { room: true } });
+      if (!block) {
+        throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Room block not found' });
+      }
+      const branch = await this.propertyService.assertBranch(tx, block.room.branchId);
+      const today = toBranchDate(todayInTimezone(branch.timezone));
+      if (block.toDate < today) {
+        throw new ConflictException({ code: ErrorCode.INVALID_STATUS_TRANSITION, message: 'This block has already ended' });
+      }
+      const updated = await tx.roomBlock.update({ where: { id: blockId }, data: { toDate: today } });
+      await this.audit(tx, tenantId, actorId, 'room.unblocked', 'room_block', blockId, { roomId: block.roomId });
+      return updated;
     });
   }
 

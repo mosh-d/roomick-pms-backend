@@ -38,7 +38,12 @@ function makeTx() {
     },
     roomType: { findFirst: jest.fn().mockResolvedValue({ id: TYPE_ID }), create: jest.fn() },
     floor: { findFirst: jest.fn().mockResolvedValue({ id: FLOOR_ID }) },
-    roomBlock: { create: jest.fn().mockResolvedValue({ id: 'block-1' }) },
+    roomBlock: {
+      create: jest.fn().mockResolvedValue({ id: 'block-1' }),
+      findMany: jest.fn().mockResolvedValue([]),
+      findFirst: jest.fn(),
+      update: jest.fn().mockImplementation(({ data }: { data: Record<string, unknown> }) => Promise.resolve({ id: 'block-1', ...data })),
+    },
     auditLog: { create: jest.fn().mockResolvedValue({}) },
   };
 }
@@ -63,7 +68,7 @@ describe('RoomsService', () => {
   beforeEach(async () => {
     tx = makeTx();
     propertyService = {
-      assertBranch: jest.fn().mockResolvedValue(undefined),
+      assertBranch: jest.fn().mockResolvedValue({ id: BRANCH_ID, timezone: 'Africa/Lagos' }),
       findOrCreateDefaultFloor: jest.fn().mockResolvedValue({ id: FLOOR_ID }),
     };
     const moduleRef = await Test.createTestingModule({
@@ -273,6 +278,35 @@ describe('RoomsService', () => {
         }),
       );
       expect(tx.auditLog.create).toHaveBeenCalled();
+    });
+  });
+
+  describe('listActiveBlocks / unblockRoom', () => {
+    it('lists only blocks whose toDate is today or later', async () => {
+      await service.listActiveBlocks(TENANT_ID, BRANCH_ID);
+      expect(tx.roomBlock.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: expect.objectContaining({ toDate: { gte: expect.any(Date) } }) }),
+      );
+    });
+
+    it('ends a block by pulling toDate back to today, not deleting it', async () => {
+      const farFuture = new Date(Date.now() + 30 * 86_400_000).toISOString().slice(0, 10);
+      tx.roomBlock.findFirst.mockResolvedValue({ id: 'block-1', roomId: ROOM_ID, toDate: new Date(`${farFuture}T00:00:00.000Z`), room: room() });
+      await service.unblockRoom(TENANT_ID, 'block-1', manager.sub);
+      expect(tx.roomBlock.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'block-1' }, data: { toDate: expect.any(Date) } }));
+      expect(tx.roomBlock.create).not.toHaveBeenCalled(); // never re-creates — the same row, corrected forward
+    });
+
+    it('rejects ending a block that has already ended', async () => {
+      // 2 days back, not 1 — keeps this test clear of the UTC/branch-timezone boundary near midnight.
+      const pastDate = new Date(Date.now() - 2 * 86_400_000).toISOString().slice(0, 10);
+      tx.roomBlock.findFirst.mockResolvedValue({ id: 'block-1', roomId: ROOM_ID, toDate: new Date(`${pastDate}T00:00:00.000Z`), room: room() });
+      await expect(service.unblockRoom(TENANT_ID, 'block-1', manager.sub)).rejects.toThrow(ConflictException);
+    });
+
+    it('404s on a missing block', async () => {
+      tx.roomBlock.findFirst.mockResolvedValue(null);
+      await expect(service.unblockRoom(TENANT_ID, 'nope', manager.sub)).rejects.toThrow(NotFoundException);
     });
   });
 

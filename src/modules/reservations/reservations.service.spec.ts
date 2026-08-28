@@ -5,6 +5,7 @@ import { PropertyService } from '../property/property.service';
 import { RoomsService } from '../property/rooms.service';
 import { GuestsService } from '../guests/guests.service';
 import { FoliosService } from '../folios/folios.service';
+import { HousekeepingService } from '../housekeeping/housekeeping.service';
 import { ReservationsService } from './reservations.service';
 
 const TENANT_ID = '11111111-1111-4111-8111-111111111111';
@@ -69,6 +70,7 @@ describe('ReservationsService', () => {
     backfillRoomCharges: jest.Mock;
     settleIfFullyPaid: jest.Mock;
   };
+  let housekeepingService: { createTaskInTx: jest.Mock };
 
   beforeEach(async () => {
     tx = makeTx();
@@ -81,6 +83,7 @@ describe('ReservationsService', () => {
       backfillRoomCharges: jest.fn().mockResolvedValue(0),
       settleIfFullyPaid: jest.fn().mockResolvedValue(true),
     };
+    housekeepingService = { createTaskInTx: jest.fn().mockResolvedValue({ id: 'task-1' }) };
 
     const moduleRef = await Test.createTestingModule({
       providers: [
@@ -93,6 +96,7 @@ describe('ReservationsService', () => {
         { provide: RoomsService, useValue: roomsService },
         { provide: GuestsService, useValue: guestsService },
         { provide: FoliosService, useValue: foliosService },
+        { provide: HousekeepingService, useValue: housekeepingService },
       ],
     }).compile();
     service = moduleRef.get(ReservationsService);
@@ -317,6 +321,16 @@ describe('ReservationsService', () => {
       tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'checked_in', roomId: ROOM_ID }));
       await service.checkOut(TENANT_ID, RESERVATION_ID, ACTOR_ID);
       expect(foliosService.settleIfFullyPaid).toHaveBeenCalled();
+    });
+
+    // Task Board reflects a checked-out room automatically — nobody has to remember to flag it.
+    it('creates a housekeeping task for the room, traceable back to this reservation', async () => {
+      tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'checked_in', roomId: ROOM_ID }));
+      await service.checkOut(TENANT_ID, RESERVATION_ID, ACTOR_ID);
+      expect(housekeepingService.createTaskInTx).toHaveBeenCalledWith(
+        tx, TENANT_ID, BRANCH_ID,
+        expect.objectContaining({ roomId: ROOM_ID, triggerEvent: 'checkout', triggeredByReservationId: RESERVATION_ID }),
+      );
     });
 
     // Safety net: a guest leaving before the night audit next runs would

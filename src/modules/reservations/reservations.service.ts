@@ -8,6 +8,7 @@ import { RoomsService } from '../property/rooms.service';
 import { GuestsService } from '../guests/guests.service';
 import { CreateGuestDto } from '../guests/dto/guest.dto';
 import { FoliosService } from '../folios/folios.service';
+import { HousekeepingService } from '../housekeeping/housekeeping.service';
 import {
   AvailabilityCalendarQueryDto,
   AvailabilityQueryDto,
@@ -43,6 +44,7 @@ export class ReservationsService {
     private readonly roomsService: RoomsService,
     private readonly guestsService: GuestsService,
     private readonly foliosService: FoliosService,
+    private readonly housekeepingService: HousekeepingService,
   ) {}
 
   // -------------------------------------------------------------------------
@@ -350,6 +352,7 @@ export class ReservationsService {
         data: { status: 'checked_out', actualCheckOut: new Date() },
         include: RESERVATION_INCLUDE,
       });
+      const branch = await this.propertyService.assertBranch(tx, reservation.branchId);
       // A checked-out room needs cleaning before its next guest — both
       // axes in one write, matching real hotel operations.
       await this.roomsService.applyReservationOccupancy(
@@ -359,6 +362,16 @@ export class ReservationsService {
         { occupancyStatus: 'vacant', cleanlinessStatus: 'dirty' },
         actorId,
       );
+      // Task Board reflects a checked-out room automatically — nobody has
+      // to remember to flag it. `triggeredByReservationId` is what makes
+      // this traceable back to the stay that caused it.
+      await this.housekeepingService.createTaskInTx(tx, tenantId, reservation.branchId, {
+        roomId: reservation.roomId,
+        triggerEvent: 'checkout',
+        triggeredByReservationId: reservationId,
+        taskDate: toBranchDate(todayInTimezone(branch.timezone)),
+        actorId,
+      });
 
       // **Check-out is NEVER blocked by an outstanding balance** — the room
       // has to release either way. A departing guest who still owes becomes
@@ -374,7 +387,6 @@ export class ReservationsService {
       // Safety net: bill any elapsed night the night audit hasn't reached
       // yet (it runs early-morning, so a guest departing today would
       // otherwise leave with last night un-posted). Idempotent per date.
-      const branch = await this.propertyService.assertBranch(tx, reservation.branchId);
       await this.foliosService.backfillRoomCharges(
         tx,
         updated,

@@ -83,4 +83,24 @@ export class RoomsController {
   ): ReturnType<RoomsService['blockRoom']> {
     return this.roomsService.blockRoom(tenantId, roomId, dto, user.sub);
   }
+
+  @Get('branches/:branchId/room-blocks')
+  @ApiOperation({ summary: 'Every room block still in effect today or later (Room Blocking / OOO)' })
+  listActiveBlocks(
+    @CurrentTenant() tenantId: string,
+    @Param('branchId', ParseUUIDPipe) branchId: string,
+  ): ReturnType<RoomsService['listActiveBlocks']> {
+    return this.roomsService.listActiveBlocks(tenantId, branchId);
+  }
+
+  @Post('room-blocks/:blockId/end')
+  @Roles(SystemRole.Owner, SystemRole.Manager)
+  @ApiOperation({ summary: 'End a room block early by pulling its toDate back to today' })
+  unblockRoom(
+    @CurrentTenant() tenantId: string,
+    @CurrentUser() user: JwtPayload,
+    @Param('blockId', ParseUUIDPipe) blockId: string,
+  ): ReturnType<RoomsService['unblockRoom']> {
+    return this.roomsService.unblockRoom(tenantId, blockId, user.sub);
+  }
 }

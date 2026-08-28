@@ -1,5 +1,33 @@
 # Phase Notes
 
+## Housekeeping module — tasks, staff assignment, room blocking (2026-08-28)
+
+Frontend half in `roomick-pms-frontend/PHASE_NOTES.md`. Next in the reference's own sequence after Reservations (ref p27-31): Task Board, Staff Assignment, Inspection Workflow, Room Blocking/OOO.
+
+### Delivered
+- **New `housekeeping` module**, built around `HousekeepingTask` — a schema model that already existed with every field this needed (`assigneeId`, `status`, `priority`, `triggerEvent`, `triggeredByReservationId`, `notes`, `completedAt`/`completedBy`) but had no service touching it at all before this.
+  - `createTask` / `createTaskInTx` — the latter takes an already-open transaction so `ReservationsService.checkOut` can create one in the SAME transaction as the checkout itself, `triggerEvent: 'checkout'`, `triggeredByReservationId` set — Task Board now reflects a checked-out room automatically, the same "the schema's own fields exist for exactly this" reasoning `postRoomChargeForDate`'s date guard used.
+  - `listTasks` — filterable by status and/or assignee; powers both Task Board ("my assigned rooms" = `assigneeId: me`) and the hub's own stats.
+  - `startTask` — **self-claims an unassigned task** rather than requiring pre-assignment: the reference's own Task Board shows plain cards any housekeeper can act on, so a task nobody has claimed yet can be started by whoever picks it up; a task someone else already claimed can't be taken over. Drives the room's cleanliness ladder (dirty → cleaning) in the same transaction, reusing `RoomsService`'s own `CLEANLINESS_TRANSITIONS` map (now exported) rather than a second hand-copied ladder.
+  - `completeTask` — same self/assignee rule, drives cleaning → clean, records `completedAt`/`completedBy`. Inspection is a deliberately separate, later step — see below.
+  - `assignTask` — supervisor-only (`owner`/`manager`, the same set `RoomsService.isSupervisorAt` already uses), for Staff Assignment's "distribute rooms to housekeepers."
+  - `listHousekeepers` — reuses `UsersService.listStaff` (already returns every staff member's roles at a branch) filtered to the `housekeeper` role, rather than a second staff query.
+  - `reportIssue` — marks a task `skipped` and appends the area/description to its `notes`. Deliberately does **not** create a `RoomBlock`: whether a reported issue is serious enough to pull a room from inventory is a supervisor's own call in Room Blocking/OOO after reviewing the report, not an automatic consequence of reporting it.
+- **`RoomsService` gained `listActiveBlocks`/`unblockRoom`** — `blockRoom` (create) already existed from an earlier phase, but nothing could list current blocks or end one early. `unblockRoom` pulls `toDate` back to today rather than deleting the row — the same "correct forward, preserve history" preference the append-only money ledger uses, applied to inventory.
+- **`CLEANLINESS_TRANSITIONS` exported** from `rooms.service.ts` so `HousekeepingService`'s own room-status transitions validate against the exact same ladder, not a duplicate.
+
+### Decisions & deviations
+1. **Inspection Workflow needed zero new backend surface.** `clean → inspected` (supervisor-only) and the drop-back-to-`dirty` transition both already existed on `RoomsService.changeStatus` from the very first Room Status Board phase — the frontend's Inspection Workflow page calls that endpoint directly. Approve and Reject were never missing; nobody had built the page in front of them yet.
+2. **Report Issue has no image upload.** The reference's modal includes one; it needs encrypted file storage that doesn't exist (`GuestProfile.idDocUrl`'s own comment already names the same gap for ID documents). The area-of-issue + description half is real and stored; images are deferred.
+3. **No new `MaintenanceIssue` table.** A reported issue lives in the task's own `notes` field — the schema already has a `skipped` status on `HousekeepingStatus` for exactly "this room needs something other than a normal clean," and a dedicated issue-tracking table would be new schema surface for a need the existing model already covers at this scope.
+
+### Verified
+`npx tsc --noEmit`, `npm run lint`, `npm test` (195 tests total, 21 new — 16 for `HousekeepingService`: self-claim start/complete and the ownership/ladder rejections, supervisor-gated assign, report-issue appends without creating a block, `listHousekeepers` filters correctly by branch/NULL-branch role; 4 for `RoomsService`'s new block methods; 1 confirming `checkOut` creates a housekeeping task traceable to the reservation that triggered it).
+
+### Carried forward
+- Image uploads for Report Issue, a dedicated maintenance-issue table, Rate Plan Management, group/multi-room bookings, ID capture, payment/deposit at booking, cancellation policy + penalty/refund, per-room Gantt-view availability, Modify for an already-checked-in stay — all named, all deferred.
+- Everything else already carried forward from the Reservations entry below — unchanged.
+
 ## Reservations module — search, availability calendar, modify, waitlist (2026-08-28)
 
 Frontend half in `roomick-pms-frontend/PHASE_NOTES.md`. The reference's own sequence is Front Desk → Reservations → Housekeeping → Billing and Payments; Billing was done, so this is Reservations — six cards (Availability Calendar, Create, Modify, Cancel, Waitlist, Rate Plan Management), and the sidebar's "Reservations" row had pointed nowhere since Phase 24 flagged it inert.
