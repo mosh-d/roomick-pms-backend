@@ -13,6 +13,7 @@ import { AuditInterceptor } from './common/interceptors/audit.interceptor';
 import { TenantContextInterceptor } from './common/interceptors/tenant-context.interceptor';
 import { JwtStrategy } from './common/strategies/jwt.strategy';
 import { envValidationSchema } from './config/env.validation';
+import { AlertsModule } from './modules/alerts/alerts.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { FoliosModule } from './modules/folios/folios.module';
 import { GuestsModule } from './modules/guests/guests.module';
@@ -74,6 +75,7 @@ import { PrismaModule } from './prisma/prisma.module';
     CommsLogModule,
     ReportsModule,
     BackupsModule,
+    AlertsModule,
   ],
   providers: [
     JwtStrategy,

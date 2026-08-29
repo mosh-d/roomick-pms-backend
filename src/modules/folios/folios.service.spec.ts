@@ -441,5 +441,39 @@ describe('FoliosService', () => {
       const [row] = await service.listFolios(TENANT_ID, BRANCH_ID, 'all');
       expect(row.guestStatus).toBeNull();
     });
+
+    /**
+     * Found live, once the Alerts module started aggregating across both:
+     * a guest who's STILL checked in past their own checkout date owes a
+     * balance too, but this filter's own doc comment names it a "City
+     * Ledger receivable" — that's a *departed* guest who still owes,
+     * `PMS-OPERATIONS-GUIDE.md`'s own distinction. Before this fix, a
+     * checked-in overdue-checkout guest showed up in BOTH `overdue` here
+     * AND the new Alerts module's own "overdue checkout" category — one
+     * real problem read as two.
+     */
+    it('overdue requires guestStatus city_ledger — a still-checked-in guest past checkout does NOT count, even with a past-due checkOutDate and a balance owed', async () => {
+      const pastDate = new Date('2000-01-01');
+      tx.folio.findMany.mockResolvedValue([folioRow({ reservation: { id: RESERVATION_ID, status: 'checked_in', checkOutDate: pastDate } })]);
+      tx.lineItem.findMany.mockResolvedValue([{ amount: new Prisma.Decimal('100'), chargeType: 'room' }]);
+      const rows = await service.listFolios(TENANT_ID, BRANCH_ID, 'overdue');
+      expect(rows).toHaveLength(0);
+    });
+
+    it('overdue includes a genuinely checked-out guest with a past checkOutDate and a balance owed', async () => {
+      const pastDate = new Date('2000-01-01');
+      tx.folio.findMany.mockResolvedValue([folioRow({ reservation: { id: RESERVATION_ID, status: 'checked_out', checkOutDate: pastDate } })]);
+      tx.lineItem.findMany.mockResolvedValue([{ amount: new Prisma.Decimal('100'), chargeType: 'room' }]);
+      const rows = await service.listFolios(TENANT_ID, BRANCH_ID, 'overdue');
+      expect(rows).toHaveLength(1);
+    });
+
+    it('overdue excludes a checked-out guest whose checkOutDate has NOT actually passed yet', async () => {
+      const futureDate = new Date('2099-01-01');
+      tx.folio.findMany.mockResolvedValue([folioRow({ reservation: { id: RESERVATION_ID, status: 'checked_out', checkOutDate: futureDate } })]);
+      tx.lineItem.findMany.mockResolvedValue([{ amount: new Prisma.Decimal('100'), chargeType: 'room' }]);
+      const rows = await service.listFolios(TENANT_ID, BRANCH_ID, 'overdue');
+      expect(rows).toHaveLength(0);
+    });
   });
 });

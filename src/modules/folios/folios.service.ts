@@ -579,7 +579,14 @@ export class FoliosService {
 
       if (filter === 'outstanding') return rows.filter((r) => r.balanceDue.greaterThan(0));
       if (filter === 'overdue') {
-        return rows.filter((r) => r.balanceDue.greaterThan(0) && r.reservation != null && r.reservation.checkOutDate < today);
+        // `guestStatus === 'city_ledger'` (not just "balance>0 and checkOutDate
+        // passed" alone) — a guest who's STILL checked in past their own
+        // checkout date is a real problem, but it's the new Alerts module's
+        // own "overdue checkout" category, not this one; without this guard
+        // the same guest showed up in BOTH lists as two "different" alerts
+        // for what front desk experiences as one issue (caught live, once
+        // Alerts started aggregating across both).
+        return rows.filter((r) => r.guestStatus === 'city_ledger' && r.reservation != null && r.reservation.checkOutDate < today);
       }
       return rows;
     });
