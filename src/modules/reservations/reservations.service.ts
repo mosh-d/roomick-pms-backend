@@ -18,6 +18,7 @@ import {
   CancelReservationDto,
   CheckInDto,
   CreateReservationDto,
+  ExtendStayDto,
   ListReservationsQueryDto,
   ModifyReservationDto,
   ReinstateNoShowDto,
@@ -942,6 +943,101 @@ export class ReservationsService {
         reason: dto.reason,
         before: { checkInDate: reservation.checkInDate, checkOutDate: reservation.checkOutDate, roomTypeId: reservation.roomTypeId, confirmedRate: reservation.confirmedRate.toFixed(2) },
         after: { checkInDate, checkOutDate, roomTypeId, confirmedRate: resolved.subtotal.toFixed(2) },
+      });
+      return updated;
+    });
+  }
+
+  /**
+   * `modifyReservation` deliberately rejects `checked_in` reservations —
+   * "needs folio reconciliation, out of scope here" (its own comment).
+   * This is the narrower operation that reconciliation actually requires:
+   * a checked-in guest wanting more nights in the SAME room, not a general
+   * date/room-type/party-size change mid-stay. Real edge case this closes,
+   * matching a confirmed production bug class the in-house PMS's own
+   * incident history named (`docs/LESSONS-LEARNED.md`): extending a stay
+   * without recomputing the stay-total rate leaves guests undercharged —
+   * `total_rate ÷ nights` (Roomick's own `confirmedRate ÷ nights`,
+   * `postRoomChargeForDate`'s own derivation) silently drops once `nights`
+   * grows but the numerator doesn't. Re-resolving through the Rate
+   * Resolver for the FULL new date range and writing the new
+   * `confirmedRate` back is what keeps that division honest for every
+   * night posted from here on — nights already posted (real `LineItem`
+   * rows) are never touched, matching the append-only ledger everywhere
+   * else in this module.
+   */
+  async extendStay(tenantId: string, reservationId: string, dto: ExtendStayDto, actorId: string) {
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const reservation = await this.findReservationOrThrow(tx, reservationId);
+      if (reservation.status !== 'checked_in') {
+        throw new ConflictException({
+          code: ErrorCode.INVALID_STATUS_TRANSITION,
+          message: `Cannot extend a reservation with status "${reservation.status}" — only a checked-in stay can be extended`,
+        });
+      }
+      if (!reservation.roomId) {
+        // Can't happen in practice (check-in always assigns a room before
+        // flipping to checked_in) — guarded anyway since the type is nullable.
+        throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: 'This reservation has no room assigned' });
+      }
+
+      const newCheckOutDate = toBranchDate(dto.checkOutDate);
+      if (newCheckOutDate <= reservation.checkOutDate) {
+        throw new BadRequestException({
+          code: ErrorCode.VALIDATION_FAILED,
+          message: 'The new check-out date must be after the current check-out date — this extends a stay, it does not shorten one',
+        });
+      }
+
+      // Room-TYPE pool check, scoped to just the extension nights (old
+      // checkout → new checkout) and excluding this reservation's own
+      // existing hold — the same "re-check EXCLUDING its own current hold"
+      // shape `modifyReservation` already uses. A checked-in guest keeps
+      // their own physical room in practice; this proves the type's pool
+      // isn't already fully committed to other guests for those nights.
+      await this.assertAvailableForStay(tx, reservation.branchId, reservation.roomTypeId, reservation.checkOutDate, newCheckOutDate, reservationId);
+
+      // The SPECIFIC assigned room must also be free of any block for the
+      // extension nights — the pool check above can't see this; it counts
+      // rooms, not which one this particular guest is standing in.
+      const overlappingBlock = await tx.roomBlock.findFirst({
+        where: { roomId: reservation.roomId, fromDate: { lt: newCheckOutDate }, toDate: { gte: reservation.checkOutDate } },
+      });
+      if (overlappingBlock) {
+        throw new ConflictException({ code: ErrorCode.RESERVATION_NOT_AVAILABLE, message: 'This room is blocked for part of the extension' });
+      }
+
+      const roomType = await this.assertRoomType(tx, reservation.branchId, reservation.roomTypeId);
+      const resolved = await this.rateResolverService.resolveStay(
+        tx,
+        tenantId,
+        reservation.branchId,
+        roomType,
+        reservation.checkInDate,
+        newCheckOutDate,
+        {},
+        { triggeredBy: 'extend_stay', userId: actorId, reservationId },
+      );
+
+      const previousCheckOutDate = reservation.checkOutDate;
+      const updated = await tx.reservation.update({
+        where: { id: reservationId },
+        data: { checkOutDate: newCheckOutDate, confirmedRate: resolved.subtotal, ratePlanId: resolved.ratePlanId },
+        include: RESERVATION_INCLUDE,
+      });
+
+      await this.audit(tx, tenantId, reservation.branchId, actorId, 'reservation.extended', reservationId, {
+        previousCheckOutDate,
+        newCheckOutDate,
+        confirmedRate: resolved.subtotal.toFixed(2),
+      });
+      await this.commsLogService.logAutomatedInTx(tx, tenantId, reservation.branchId, {
+        reservationId,
+        guestId: reservation.guestId,
+        channel: 'email',
+        subject: `Your stay has been extended — ${reservation.confirmationNumber}`,
+        body: `Your check-out date is now ${newCheckOutDate.toISOString().slice(0, 10)}.`,
+        trigger: 'stay_extended',
       });
       return updated;
     });

@@ -1015,6 +1015,88 @@ describe('ReservationsService', () => {
     });
   });
 
+  describe('extendStay', () => {
+    const dto = { checkOutDate: '2026-09-06' };
+
+    it('rejects a reservation that is not checked_in — modifyReservation covers pre-check-in date changes', async () => {
+      tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'confirmed', roomId: ROOM_ID }));
+      await expect(service.extendStay(TENANT_ID, RESERVATION_ID, dto, ACTOR_ID)).rejects.toThrow(ConflictException);
+    });
+
+    it('rejects a checked_in reservation with no room assigned', async () => {
+      tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'checked_in', roomId: null }));
+      await expect(service.extendStay(TENANT_ID, RESERVATION_ID, dto, ACTOR_ID)).rejects.toThrow(BadRequestException);
+    });
+
+    it('rejects a new checkOutDate that does not come after the current one', async () => {
+      tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'checked_in', roomId: ROOM_ID, checkOutDate: new Date('2026-09-04T00:00:00.000Z') }));
+      await expect(
+        service.extendStay(TENANT_ID, RESERVATION_ID, { checkOutDate: '2026-09-04' }, ACTOR_ID),
+      ).rejects.toThrow(BadRequestException);
+      await expect(
+        service.extendStay(TENANT_ID, RESERVATION_ID, { checkOutDate: '2026-09-01' }, ACTOR_ID),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('rejects when the room type has no pool availability for the extension window', async () => {
+      tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'checked_in', roomId: ROOM_ID }));
+      tx.room.count.mockResolvedValue(0);
+      await expect(service.extendStay(TENANT_ID, RESERVATION_ID, dto, ACTOR_ID)).rejects.toThrow(ConflictException);
+    });
+
+    it('checks pool availability scoped to just the extension nights, excluding its own hold', async () => {
+      tx.reservation.findFirst.mockResolvedValue(
+        reservation({ status: 'checked_in', roomId: ROOM_ID, checkOutDate: new Date('2026-09-04T00:00:00.000Z') }),
+      );
+      await service.extendStay(TENANT_ID, RESERVATION_ID, dto, ACTOR_ID);
+      expect(tx.reservation.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: expect.objectContaining({ id: { not: RESERVATION_ID } }) }),
+      );
+    });
+
+    it('rejects when the specific assigned room is blocked for part of the extension', async () => {
+      tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'checked_in', roomId: ROOM_ID }));
+      tx.roomBlock.findFirst.mockResolvedValue({ id: 'block-1' });
+      await expect(service.extendStay(TENANT_ID, RESERVATION_ID, dto, ACTOR_ID)).rejects.toThrow(ConflictException);
+    });
+
+    it('re-resolves the rate over check-in → NEW check-out and rewrites confirmedRate/ratePlanId', async () => {
+      tx.reservation.findFirst.mockResolvedValue(
+        reservation({ status: 'checked_in', roomId: ROOM_ID, checkInDate: new Date('2026-09-01T00:00:00.000Z'), checkOutDate: new Date('2026-09-04T00:00:00.000Z') }),
+      );
+      const result = await service.extendStay(TENANT_ID, RESERVATION_ID, { checkOutDate: '2026-09-06' }, ACTOR_ID);
+      expect(rateResolverService.resolveStay).toHaveBeenCalledWith(
+        tx,
+        TENANT_ID,
+        BRANCH_ID,
+        expect.objectContaining({ id: TYPE_ID }),
+        new Date('2026-09-01T00:00:00.000Z'),
+        new Date('2026-09-06T00:00:00.000Z'),
+        {},
+        { triggeredBy: 'extend_stay', userId: ACTOR_ID, reservationId: RESERVATION_ID },
+      );
+      // 2026-09-01 -> 2026-09-06 = 5 nights, baseRate 100 -> 500
+      expect(String((result as unknown as { confirmedRate: unknown }).confirmedRate)).toBe('500');
+      expect(tx.reservation.update).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ checkOutDate: new Date('2026-09-06T00:00:00.000Z') }) }),
+      );
+    });
+
+    it('writes an audit log and an automated stay_extended comms entry', async () => {
+      tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'checked_in', roomId: ROOM_ID }));
+      await service.extendStay(TENANT_ID, RESERVATION_ID, dto, ACTOR_ID);
+      expect(tx.auditLog.create).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ action: 'reservation.extended' }) }),
+      );
+      expect(commsLogService.logAutomatedInTx).toHaveBeenCalledWith(
+        tx,
+        TENANT_ID,
+        BRANCH_ID,
+        expect.objectContaining({ reservationId: RESERVATION_ID, trigger: 'stay_extended' }),
+      );
+    });
+  });
+
   describe('promoteFromWaitlist', () => {
     it('rejects a non-waitlisted reservation', async () => {
       tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'confirmed' }));

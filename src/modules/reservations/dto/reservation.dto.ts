@@ -175,6 +175,12 @@ export class CheckInDto {
   idDocument?: RecordIdDocumentDto;
 }
 
+export class ExtendStayDto {
+  @ApiProperty({ example: '2026-09-06', description: 'Must be strictly after the reservation\'s current checkOutDate' })
+  @IsISO8601({ strict: true })
+  checkOutDate!: string;
+}
+
 export class CancelReservationDto {
   @ApiPropertyOptional({ example: 'Guest called to cancel' })
   @IsOptional()

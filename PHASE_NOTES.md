@@ -1,5 +1,29 @@
 # Phase Notes
 
+## Extend Stay (2026-08-29)
+
+Requested directly: the In-House Guest List should show when a guest is due out and let front desk extend them from there, and the Departures Dashboard needs the same action for a guest at the desk who decides to stay longer.
+
+### Why this is a new method, not a loosened `modifyReservation`
+`modifyReservation` already exists for pre-check-in date/room-type/party-size changes, but it explicitly rejects `status === 'checked_in'` — its own comment names the reason: a checked-in stay needs folio reconciliation that method never touches. Loosening that guard would have quietly reopened a case it was deliberately scoped away from. `extendStay` is narrower on purpose: one field (`checkOutDate`, strictly after the current one), only valid on a `checked_in` reservation with a room already assigned.
+
+### The bug class this was built to avoid, named directly in the in-house PMS's own `docs/LESSONS-LEARNED.md`
+That codebase shipped an `extendStay()` that moved `checkOutDate` without recomputing `total_rate` — its own postmortem: *"2 still in-house undercharged roughly half of what they owed."* Roomick's accrual model makes the same mistake just as easy to make: `postRoomChargeForDate` derives each night's charge as `overrideRate ?? (confirmedRate / nights)`, computed fresh at posting time. Move `checkOutDate` later without touching `confirmedRate` and every future night silently dilutes to a smaller fraction of the OLD total — the guest pays less per night the longer they stay, with no error anywhere. `extendStay` re-resolves through `RateResolverService.resolveStay` over the full check-in → NEW check-out range and writes both `confirmedRate` and `ratePlanId` from that result, never just appending a flat per-night amount to the old total.
+
+### Two-tier availability check, mirroring the shapes that already existed
+- **Room-TYPE pool**, via the existing `assertAvailableForStay`, scoped to just the extension window (old checkout → new checkout) and excluding the reservation's own hold — the same "re-check EXCLUDING its own current hold" shape `modifyReservation` already uses.
+- **The SPECIFIC assigned room**, via a direct `RoomBlock` overlap query mirroring `assertRoomCheckInReady`'s own pattern — the pool check alone can't see which exact room this particular guest is standing in; a block on their own room during the extension nights must reject even if the type's pool overall still has space.
+
+A new `TriggeredBy` value, `'extend_stay'`, was added to the rate resolver's own union (and the `RateAuditLog.triggeredBy` column comment, a plain `VARCHAR(30)`, no migration needed) so an extension's audit trail reads distinctly from a `modify`.
+
+### Frontend
+One shared `ExtendStayDialog` (`app/dashboard/_components/`), opened from both the In-House Guest List (Check-Out Date column already showed "due out"; gained the Extend Stay action beside View Folio) and the Departures Dashboard (beside Check-Out). Defaults the new date to the day after the current checkout via the existing `dayAfter` helper; a guest extended past today correctly disappears from Departures' own date-scoped list on the next refetch, no extra client logic needed.
+
+### Verified
+`npx tsc --noEmit`, `npm run lint` (0 errors), `npm test` — 390 tests, all green (8 new: rejects a non-checked-in reservation, rejects a checked-in reservation missing a room, rejects a checkOutDate that doesn't move forward, rejects when the room-type pool has no space for the extension window (and confirms the check excludes its own hold), rejects when the specific assigned room is blocked, confirms the rate is re-resolved over check-in→NEW-checkout and both `confirmedRate`/`ratePlanId` are rewritten, confirms the audit log + `stay_extended` comms entry are written).
+
+Live, against real Postgres: checked in a 2-night stay (confirmedRate 60000 at 30000/night), confirmed a `confirmed`-status reservation is rejected (409) and an equal/shorter date is rejected (400), blocked the assigned room across part of a proposed extension and confirmed that's rejected (409) even though the room type's pool had space, then extended to 5 nights and confirmed `confirmedRate` came back as the FULL re-resolved 150000 — not 60000 plus a bolted-on 90000 — with a `stay_extended` comms-log row. Drove the real browser through both surfaces: opened the dialog from the In-House Guest List, extended again to 7 nights, confirmed the list and the API both reflected the new date and the re-resolved 210000 total; separately checked in a guest due out today, extended them from the Departures Dashboard, and confirmed they dropped off today's departures list once their checkout moved past today. Zero console/page errors throughout.
+
 ## Capacity enforcement, and a research pass against the in-house PMS (2026-08-29)
 
 A batch of feedback from actually using the app: a walk-in booking accepted 4 adults + 9 children against a room type with real capacity limits, with no cap or warning anywhere. Asked to also look at how the in-house PMS (`five-clover-nestjs-backend`) resolves edge cases like this and port anything worth porting.

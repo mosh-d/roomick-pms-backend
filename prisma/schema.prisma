@@ -814,7 +814,7 @@ model RateAuditLog {
   reservationId String?  @db.Uuid // NULL during pre-booking calculation
   input         Json // full resolver request payload
   result        Json // full cascade trace: {finalRate, isOverride, overrideRatePlanId, cascade:[{tier, ratePlanId, amountBefore, adjustment, amountAfter}]}
-  triggeredBy   String?  @db.VarChar(30) // checkin | booking_create | override | ota_import | walkin
+  triggeredBy   String?  @db.VarChar(30) // checkin | booking_create | override | ota_import | walkin | modify | extend_stay
   userId        String?  @db.Uuid // NULL = automated
   resolvedAt    DateTime @default(now()) @db.Timestamptz(6)
 

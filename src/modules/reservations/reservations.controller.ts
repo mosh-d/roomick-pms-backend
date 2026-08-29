@@ -9,6 +9,7 @@ import {
   CancelReservationDto,
   CheckInDto,
   CreateReservationDto,
+  ExtendStayDto,
   ListReservationsQueryDto,
   ModifyReservationDto,
   ReinstateNoShowDto,
@@ -171,6 +172,18 @@ export class ReservationsController {
     @Body() dto: ModifyReservationDto,
   ): ReturnType<ReservationsService['modifyReservation']> {
     return this.reservationsService.modifyReservation(tenantId, reservationId, dto, user.sub);
+  }
+
+  @Patch('reservations/:reservationId/extend-stay')
+  @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk)
+  @ApiOperation({ summary: 'Push a checked-in guest\'s check-out date later — the one thing `modify` deliberately excludes for a checked-in stay' })
+  extendStay(
+    @CurrentTenant() tenantId: string,
+    @CurrentUser() user: JwtPayload,
+    @Param('reservationId', ParseUUIDPipe) reservationId: string,
+    @Body() dto: ExtendStayDto,
+  ): ReturnType<ReservationsService['extendStay']> {
+    return this.reservationsService.extendStay(tenantId, reservationId, dto, user.sub);
   }
 
   @Post('reservations/:reservationId/promote')
