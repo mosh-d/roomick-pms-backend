@@ -1,5 +1,22 @@
 # Phase Notes
 
+## Manager Dashboard — Rate Override, first of the 11 Management/Admin gaps (2026-08-29)
+
+The sidebar restructuring phase surfaced 11 confirmed real gaps (Manager Dashboard, Guest Profiles & CRM, Revenue Management, Sales & Events, Maintenance, Loyalty & Marketing, Property Config, Integrations & APIs, Security & Roles, System Admin, Enterprise/HQ) as honest placeholders rather than silently building any of them. Asked directly to scope, sequence, and begin implementing them. Manager Dashboard went first — of the three feature cards the architecture map's own `page-manager` section specifies (Operations Overview, Rate Override, Staff Management), two needed zero new backend work (Operations Overview composes existing report/alerts/reservation endpoints; Staff Management wraps P1's staff/invite/role endpoints, which shipped with no frontend at all). Rate Override was the one genuinely new piece.
+
+### `overrideRate`/`overrideReason` — columns that existed since P0, never written until now
+`ReservationsService.setRateOverride` (new) — `PATCH /reservations/:id/rate-override`, `@Roles(Owner, Manager)` only (front desk excluded, matching the reference's own "Manager approves or sets manual rates" framing). Pins an absolute nightly rate, independent of `confirmedRate` (the Rate Resolver's own stay-total output) — `postRoomChargeForDate` already prefers `overrideRate` over `confirmedRate / nights` when posting a night's charge, so this only affects nights not yet posted; already-posted line items are untouched, matching the append-only ledger discipline the rest of this codebase already holds to.
+
+Deliberately allowed on BOTH `confirmed` and `checked_in` (not just pre-arrival) — the reference's own framing is a manager stepping into a live situation (a service-recovery gesture, a VIP comp), which is just as often mid-stay as it is before it. Rejected once there's nothing left to charge for (`checked_out`/`cancelled`/`no_show`/`walked`) or before a stay is confirmed at all (`waitlisted`). Every call writes an audit row (`reservation.rate_overridden`) naming both the previous and new override rate plus the reason — the reference's own "Audit trail notice" UI chip, backed by a real record rather than just a UI toast.
+
+### Verified
+`npx tsc --noEmit`, `npm run lint` (0 errors), `npm test` — 399 tests, all green (9 new: allows confirmed and checked_in, rejects the other five statuses individually, audit log names the previous override correctly whether one existed before or not).
+
+Live, against real Postgres: rejected an override attempt on a waitlisted reservation (409), then set a 22000 override on a checked-in reservation with confirmedRate 60000 and confirmed the two fields stayed fully independent — `confirmedRate` unchanged at 60000, `overrideRate` correctly persisted at 22000. Drove the real browser through the full Manager Dashboard page (KPI cards, room-status mini-map, reservation search, staff table, invite flow) — see the frontend's own `PHASE_NOTES.md` for the full walkthrough.
+
+### Carried forward
+- 10 of the 11 Management/Admin gaps remain — next in the sequence is Security & Roles, though the architecture map's own spec for it (Role/Permission matrix, Audit Log Viewer, GDPR compliance) turned out to overlap LESS with existing endpoints than first assumed: `GET /auth/roles` + `PUT /auth/roles/:roleId/permissions` already exist from P1, but a general `GET /audit-logs` browsing endpoint and the entire GDPR data-request flow are both net-new.
+
 ## Extend Stay (2026-08-29)
 
 Requested directly: the In-House Guest List should show when a guest is due out and let front desk extend them from there, and the Departures Dashboard needs the same action for a guest at the desk who decides to stay longer.

@@ -13,6 +13,7 @@ import {
   ListReservationsQueryDto,
   ModifyReservationDto,
   ReinstateNoShowDto,
+  SetRateOverrideDto,
   WalkInReservationDto,
   WalkReservationDto,
 } from './dto/reservation.dto';
@@ -184,6 +185,18 @@ export class ReservationsController {
     @Body() dto: ExtendStayDto,
   ): ReturnType<ReservationsService['extendStay']> {
     return this.reservationsService.extendStay(tenantId, reservationId, dto, user.sub);
+  }
+
+  @Patch('reservations/:reservationId/rate-override')
+  @Roles(SystemRole.Owner, SystemRole.Manager)
+  @ApiOperation({ summary: 'Pin an absolute nightly rate on a confirmed or checked-in reservation — a manager-level override, not front desk' })
+  setRateOverride(
+    @CurrentTenant() tenantId: string,
+    @CurrentUser() user: JwtPayload,
+    @Param('reservationId', ParseUUIDPipe) reservationId: string,
+    @Body() dto: SetRateOverrideDto,
+  ): ReturnType<ReservationsService['setRateOverride']> {
+    return this.reservationsService.setRateOverride(tenantId, reservationId, dto, user.sub);
   }
 
   @Post('reservations/:reservationId/promote')

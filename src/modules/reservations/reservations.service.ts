@@ -22,6 +22,7 @@ import {
   ListReservationsQueryDto,
   ModifyReservationDto,
   ReinstateNoShowDto,
+  SetRateOverrideDto,
   WalkInReservationDto,
   WalkReservationDto,
 } from './dto/reservation.dto';
@@ -1038,6 +1039,42 @@ export class ReservationsService {
         subject: `Your stay has been extended — ${reservation.confirmationNumber}`,
         body: `Your check-out date is now ${newCheckOutDate.toISOString().slice(0, 10)}.`,
         trigger: 'stay_extended',
+      });
+      return updated;
+    });
+  }
+
+  /**
+   * Manager Dashboard's "Rate Override" — pins an absolute nightly rate,
+   * independent of `confirmedRate` (the stay total the Rate Resolver
+   * produced). Deliberately NOT restricted to pre-check-in: the whole point
+   * is a manager stepping in on a live folio (a service-recovery gesture,
+   * a VIP comp) just as much as a pre-arrival adjustment — `checked_in` is
+   * allowed. Rejected only once nothing is left to charge for
+   * (`checked_out`/`cancelled`/`no_show`/`walked`), and on `waitlisted`
+   * (no confirmed stay yet to override).
+   */
+  async setRateOverride(tenantId: string, reservationId: string, dto: SetRateOverrideDto, actorId: string) {
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const reservation = await this.findReservationOrThrow(tx, reservationId);
+      if (reservation.status !== 'confirmed' && reservation.status !== 'checked_in') {
+        throw new ConflictException({
+          code: ErrorCode.INVALID_STATUS_TRANSITION,
+          message: `Cannot override the rate on a reservation with status "${reservation.status}" — only a confirmed or checked-in stay has charges left to affect`,
+        });
+      }
+
+      const previousOverrideRate = reservation.overrideRate ? reservation.overrideRate.toFixed(2) : null;
+      const updated = await tx.reservation.update({
+        where: { id: reservationId },
+        data: { overrideRate: dto.overrideRate, overrideReason: dto.reason },
+        include: RESERVATION_INCLUDE,
+      });
+
+      await this.audit(tx, tenantId, reservation.branchId, actorId, 'reservation.rate_overridden', reservationId, {
+        previousOverrideRate,
+        overrideRate: dto.overrideRate.toFixed(2),
+        reason: dto.reason,
       });
       return updated;
     });

@@ -1097,6 +1097,49 @@ describe('ReservationsService', () => {
     });
   });
 
+  describe('setRateOverride', () => {
+    const dto = { overrideRate: 25000, reason: 'Service recovery — delayed check-in' };
+
+    it('allows a confirmed reservation', async () => {
+      tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'confirmed' }));
+      await expect(service.setRateOverride(TENANT_ID, RESERVATION_ID, dto, ACTOR_ID)).resolves.toBeDefined();
+      expect(tx.reservation.update).toHaveBeenCalledWith(
+        expect.objectContaining({ data: { overrideRate: 25000, overrideReason: dto.reason } }),
+      );
+    });
+
+    it('allows a checked_in reservation too — a manager can override a live folio, not just pre-arrival', async () => {
+      tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'checked_in' }));
+      await expect(service.setRateOverride(TENANT_ID, RESERVATION_ID, dto, ACTOR_ID)).resolves.toBeDefined();
+    });
+
+    it.each(['checked_out', 'cancelled', 'no_show', 'walked', 'waitlisted'])('rejects a %s reservation — nothing left to charge for (or not confirmed yet)', async (status) => {
+      tx.reservation.findFirst.mockResolvedValue(reservation({ status }));
+      await expect(service.setRateOverride(TENANT_ID, RESERVATION_ID, dto, ACTOR_ID)).rejects.toThrow(ConflictException);
+    });
+
+    it('writes an audit log naming the previous and new override rate', async () => {
+      tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'confirmed', overrideRate: { toFixed: () => '20000.00' } }));
+      await service.setRateOverride(TENANT_ID, RESERVATION_ID, dto, ACTOR_ID);
+      expect(tx.auditLog.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            action: 'reservation.rate_overridden',
+            after: expect.objectContaining({ previousOverrideRate: '20000.00', overrideRate: '25000.00', reason: dto.reason }),
+          }),
+        }),
+      );
+    });
+
+    it('a reservation with no prior override records previousOverrideRate as null', async () => {
+      tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'confirmed', overrideRate: null }));
+      await service.setRateOverride(TENANT_ID, RESERVATION_ID, dto, ACTOR_ID);
+      expect(tx.auditLog.create).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ after: expect.objectContaining({ previousOverrideRate: null }) }) }),
+      );
+    });
+  });
+
   describe('promoteFromWaitlist', () => {
     it('rejects a non-waitlisted reservation', async () => {
       tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'confirmed' }));
