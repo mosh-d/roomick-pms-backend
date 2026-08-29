@@ -287,6 +287,7 @@ export class ReservationsService {
     return this.prisma.withTenant(tenantId, async (tx) => {
       await this.propertyService.assertBranch(tx, branchId);
       const roomType = await this.assertRoomType(tx, branchId, dto.roomTypeId);
+      this.assertWithinCapacity(roomType, dto.adults, dto.children ?? 0);
       const guest = await this.guestsService.findOrCreateGuestInTx(tx, tenantId, guestInput);
 
       // Serializes concurrent creates for the SAME room type only — closes
@@ -359,6 +360,7 @@ export class ReservationsService {
       this.assertValidRange(checkInDate, checkOutDate);
 
       const roomType = await this.assertRoomType(tx, branchId, dto.roomTypeId);
+      this.assertWithinCapacity(roomType, dto.adults, dto.children ?? 0);
       const guest = await this.guestsService.findOrCreateGuestInTx(tx, tenantId, guestInput);
 
       const room = await tx.room.findFirst({ where: { id: dto.roomId, deletedAt: null } });
@@ -889,6 +891,7 @@ export class ReservationsService {
       this.assertValidRange(checkInDate, checkOutDate);
       const roomTypeId = dto.roomTypeId ?? reservation.roomTypeId;
       const roomType = await this.assertRoomType(tx, reservation.branchId, roomTypeId);
+      this.assertWithinCapacity(roomType, dto.adults ?? reservation.adults, dto.children ?? reservation.children);
 
       const datesOrRoomTypeChanged =
         checkInDate.getTime() !== reservation.checkInDate.getTime() ||
@@ -1144,6 +1147,23 @@ export class ReservationsService {
       throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Room type not found at this branch' });
     }
     return roomType;
+  }
+
+  /**
+   * `RoomType.capacity` (`{adults, children}`, set once at room-type
+   * creation) was never actually checked against anywhere — a booking for
+   * 4 adults and 9 children against a 2-adult room type went through with
+   * no cap and no warning. Adults/children are checked independently, not
+   * combined into one total, matching the field's own two-number shape.
+   */
+  private assertWithinCapacity(roomType: RoomType, adults: number, children: number): void {
+    const capacity = roomType.capacity as { adults: number; children: number };
+    if (adults > capacity.adults || children > capacity.children) {
+      throw new BadRequestException({
+        code: ErrorCode.VALIDATION_FAILED,
+        message: `${roomType.name} sleeps up to ${capacity.adults} adult(s) and ${capacity.children} child(ren) — ${adults} adult(s) and ${children} child(ren) exceeds capacity`,
+      });
+    }
   }
 
   private async assertAvailableForStay(

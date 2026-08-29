@@ -1,5 +1,29 @@
 # Phase Notes
 
+## Capacity enforcement, and a research pass against the in-house PMS (2026-08-29)
+
+A batch of feedback from actually using the app: a walk-in booking accepted 4 adults + 9 children against a room type with real capacity limits, with no cap or warning anywhere. Asked to also look at how the in-house PMS (`five-clover-nestjs-backend`) resolves edge cases like this and port anything worth porting.
+
+### The research came back mostly empty-handed — but that itself is the useful finding
+The in-house PMS was investigated for: capacity enforcement, group/block bookings, camera-based ID capture. All three came back the same way: **it doesn't have them either.** Reservations there don't even store `adults`/`children` — `capacity`-shaped columns on `RoomType` are pure display metadata, never checked against anything. Group/block booking is an explicit, named, *unbuilt* "Phase 4" item in that codebase's own roadmap doc. No ID capture (camera or file) exists there at all. So this wasn't "port a solved pattern" for any of the three — it was "confirm there's nothing to copy, then build it properly from scratch," which is a meaningfully different (and more careful) starting point than assuming a port was possible.
+
+Two things WERE solved well there and genuinely got ported: checkout-date auto-advance when check-in changes, and an add-a-charge form that defaults its date field and clears itself after submit — see both below, and the frontend's own PHASE_NOTES entry for the fuller comparison.
+
+### `RoomType.capacity` finally enforced
+`ReservationsService.assertWithinCapacity` (new) checks a resolved room type's `capacity` (`{adults, children}`, present in the schema since P1 but never read anywhere) against the party size, independently for adults and children — a room sleeping 2 adults/1 child rejects 2 adults/2 children even though "adults" alone would pass. Wired into all three places party size is ever set or changed: `createReservation`, `walkIn`, `modifyReservation`. A straightforward `VALIDATION_FAILED` 400, not a new error code — this is the same class of "bad input relative to a resolved resource" `assertValidRange` already uses that code for.
+
+### Two things confirmed already correct, while looking
+The research flagged two general hardening patterns from the in-house PMS's own incident history worth spot-checking here:
+- **Check-then-act race on the last room of a type**: already handled — `createReservation` takes `SELECT id FROM room_types ... FOR UPDATE` before checking availability (line ~295), serializing concurrent creates for the same room type. The in-house PMS hit this as a real production bug (two simultaneous bookings for the last room both succeeding) before adding the equivalent advisory lock; Roomick already had it.
+- **Truthiness-vs-presence on a numeric override field** (their own real bug: a 100%-discount override of exactly `0` was treated as "no override sent" because `0` is falsy): checked `overrideRate` handling in `folios.service.ts` and `reservations.service.ts` — both do `reservation.overrideRate ? X : Y`. Confirmed safe, not by luck: `Prisma.Decimal` is always an object when non-null, and a non-null object is truthy regardless of the number it wraps — `new Decimal(0)` is truthy. The bug class the in-house PMS hit specifically requires a raw JS number primitive; Roomick's Decimal fields structurally can't have it.
+
+### Verified
+`npx tsc --noEmit`, `npm run lint` (0 errors), `npm test` — 382 tests, all green (5 new: capacity rejected/allowed on `createReservation`, capacity checked independently for adults vs. children, `walkIn` and `modifyReservation` both reject an over-capacity party too). Live, against real Postgres: created a 2-adult/1-child room type, confirmed the API rejects a 4-adult/9-child booking against it (400, the exact numbers named in the message) and accepts one at exactly 2/1.
+
+### Carried forward
+- Group/block bookings — confirmed neither PMS has this built. Real, novel design work if wanted (multi-room reservation under one group reference, a lead guest, group check-in as one action) — not a quick addition, and not scoped yet.
+
+
 ## Alerts — missed check-ins, overdue checkouts, overdue balances (2026-08-29)
 
 Reported directly: a guest checked in on the 28th, viewed on the 29th, well past a one-night stay's checkout — and nothing anywhere said so. Front desk had to already know to go looking. Asked to look at how the in-house PMS (`five-clover-nestjs-backend`) solves this and port the same design.

@@ -45,7 +45,7 @@ function makeTx() {
   return {
     room: { count: jest.fn().mockResolvedValue(5), findFirst: jest.fn() },
     roomType: {
-      findFirst: jest.fn().mockResolvedValue({ id: TYPE_ID, branchId: BRANCH_ID, baseRate: '100.00' }),
+      findFirst: jest.fn().mockResolvedValue({ id: TYPE_ID, branchId: BRANCH_ID, name: 'Standard', baseRate: '100.00', capacity: { adults: 10, children: 10 } }),
       findMany: jest.fn().mockResolvedValue([{ id: TYPE_ID, name: 'Standard' }]),
     },
     roomBlock: { findMany: jest.fn().mockResolvedValue([]), findFirst: jest.fn().mockResolvedValue(null) },
@@ -296,6 +296,21 @@ describe('ReservationsService', () => {
   describe('createReservation', () => {
     const dto = { guestId: GUEST_ID, roomTypeId: TYPE_ID, checkInDate: '2026-09-01', checkOutDate: '2026-09-04', adults: 2 };
 
+    it('rejects a party exceeding the room type\'s own capacity', async () => {
+      tx.roomType.findFirst.mockResolvedValueOnce({ id: TYPE_ID, branchId: BRANCH_ID, name: 'Standard', baseRate: '100.00', capacity: { adults: 2, children: 0 } });
+      await expect(service.createReservation(TENANT_ID, BRANCH_ID, { ...dto, adults: 4, children: 9 }, ACTOR_ID)).rejects.toThrow(BadRequestException);
+    });
+
+    it('checks adults and children independently — too many children still rejects even with adults within range', async () => {
+      tx.roomType.findFirst.mockResolvedValueOnce({ id: TYPE_ID, branchId: BRANCH_ID, name: 'Standard', baseRate: '100.00', capacity: { adults: 2, children: 1 } });
+      await expect(service.createReservation(TENANT_ID, BRANCH_ID, { ...dto, adults: 2, children: 2 }, ACTOR_ID)).rejects.toThrow(BadRequestException);
+    });
+
+    it('allows a party at exactly the room type\'s capacity', async () => {
+      tx.roomType.findFirst.mockResolvedValueOnce({ id: TYPE_ID, branchId: BRANCH_ID, name: 'Standard', baseRate: '100.00', capacity: { adults: 2, children: 1 } });
+      await expect(service.createReservation(TENANT_ID, BRANCH_ID, { ...dto, adults: 2, children: 1 }, ACTOR_ID)).resolves.toBeDefined();
+    });
+
     it('sets confirmedRate = baseRate × nights as a Decimal', async () => {
       const result = await service.createReservation(TENANT_ID, BRANCH_ID, dto, ACTOR_ID);
       expect(tx.reservation.create).toHaveBeenCalledWith(
@@ -493,6 +508,12 @@ describe('ReservationsService', () => {
 
   describe('walkIn', () => {
     const dto = { guestId: GUEST_ID, roomTypeId: TYPE_ID, roomId: ROOM_ID, checkOutDate: '2026-09-04', adults: 2 };
+
+    it('rejects a party exceeding the room type\'s own capacity', async () => {
+      tx.room.findFirst.mockResolvedValue({ id: ROOM_ID, branchId: BRANCH_ID, roomTypeId: TYPE_ID, occupancyStatus: 'vacant', heldStatus: null, deletedAt: null });
+      tx.roomType.findFirst.mockResolvedValueOnce({ id: TYPE_ID, branchId: BRANCH_ID, name: 'Standard', baseRate: '100.00', capacity: { adults: 2, children: 0 } });
+      await expect(service.walkIn(TENANT_ID, BRANCH_ID, { ...dto, adults: 4, children: 9 }, ACTOR_ID)).rejects.toThrow(BadRequestException);
+    });
 
     it('forces checkInDate to today in the branch timezone, never client-supplied', async () => {
       tx.room.findFirst.mockResolvedValue({ id: ROOM_ID, branchId: BRANCH_ID, roomTypeId: TYPE_ID, occupancyStatus: 'vacant', heldStatus: null, deletedAt: null });
@@ -923,6 +944,12 @@ describe('ReservationsService', () => {
     it('rejects a cancelled reservation', async () => {
       tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'cancelled' }));
       await expect(service.modifyReservation(TENANT_ID, RESERVATION_ID, dto, ACTOR_ID)).rejects.toThrow(ConflictException);
+    });
+
+    it('rejects raising the party size past the room type\'s own capacity', async () => {
+      tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'confirmed' }));
+      tx.roomType.findFirst.mockResolvedValueOnce({ id: TYPE_ID, branchId: BRANCH_ID, name: 'Standard', baseRate: '100.00', capacity: { adults: 2, children: 0 } });
+      await expect(service.modifyReservation(TENANT_ID, RESERVATION_ID, { ...dto, adults: 4, children: 9 }, ACTOR_ID)).rejects.toThrow(BadRequestException);
     });
 
     it('recomputes confirmedRate = baseRate × the NEW night count', async () => {
