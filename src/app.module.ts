@@ -22,6 +22,7 @@ import { FoliosModule } from './modules/folios/folios.module';
 import { GdprModule } from './modules/gdpr/gdpr.module';
 import { GuestsModule } from './modules/guests/guests.module';
 import { HousekeepingModule } from './modules/housekeeping/housekeeping.module';
+import { HqModule } from './modules/hq/hq.module';
 import { LoyaltyModule } from './modules/loyalty/loyalty.module';
 import { MaintenanceModule } from './modules/maintenance/maintenance.module';
 import { NightAuditModule } from './modules/night-audit/night-audit.module';
@@ -87,6 +88,7 @@ import { PrismaModule } from './prisma/prisma.module';
     MaintenanceModule,
     FeatureFlagsModule,
     LoyaltyModule,
+    HqModule,
   ],
   providers: [
     JwtStrategy,

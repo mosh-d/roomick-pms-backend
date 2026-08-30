@@ -1,5 +1,26 @@
 # Phase Notes
 
+## Enterprise / HQ — picked as the best fit among 4 previously-deferred gaps, because most of it already existed (2026-08-30)
+
+With the original 7-item Management/Admin sequence fully done, asked to pick the best fit among the 4 remaining architecture-map gaps (Revenue Management, Sales & Events, Integrations & APIs, Enterprise/HQ) — all deferred from the start as "needing real new domain design." Checked each against what already exists before picking: Revenue Management needs AI forecasting and a competitor-rate feed this app has neither of; Sales & Events needs entirely new domain models (group blocks, bookable event spaces) that don't exist at all; Integrations & APIs has real payment-gateway/webhook cards with nothing genuine to configure behind two of its three. Enterprise/HQ was different — `PropertyController` already has full brand/branch CRUD (`POST/GET/PATCH /brands`, `POST /brands/:brandId/branches`) built for onboarding and Property Config, and `ReportsService`/`FoliosService` already compute everything a portfolio view needs per branch. Picked it specifically because it's almost entirely composition, not new domain design.
+
+### Two of the reference's four cards needed ZERO new backend
+Brand Management and Add New Branch just call the existing `/brands` endpoints directly from the frontend — `createBrand`'s own existing validation ("single-mode allows exactly one") already handles the single-vs-multi-brand distinction correctly, surfaced as a normal form error rather than special-cased client-side.
+
+### New `HqModule` — Portfolio Overview and Cross-Property Reports, built from existing primitives
+`getPortfolio` is a LIVE snapshot (occupied/total rooms right now), deliberately not a date-ranged report — that distinction is what Cross-Property Reports is for. Reuses `FoliosService.listFolios(tenantId, branchId, 'outstanding')` for each branch's outstanding balance rather than re-deriving a simplified balance calculation (tax/payments/corrections are all already handled correctly there). `getCrossPropertyReport` loops the SAME `ReportsService.getOccupancy/getAdr/getRevpar/getRevenue` methods every single-branch report page already calls — no parallel computation.
+
+### The real design decision: never fabricate a blended total across mixed currencies
+A tenant's branches can each have their own `currency` (confirmed in the schema — no FX conversion exists anywhere in this app). Averaging or summing revenue-denominated figures (ADR, RevPAR, total revenue) across an NGN branch and a USD branch would produce a technically-computed but financially meaningless number. `computeBlendedTotal` returns `null` for those report types when `mixedCurrencies` is true — the per-branch rows are still returned, only the fabricated cross-currency total is withheld. Occupancy is the one exception: room-nights carry no currency, so it always blends safely regardless of the currency mix, recomputed from each branch's own underlying `roomNightsAvailable`/`roomNightsSold` rather than averaging already-rounded percentages (which would misweight a 5-room branch the same as a 200-room one).
+
+### Verified
+`npx tsc --noEmit`, `npm run lint` (0 errors), `npm test` — 496 tests, all green (8 new: occupancy percentage computed correctly including the zero-rooms-avoids-NaN case; outstanding balance summed via `Prisma.Decimal` from real folio data; brand-name mapping per branch, including the orphaned-brandId fallback; occupancy blends across mixed currencies while ADR/RevPAR/revenue correctly refuse to with `blendedTotal: null`; the `branchIds` filter scopes correctly).
+
+Live, against real Postgres, with a genuinely multi-brand tenant: configured `multi` mode, created a second brand and a branch under each (5 rooms in one, 10 in the other), checked one guest into the first — confirmed via the API that the portfolio correctly reports 20% occupancy for the touched branch and 0% (not `NaN`) for the untouched one, each branch's own correct and DIFFERENT brand name, and the outstanding balance from the real check-in charge. Confirmed the cross-property occupancy report correctly blends to 1 of 15 total room-nights across both branches, and that a `branchIds` filter correctly scopes to just one. See the frontend's own `PHASE_NOTES.md` for the UI pass.
+
+### Carried forward
+3 of the original 11 architecture-map gaps remain, all still needing real new domain design this pass didn't attempt: Revenue Management, Sales & Events, Integrations & APIs.
+
 ## Loyalty & Marketing — the display-only slice, exactly as scoped (2026-08-30)
 
 Seventh of the 11 Management/Admin gaps, and the last one this sequence originally scoped in detail — deliberately scoped from the start (see the sequence's own memory note) as "just surfaces `loyaltyTier`/`loyaltyPoints`, no earn/redeem logic," not a full loyalty program.
