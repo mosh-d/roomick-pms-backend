@@ -1153,8 +1153,11 @@ model MaintenanceOrder {
   priority              MaintenancePriority @default(medium)
   status                MaintenanceStatus   @default(open)
   takesRoomOutOfService Boolean             @default(false) // TRUE sets room.heldStatus = out_of_order atomically
+  photoUrls             String[]            @default([]) // DocumentStorageAdapter URLs, same convention as ID document photos
   reportedBy            String?             @db.Uuid
   assignedTo            String?             @db.Uuid
+  completionNotes       String?
+  partsUsed             String[]            @default([])
   resolvedAt            DateTime?           @db.Timestamptz(6)
   createdAt             DateTime            @default(now()) @db.Timestamptz(6)
   updatedAt             DateTime            @updatedAt @db.Timestamptz(6)
@@ -1180,6 +1183,7 @@ model Asset {
   serialNumber  String?   @db.VarChar(100)
   purchaseDate  DateTime? @db.Date
   warrantyUntil DateTime? @db.Date
+  serviceIntervalDays Int? // preventive maintenance cadence — "next service due" = last resolved order's resolvedAt (or purchaseDate if none yet) + this
   notes         String?
   createdAt     DateTime  @default(now()) @db.Timestamptz(6)
 

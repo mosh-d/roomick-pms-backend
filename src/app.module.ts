@@ -20,6 +20,7 @@ import { FoliosModule } from './modules/folios/folios.module';
 import { GdprModule } from './modules/gdpr/gdpr.module';
 import { GuestsModule } from './modules/guests/guests.module';
 import { HousekeepingModule } from './modules/housekeeping/housekeeping.module';
+import { MaintenanceModule } from './modules/maintenance/maintenance.module';
 import { NightAuditModule } from './modules/night-audit/night-audit.module';
 import { PropertyModule } from './modules/property/property.module';
 import { RateResolverModule } from './modules/rate-resolver/rate-resolver.module';
@@ -80,6 +81,7 @@ import { PrismaModule } from './prisma/prisma.module';
     AlertsModule,
     AuditLogsModule,
     GdprModule,
+    MaintenanceModule,
   ],
   providers: [
     JwtStrategy,

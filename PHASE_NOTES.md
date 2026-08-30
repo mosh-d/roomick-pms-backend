@@ -1,5 +1,32 @@
 # Phase Notes
 
+## Maintenance — a real new module, and the migration that made it complete (2026-08-30)
+
+Fourth of the 11 Management/Admin gaps, and the first needing a fully new backend module — `MaintenanceOrder`/`Asset` Prisma models have existed since P0, confirmed via a direct grep before writing anything that literally nothing in `src/` ever referenced either one.
+
+### Read the architecture map's spec, then followed the real schema where they disagreed
+`page-maintenance`'s own payload sketches don't fully match this schema: no `title` field in its `POST` body (the model requires one — a required column, not a nice-to-have, so the DTO does too), no `areaId` concept anywhere (a `null` `roomId` already means "common area," the exact convention `Asset.roomId` already established), and its four-value asset `category` list doesn't match the schema's own comment (`hvac | plumbing | electrical | furniture | appliance`) — the DTO follows the schema's own list, not the mockup's.
+
+### The migration: three columns the model needed but never had
+`MaintenanceOrder` had no `photoUrls`, `completionNotes`, or `partsUsed` — all three named in the reference's own payload sketch with nowhere to land. `Asset` had no `serviceIntervalDays`, so "next service date indicator" (a named UI chip in the spec) had nothing to compute from. Added all four via a real migration (`20260830000000_maintenance_order_fields`) — `photoUrls String[] @default([])`, `partsUsed String[] @default([])`, `completionNotes String?` on `MaintenanceOrder`; `serviceIntervalDays Int?` on `Asset`. Applied via `prisma migrate diff` + `migrate deploy` rather than `migrate dev`, since the local `roomick` DB role has no `CREATEDB` grant for Prisma's shadow database — the same workaround the very first migration in this project's history already used (`migrate diff --from-empty`), applied here to an incremental change instead of the initial schema.
+
+### `createWorkOrder` — the one write in this module open to every role
+"Any department submits a maintenance request" (architecture map) — no `@Roles()` on that route at all, matching `RolesGuard`'s own documented behavior ("Routes without `@Roles()` pass through"). `blockRoom: true` + a `roomId` sets `takesRoomOutOfService` AND flips `room.heldStatus = 'out_of_order'` in the SAME transaction as the order — the schema's own comment on that column, taken literally.
+
+### `updateWorkOrder` releases the room hold it created — but only if nothing else claimed it since
+Moving a room-blocking order to `resolved` or `cancelled` releases the room back to available — but only when the room's current `heldStatus` is STILL exactly `out_of_order`. If a supervisor separately blocked the same room for an unrelated reason in the meantime (room-blocking, a different concurrent order), this never clobbers that hold. `resolvedAt` is stamped only on the transition into `resolved`, never touched otherwise.
+
+### A real API-consistency bug caught by the live pass, not by review
+`createAsset`'s first version returned the raw Prisma row — no `nextServiceDue`, unlike `listAssets`, which computes it. Not a UI bug (the frontend always re-fetches via `listAssets` after creating), but a real inconsistency in what the endpoint promises: same resource, two different shapes depending on which route served it. Extracted a shared `withNextServiceDue` helper both methods now call, and added a test proving `createAsset`'s own response carries the computed field too, not just the list endpoint's.
+
+### Verified
+`npx tsc --noEmit`, `npm run lint` (0 errors), `npm test` — 451 tests, all green (19 new: default priority, `blockRoom`+`roomId` together vs. either alone, audit logging, status filtering, 404 handling, `resolvedAt` only on the resolved transition, the room-release logic in all four shapes — releases on resolved, releases on cancelled, does NOT release when re-blocked for an unrelated reason, never touches the room when the order didn't block one — asset creation, and `nextServiceDue` computed identically by both `createAsset` and `listAssets`).
+
+Live, against real Postgres: created a common-area order and a room-blocking one, confirmed the room actually went `out_of_order`, confirmed status-filtered listing works, resolved the blocking order with completion notes and parts used, confirmed `resolvedAt` was stamped AND the room was released back to available, registered an asset with a service interval and confirmed the computed next-service date. See the frontend's own `PHASE_NOTES.md` — including a real, systemic frontend bug this pass's own work surfaced and fixed across three already-shipped pages, not just this new one.
+
+### Carried forward
+7 of the 11 gaps remain — Guest Profiles & CRM is next.
+
 ## Property Config — closing two real backend gaps (2026-08-30)
 
 Third of the 11 Management/Admin gaps. Before writing anything, surveyed every backend area the reference's `page-propertyconfig` needed (brand, branch, buildings/floors, room types, no-show policy, reg-card template, overbooking config) to find what already existed vs. what was genuinely missing — most of it did (brand/branch already have full `PATCH` update endpoints from earlier phases; no-show policy and reg-card-template already have dedicated read/write routes; overbooking config is already a whole existing page). Two real gaps closed:
