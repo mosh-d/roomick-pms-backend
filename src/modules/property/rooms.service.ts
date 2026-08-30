@@ -10,7 +10,7 @@ import { ErrorCode } from '../../common/errors/error-codes';
 import { todayInTimezone, toBranchDate } from '../../common/utils/branch-date';
 import { JwtPayload } from '../../common/types/request-context';
 import { PrismaService, TenantTx } from '../../prisma/prisma.service';
-import { CreateRoomTypeDto } from './dto/room-type.dto';
+import { CreateRoomTypeDto, UpdateRoomTypeDto } from './dto/room-type.dto';
 import { BulkCreateRoomsDto, ChangeRoomStatusDto, CreateRoomBlockDto } from './dto/rooms.dto';
 import { PropertyService } from './property.service';
 
@@ -72,6 +72,37 @@ export class RoomsService {
         baseRate: dto.baseRate,
       });
       return roomType;
+    });
+  }
+
+  /**
+   * Property Config's own room-type editor. Changing `baseRate`/`capacity`
+   * here only affects future rate resolutions and new bookings — every
+   * existing reservation already has its own `confirmedRate` locked in at
+   * booking time (or re-resolved explicitly via `modifyReservation`/
+   * `extendStay`), so this never retroactively reprices anything in flight.
+   */
+  async updateRoomType(tenantId: string, roomTypeId: string, dto: UpdateRoomTypeDto, actorId: string): Promise<RoomType> {
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const existing = await tx.roomType.findFirst({ where: { id: roomTypeId, deletedAt: null } });
+      if (!existing) {
+        throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Room type not found' });
+      }
+      const updated = await tx.roomType.update({
+        where: { id: roomTypeId },
+        data: {
+          name: dto.name,
+          baseRate: dto.baseRate !== undefined ? new Prisma.Decimal(dto.baseRate.toFixed(2)) : undefined,
+          capacity: dto.capacity as unknown as Prisma.InputJsonValue | undefined,
+          bedType: dto.bedType,
+          sizeM2: dto.sizeM2 !== undefined ? new Prisma.Decimal(dto.sizeM2.toFixed(1)) : undefined,
+          amenities: dto.amenities,
+          photoUrls: dto.photoUrls,
+          sortOrder: dto.sortOrder,
+        },
+      });
+      await this.audit(tx, tenantId, actorId, 'room_type.updated', 'room_type', roomTypeId, dto as unknown as Prisma.InputJsonValue);
+      return updated;
     });
   }
 

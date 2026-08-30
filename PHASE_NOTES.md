@@ -1,5 +1,23 @@
 # Phase Notes
 
+## Property Config — closing two real backend gaps (2026-08-30)
+
+Third of the 11 Management/Admin gaps. Before writing anything, surveyed every backend area the reference's `page-propertyconfig` needed (brand, branch, buildings/floors, room types, no-show policy, reg-card template, overbooking config) to find what already existed vs. what was genuinely missing — most of it did (brand/branch already have full `PATCH` update endpoints from earlier phases; no-show policy and reg-card-template already have dedicated read/write routes; overbooking config is already a whole existing page). Two real gaps closed:
+
+### `GET /branches/:branchId` — there was no way to read a single branch's own settings back
+`GET /branches` (list) is Owner-only and deliberately trimmed to `{id, name}` — it exists to resolve an owner's post-login branch picker, not to read a branch's configuration. `PATCH /branches/:branchId` (Owner **and Manager**) already existed, but a Manager had no endpoint at all to read back what they'd be editing — not even the general list, since that's Owner-only. `PropertyService.getBranch` is a thin wrapper around the same `assertBranch` (`findFirst`, no `select`) every other branch-scoped method already uses, so it returns the full row — address, timezone, currency, times, `noShowPolicy`, `regCardTemplate` — for free, with the same `@Roles(Owner, Manager)` gate `updateBranch` already uses.
+
+### `PATCH /room-types/:roomTypeId` — room types were create-only since onboarding
+`RoomsService` had `createRoomType`/`listRoomTypes`, nothing to change an existing one afterward — a real gap for something as ordinary as fixing a nightly rate or adding a room type post-launch. `updateRoomType` mirrors `createRoomType`'s own field handling exactly (Decimal rounding for `baseRate`/`sizeM2`, same JSON shape for `capacity`), 404s on an unknown id, and audits as `room_type.updated`. Its own doc comment is explicit about what it does NOT do: change `baseRate`/`capacity` and every future rate resolution picks it up, but every reservation that already has its own `confirmedRate` (locked in at booking, or re-resolved explicitly via `modifyReservation`/`extendStay`) is untouched — no retroactive repricing.
+
+### Verified
+`npx tsc --noEmit`, `npm run lint` (0 errors), `npm test` — 432 tests, all green (10 new: `getBranch` returns the full row / 404s on missing; `updateBranch` timezone validation, HH:mm→TIME conversion, unset-field-stays-unset; `setNoShowPolicy` writes+audits; `updateRoomType` 404s / rounds `baseRate` to a Decimal exactly like create / leaves unset fields alone / audits as `room_type.updated`).
+
+Live, against real Postgres: read a branch's full settings via the new endpoint (confirming `noShowPolicy`/`regCardTemplate` come through even when null), renamed it and changed its currency, set a no-show policy, re-read and confirmed both writes landed together; updated an existing room type's rate and capacity and confirmed the change via a follow-up list call. See the frontend's own `PHASE_NOTES.md` for the full UI walkthrough — including a real frontend bug the live pass caught (branch `checkInTime`/`checkOutTime` come back as full `1970-01-01T…Z` timestamps, not bare `HH:mm`, which the first pass at the settings form got wrong).
+
+### Carried forward
+Buildings/floors have no GET/list/update/delete at all (create-only, onboarding-shaped) — a property's physical layout can't be edited after setup. Not built this pass; the Property Config page says so honestly rather than pretending otherwise. 8 of the 11 gaps remain — Maintenance is next.
+
 ## Security & Roles — Permission Matrix, Audit Log Viewer, GDPR Compliance (2026-08-29)
 
 Second of the 11 Management/Admin gaps. Went in expecting mostly composition (Manager Dashboard's own pattern) but turned out to need two genuinely new backend modules — only the Role & Permission Matrix reused existing P1 endpoints (`GET /auth/roles`, `PUT /auth/roles/:roleId/permissions`) as-is.

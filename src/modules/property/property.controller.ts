@@ -78,6 +78,16 @@ export class PropertyController {
     return this.propertyService.listBranches(tenantId);
   }
 
+  @Get('branches/:branchId')
+  @Roles(SystemRole.Owner, SystemRole.Manager)
+  @ApiOperation({ summary: 'Get a single branch\'s full settings — Property Config\'s own read side' })
+  getBranch(
+    @CurrentTenant() tenantId: string,
+    @Param('branchId', ParseUUIDPipe) branchId: string,
+  ): ReturnType<PropertyService['getBranch']> {
+    return this.propertyService.getBranch(tenantId, branchId);
+  }
+
   @Patch('branches/:branchId')
   @Roles(SystemRole.Owner, SystemRole.Manager)
   @ApiOperation({ summary: 'Update branch config (times, currency, timezone, policies)' })

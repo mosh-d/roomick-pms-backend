@@ -138,6 +138,50 @@ describe('PropertyService', () => {
     });
   });
 
+  describe('getBranch', () => {
+    it('returns the full branch row — Property Config\'s read side, not the trimmed {id, name} listBranches shape', async () => {
+      tx.branch.findFirst.mockResolvedValue({ id: BRANCH_ID, name: 'Acme Hotel', timezone: 'Africa/Lagos', currency: 'NGN', noShowPolicy: { cutoffTime: '18:00' } });
+      const result = await service.getBranch(TENANT_ID, BRANCH_ID);
+      expect(result).toEqual(expect.objectContaining({ name: 'Acme Hotel', noShowPolicy: { cutoffTime: '18:00' } }));
+    });
+
+    it('404s on a missing branch', async () => {
+      tx.branch.findFirst.mockResolvedValue(null);
+      await expect(service.getBranch(TENANT_ID, BRANCH_ID)).rejects.toThrow('Branch not found');
+    });
+  });
+
+  describe('updateBranch', () => {
+    it('rejects an invalid IANA timezone', async () => {
+      await expect(service.updateBranch(TENANT_ID, BRANCH_ID, { timezone: 'Not/AZone' }, ACTOR)).rejects.toThrow(BadRequestException);
+    });
+
+    it('converts checkInTime/checkOutTime HH:mm strings to TIME values', async () => {
+      await service.updateBranch(TENANT_ID, BRANCH_ID, { checkInTime: '15:00', checkOutTime: '10:30' }, ACTOR);
+      expect(tx.branch.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ checkInTime: new Date('1970-01-01T15:00:00.000Z'), checkOutTime: new Date('1970-01-01T10:30:00.000Z') }),
+        }),
+      );
+    });
+
+    it('a field left unset is not overwritten with undefined-as-null', async () => {
+      await service.updateBranch(TENANT_ID, BRANCH_ID, { name: 'New Name' }, ACTOR);
+      const data = tx.branch.update.mock.calls[0][0].data;
+      expect(data.name).toBe('New Name');
+      expect(data.timezone).toBeUndefined();
+    });
+  });
+
+  describe('setNoShowPolicy', () => {
+    it('writes the policy object onto the branch and audits it', async () => {
+      const dto = { cutoffTime: '18:00', defaultPenalty: 'first_night' as const, autoMark: true };
+      await service.setNoShowPolicy(TENANT_ID, BRANCH_ID, dto, ACTOR);
+      expect(tx.branch.update).toHaveBeenCalledWith({ where: { id: BRANCH_ID }, data: { noShowPolicy: dto } });
+      expect(tx.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: 'branch.no_show_policy_updated' }) }));
+    });
+  });
+
   describe('default structure (3-mode onboarding)', () => {
     it('creates the hidden default building+floor once and reuses them', async () => {
       tx.building.findFirst.mockResolvedValue(null); // no default yet

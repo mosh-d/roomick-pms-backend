@@ -3,7 +3,7 @@ import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentTenant, CurrentUser } from '../../common/decorators';
 import { Roles, SystemRole } from '../../common/decorators/roles.decorator';
 import { JwtPayload } from '../../common/types/request-context';
-import { CreateRoomTypeDto } from './dto/room-type.dto';
+import { CreateRoomTypeDto, UpdateRoomTypeDto } from './dto/room-type.dto';
 import { BulkCreateRoomsDto, ChangeRoomStatusDto, CreateRoomBlockDto } from './dto/rooms.dto';
 import { RoomsService } from './rooms.service';
 
@@ -32,6 +32,18 @@ export class RoomsController {
     @Param('branchId', ParseUUIDPipe) branchId: string,
   ): ReturnType<RoomsService['listRoomTypes']> {
     return this.roomsService.listRoomTypes(tenantId, branchId);
+  }
+
+  @Patch('room-types/:roomTypeId')
+  @Roles(SystemRole.Owner, SystemRole.Manager)
+  @ApiOperation({ summary: 'Update a room type — Property Config\'s own editor, never retroactively reprices existing reservations' })
+  updateRoomType(
+    @CurrentTenant() tenantId: string,
+    @CurrentUser() user: JwtPayload,
+    @Param('roomTypeId', ParseUUIDPipe) roomTypeId: string,
+    @Body() dto: UpdateRoomTypeDto,
+  ): ReturnType<RoomsService['updateRoomType']> {
+    return this.roomsService.updateRoomType(tenantId, roomTypeId, dto, user.sub);
   }
 
   @Post('branches/:branchId/rooms/bulk')

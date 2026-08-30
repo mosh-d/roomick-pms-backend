@@ -193,6 +193,19 @@ export class PropertyService {
     });
   }
 
+  /**
+   * `GET /branches` (list) is Owner-only and trimmed to `{id, name}` — it
+   * exists to resolve an owner's post-login branch picker, not to read a
+   * branch's own settings. Property Config needs the FULL row (address,
+   * timezone, currency, times, noShowPolicy, regCardTemplate — all plain
+   * columns already returned by `assertBranch`'s own unscoped `findFirst`),
+   * and a Manager (who can already `updateBranch`) had no way to read it
+   * back at all before this.
+   */
+  async getBranch(tenantId: string, branchId: string): Promise<Branch> {
+    return this.prisma.withTenant(tenantId, (tx) => this.assertBranch(tx, branchId));
+  }
+
   async setNoShowPolicy(
     tenantId: string,
     branchId: string,

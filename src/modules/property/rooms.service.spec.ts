@@ -36,7 +36,11 @@ function makeTx() {
       ),
       createMany: jest.fn().mockResolvedValue({ count: 0 }),
     },
-    roomType: { findFirst: jest.fn().mockResolvedValue({ id: TYPE_ID }), create: jest.fn() },
+    roomType: {
+      findFirst: jest.fn().mockResolvedValue({ id: TYPE_ID }),
+      create: jest.fn(),
+      update: jest.fn().mockImplementation(({ data }: { data: Record<string, unknown> }) => Promise.resolve({ id: TYPE_ID, ...data })),
+    },
     floor: { findFirst: jest.fn().mockResolvedValue({ id: FLOOR_ID }) },
     roomBlock: {
       create: jest.fn().mockResolvedValue({ id: 'block-1' }),
@@ -82,6 +86,34 @@ describe('RoomsService', () => {
       ],
     }).compile();
     service = moduleRef.get(RoomsService);
+  });
+
+  describe('updateRoomType', () => {
+    const ACTOR = 'actor-id';
+
+    it('404s on an unknown room type', async () => {
+      tx.roomType.findFirst.mockResolvedValue(null);
+      await expect(service.updateRoomType(TENANT_ID, TYPE_ID, { name: 'New Name' }, ACTOR)).rejects.toThrow(NotFoundException);
+    });
+
+    it('rounds baseRate to 2dp as a Decimal, same as createRoomType', async () => {
+      await service.updateRoomType(TENANT_ID, TYPE_ID, { baseRate: 55000.5 }, ACTOR);
+      const data = tx.roomType.update.mock.calls[0][0].data;
+      expect(data.baseRate.toFixed(2)).toBe('55000.50');
+    });
+
+    it('a field left unset stays undefined, not overwritten', async () => {
+      await service.updateRoomType(TENANT_ID, TYPE_ID, { name: 'New Name' }, ACTOR);
+      const data = tx.roomType.update.mock.calls[0][0].data;
+      expect(data.name).toBe('New Name');
+      expect(data.baseRate).toBeUndefined();
+      expect(data.capacity).toBeUndefined();
+    });
+
+    it('writes an audit log naming the update', async () => {
+      await service.updateRoomType(TENANT_ID, TYPE_ID, { name: 'New Name' }, ACTOR);
+      expect(tx.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: 'room_type.updated' }) }));
+    });
   });
 
   describe('changeStatus — §4.1 three independent axes', () => {

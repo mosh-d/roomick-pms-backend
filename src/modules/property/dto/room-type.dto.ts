@@ -1,4 +1,4 @@
-import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { ApiProperty, ApiPropertyOptional, PartialType } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
   IsArray,
@@ -82,3 +82,6 @@ export class CreateRoomTypeDto {
   @IsInt()
   sortOrder?: number;
 }
+
+/** Property Config's own room-type editor — every field optional, same "change just one thing" shape `UpdateBranchDto`/`UpdateBrandDto` already use. */
+export class UpdateRoomTypeDto extends PartialType(CreateRoomTypeDto) {}
