@@ -21,6 +21,13 @@ function makeTx() {
       update: jest.fn().mockResolvedValue({ id: GUEST_ID }),
       findFirst: jest.fn(),
       findMany: jest.fn().mockResolvedValue([]),
+      count: jest.fn().mockResolvedValue(0),
+    },
+    reservation: { findMany: jest.fn().mockResolvedValue([]) },
+    payment: { findMany: jest.fn().mockResolvedValue([]) },
+    guestNote: {
+      findMany: jest.fn().mockResolvedValue([]),
+      create: jest.fn().mockImplementation(({ data }: { data: Record<string, unknown> }) => Promise.resolve({ id: 'note-1', createdAt: new Date(), author: null, ...data })),
     },
     auditLog: {
       create: jest.fn().mockResolvedValue({}),
@@ -70,6 +77,101 @@ describe('GuestsService', () => {
       tx.guestProfile.findFirst.mockResolvedValue({ id: GUEST_ID, name: 'John Doe' });
       const guest = await service.getGuestById(TENANT_ID, GUEST_ID);
       expect(guest.id).toBe(GUEST_ID);
+    });
+
+    it('sums only non-void, non-deleted payments across the guest\'s folios into totalSpend', async () => {
+      tx.guestProfile.findFirst.mockResolvedValue({ id: GUEST_ID, name: 'John Doe' });
+      tx.payment.findMany.mockResolvedValue([{ amount: '100.00' }, { amount: '50.50' }]);
+      const guest = await service.getGuestById(TENANT_ID, GUEST_ID);
+      expect(tx.payment.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { folio: { guestId: GUEST_ID }, isVoid: false, deletedAt: null } }));
+      expect(guest.totalSpend).toBe('150.50');
+    });
+
+    it('totalSpend is "0.00" when there are no payments at all', async () => {
+      tx.guestProfile.findFirst.mockResolvedValue({ id: GUEST_ID, name: 'John Doe' });
+      const guest = await service.getGuestById(TENANT_ID, GUEST_ID);
+      expect(guest.totalSpend).toBe('0.00');
+    });
+
+    it('includes stay history ordered by check-in date, newest first', async () => {
+      tx.guestProfile.findFirst.mockResolvedValue({ id: GUEST_ID, name: 'John Doe' });
+      const stays = [{ id: 'r1' }, { id: 'r2' }];
+      tx.reservation.findMany.mockResolvedValue(stays);
+      const guest = await service.getGuestById(TENANT_ID, GUEST_ID);
+      expect(tx.reservation.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { guestId: GUEST_ID }, orderBy: { checkInDate: 'desc' } }));
+      expect(guest.stayHistory).toEqual(stays);
+    });
+
+    it('includes the notes feed, newest first', async () => {
+      tx.guestProfile.findFirst.mockResolvedValue({ id: GUEST_ID, name: 'John Doe' });
+      const notes = [{ id: 'n1', body: 'Likes extra pillows' }];
+      tx.guestNote.findMany.mockResolvedValue(notes);
+      const guest = await service.getGuestById(TENANT_ID, GUEST_ID);
+      expect(tx.guestNote.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { guestId: GUEST_ID }, orderBy: { createdAt: 'desc' } }));
+      expect(guest.notesFeed).toEqual(notes);
+    });
+  });
+
+  describe('updateGuest', () => {
+    it('404s on a missing guest', async () => {
+      tx.guestProfile.findFirst.mockResolvedValue(null);
+      await expect(service.updateGuest(TENANT_ID, GUEST_ID, { vipLevel: 3 }, ACTOR_ID)).rejects.toThrow(NotFoundException);
+    });
+
+    it('writes only the given fields and re-reads the full profile', async () => {
+      tx.guestProfile.findFirst.mockResolvedValue({ id: GUEST_ID, name: 'John Doe' });
+      await service.updateGuest(TENANT_ID, GUEST_ID, { vipLevel: 3, tags: ['corporate'] }, ACTOR_ID);
+      expect(tx.guestProfile.update).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: GUEST_ID }, data: expect.objectContaining({ vipLevel: 3, tags: ['corporate'] }) }),
+      );
+    });
+
+    it('writes an audit log', async () => {
+      tx.guestProfile.findFirst.mockResolvedValue({ id: GUEST_ID, name: 'John Doe' });
+      await service.updateGuest(TENANT_ID, GUEST_ID, { vipLevel: 3 }, ACTOR_ID);
+      expect(tx.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: 'guest.updated' }) }));
+    });
+  });
+
+  describe('addGuestNote', () => {
+    it('404s on a missing guest', async () => {
+      tx.guestProfile.findFirst.mockResolvedValue(null);
+      await expect(service.addGuestNote(TENANT_ID, GUEST_ID, { body: 'Note' }, ACTOR_ID)).rejects.toThrow(NotFoundException);
+    });
+
+    it('creates the note attributed to the actor and audits it', async () => {
+      tx.guestProfile.findFirst.mockResolvedValue({ id: GUEST_ID });
+      const note = await service.addGuestNote(TENANT_ID, GUEST_ID, { body: 'Requested extra pillows' }, ACTOR_ID);
+      expect(tx.guestNote.create).toHaveBeenCalledWith(expect.objectContaining({ data: { tenantId: TENANT_ID, guestId: GUEST_ID, authorId: ACTOR_ID, body: 'Requested extra pillows' } }));
+      expect(note.body).toBe('Requested extra pillows');
+      expect(tx.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: 'guest.note_added' }) }));
+    });
+  });
+
+  describe('listGuests', () => {
+    it('with no q, lists every non-deleted guest', async () => {
+      await service.listGuests(TENANT_ID, undefined, 1, 50);
+      expect(tx.guestProfile.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { deletedAt: null } }));
+    });
+
+    it('with a q, filters by name OR email — separate from searchGuests, same matching rule', async () => {
+      await service.listGuests(TENANT_ID, 'jane', 1, 50);
+      expect(tx.guestProfile.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { deletedAt: null, OR: [{ name: { contains: 'jane', mode: 'insensitive' } }, { email: { contains: 'jane', mode: 'insensitive' } }] },
+        }),
+      );
+    });
+
+    it('paginates via skip/take', async () => {
+      await service.listGuests(TENANT_ID, undefined, 3, 10);
+      expect(tx.guestProfile.findMany).toHaveBeenCalledWith(expect.objectContaining({ skip: 20, take: 10 }));
+    });
+
+    it('returns the total count alongside the page of rows', async () => {
+      tx.guestProfile.count.mockResolvedValue(42);
+      const result = await service.listGuests(TENANT_ID, undefined, 1, 50);
+      expect(result.total).toBe(42);
     });
   });
 

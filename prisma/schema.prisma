@@ -350,6 +350,7 @@ model Tenant {
   communicationLogs CommunicationLog[]
   auditLogs         AuditLog[]
   gdprRequests      GdprRequest[]
+  guestNotes        GuestNote[]
 
   @@index([isDemo, demoExpiresAt])
   @@map("tenants")
@@ -401,6 +402,7 @@ model User {
   nightAuditsTriggered       NightAuditLog[]
   communicationsSent         CommunicationLog[]
   auditLogs                  AuditLog[]
+  guestNotesAuthored         GuestNote[]
 
   // Global, not per-tenant: login is plain email+password now (no
   // subdomain/tenant header to disambiguate), so one email can only ever
@@ -715,10 +717,35 @@ model GuestProfile {
   registrationCards RegistrationCard[]
   communicationLogs CommunicationLog[]
   gdprRequests      GdprRequest[]
+  guestNotes        GuestNote[]
 
   @@index([tenantId, email])
   @@index([tenantId, name])
   @@map("guest_profiles")
+}
+
+/**
+ * The CRM's own "Notes feed" (architecture map, `page-guestprofile`) —
+ * `GuestProfile.notes` is a single overwritable `String?` (a legacy field
+ * from the original create-guest pass), not a chronological log. This is
+ * append-only, same ledger discipline `AuditLog`/`FoliosService.correctLineItem`
+ * already hold to elsewhere: no update, no delete, just a growing record of
+ * who said what and when.
+ */
+model GuestNote {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String   @db.Uuid
+  guestId   String   @db.Uuid
+  authorId  String?  @db.Uuid // NULL = system-authored
+  body      String
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+
+  tenant Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  guest  GuestProfile @relation(fields: [guestId], references: [id], onDelete: Cascade)
+  author User?        @relation(fields: [authorId], references: [id], onDelete: SetNull)
+
+  @@index([guestId, createdAt])
+  @@map("guest_notes")
 }
 
 model Reservation {

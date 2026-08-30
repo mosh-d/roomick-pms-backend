@@ -1,6 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { Transform } from 'class-transformer';
-import { IsEmail, IsIn, IsISO8601, IsOptional, IsString, Length, MaxLength, MinLength } from 'class-validator';
+import { Transform, Type } from 'class-transformer';
+import { IsArray, IsEmail, IsIn, IsISO8601, IsInt, IsOptional, IsString, Length, Max, MaxLength, Min, MinLength, ValidateNested } from 'class-validator';
 import { toTrimmedLowerCase } from '../../../common/transforms/string.transforms';
 
 /**
@@ -80,4 +80,114 @@ export class RecordIdDocumentDto {
   @IsString()
   @MaxLength(4_000_000)
   photoBase64?: string;
+}
+
+/** Matches the architecture map's own PATCH payload shape exactly (`{bedType, floor, view, pillow, temp}` plus `dietaryRestrictions[]`) — `GuestProfile.preferences` is a free-form JSON blob, but the Guest Profile page always writes this specific shape. */
+export class GuestPreferencesDto {
+  @ApiPropertyOptional({ example: 'king' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(50)
+  bedType?: string;
+
+  @ApiPropertyOptional({ example: 'high' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(50)
+  floor?: string;
+
+  @ApiPropertyOptional({ example: 'ocean' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(50)
+  view?: string;
+
+  @ApiPropertyOptional({ example: 'firm' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(50)
+  pillow?: string;
+
+  @ApiPropertyOptional({ example: 'cool' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(50)
+  temp?: string;
+
+  @ApiPropertyOptional({ type: [String], example: ['vegetarian', 'no shellfish'] })
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  dietaryRestrictions?: string[];
+}
+
+/**
+ * The CRM's own editor — every field optional, same "change just one
+ * thing" shape this codebase already uses for `UpdateBranchDto`/
+ * `UpdateRoomTypeDto`. Deliberately excludes the legacy `notes` column
+ * (superseded by the append-only `GuestNote` feed, `AddGuestNoteDto`
+ * below) and every ID-document field (still `RecordIdDocumentDto`'s own
+ * job, captured at check-in).
+ */
+export class UpdateGuestDto {
+  @ApiPropertyOptional({ example: 'John Doe' })
+  @IsOptional()
+  @IsString()
+  @MinLength(1)
+  @MaxLength(200)
+  name?: string;
+
+  @ApiPropertyOptional({ example: 'john@doe.com' })
+  @IsOptional()
+  @Transform(toTrimmedLowerCase)
+  @IsEmail()
+  @MaxLength(320)
+  email?: string;
+
+  @ApiPropertyOptional({ example: '090 345 6794' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(20)
+  phone?: string;
+
+  @ApiPropertyOptional({ type: GuestPreferencesDto })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => GuestPreferencesDto)
+  preferences?: GuestPreferencesDto;
+
+  @ApiPropertyOptional({ example: 2, description: '0-5' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(5)
+  vipLevel?: number;
+
+  @ApiPropertyOptional({ type: [String], example: ['corporate', 'repeat guest'] })
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  tags?: string[];
+
+  @ApiPropertyOptional({ example: 'Gold' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(30)
+  loyaltyTier?: string;
+
+  @ApiPropertyOptional({ example: 1500 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  loyaltyPoints?: number;
+}
+
+export class AddGuestNoteDto {
+  @ApiProperty({ example: 'Requested extra pillows for the third night in a row — worth flagging to housekeeping.' })
+  @IsString()
+  @MinLength(1)
+  @MaxLength(2000)
+  body!: string;
 }

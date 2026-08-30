@@ -1,5 +1,24 @@
 # Phase Notes
 
+## Guest Profiles & CRM — enriching an existing thin endpoint, and a new append-only notes model (2026-08-30)
+
+Fifth of the 11 Management/Admin gaps. `GET /guests/:guestId` already existed but returned a thin `GuestSummary` (name/email/phone) — confirmed via grep that nothing in the frontend called that exact shape yet, so it was enriched in place rather than adding a parallel endpoint.
+
+### `GuestProfile.notes` is a single legacy column, not a feed — a new `GuestNote` model was the honest fix
+The reference's own "Notes feed" needs a chronological, append-only list; `GuestProfile.notes` (from the original `CreateGuestDto`) is one `String?` field, not a feed, and conflating the two would have meant either silently dropping history on every edit or building a fake feed out of a single string. Added `GuestNote` (`id`/`tenantId`/`guestId`/`authorId`/`body`/`createdAt`, no update/delete route at all) — matching the append-only discipline `AuditLog`/`FoliosService.correctLineItem` already established elsewhere in this codebase. RLS is NOT automatic for a new table: the original `20260712000001_rls_and_constraints` migration enables it via a one-time loop over a fixed table array, so this migration (`20260830010000_guest_notes`) hand-writes its own `ENABLE`/`FORCE ROW LEVEL SECURITY` + `tenant_isolation` policy, applied via `migrate diff` + `migrate deploy` (the same shadow-database workaround Maintenance's own migration used). The legacy `notes` column is untouched and unsurfaced in the new CRM UI — left alone rather than migrated, to avoid conflating a single field with a feed.
+
+### Stay history and spend summary are both computed, never stored
+`Payment` has no direct `guestId` — only reachable via `Payment.folioId → Folio.guestId`. `totalSpend` sums `payments.amount` where `isVoid=false`/`deletedAt=null` across every folio belonging to the guest, via `Prisma.Decimal` (never floats, the same discipline the Folios module already established). Stay history reads `Reservation` rows directly rather than duplicating anything.
+
+### A new, separate `GET /guests` (list-all) — the existing `GET /guests/search` was left untouched
+`/guests/search` always requires a `q`, caps at 20 results, and is already relied on by GDPR's guest-picker — narrowing or overloading it for a full paginated list risked breaking an already-shipped consumer. `GET /guests` is a genuinely new, separate route (paginated, `q` optional) built just for the new list page.
+
+### Verified
+`npx tsc --noEmit`, `npm run lint` (0 errors), `npm test` — 464 tests, all green (13 new: enriched profile shape including stay history/spend/notes composition, list-all with and without `q`, note creation and ordering, `updateGuest` field handling). Live against real Postgres: created a guest via a real reservation → check-in → payment so stay history and spend had real data behind them, confirmed the enriched profile computed the correct spend and stay count, added a note via the API and confirmed it appeared in the feed, updated preferences/VIP level/tags and confirmed they persisted with the right shape. See the frontend's own `PHASE_NOTES.md` for the UI pass and a same-session Select-id fix applied proactively (not reactively) to this page's two `MultiSelectTagInput`s.
+
+### Carried forward
+Corporate Accounts (the reference's second feature card on this same page) is NOT built — `POST /corporate-accounts` was never implemented despite the table existing since P0, and it's substantial enough (company profiles, linked travelers, credit limits, invoicing) to be its own pass. 6 of the 11 gaps remain — System Admin is next, though a mid-sequence detour (see the frontend's own notes) rebuilt the Billing/Management/Admin sidebar structure to match the architecture map exactly before continuing the sequence.
+
 ## Maintenance — a real new module, and the migration that made it complete (2026-08-30)
 
 Fourth of the 11 Management/Admin gaps, and the first needing a fully new backend module — `MaintenanceOrder`/`Asset` Prisma models have existed since P0, confirmed via a direct grep before writing anything that literally nothing in `src/` ever referenced either one.

@@ -1,9 +1,10 @@
 import { Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { EncryptionService } from '../../common/crypto/encryption.service';
 import { DOCUMENT_STORAGE_ADAPTER, DocumentStorageAdapter } from '../../common/documents/document-storage.interface';
 import { ErrorCode } from '../../common/errors/error-codes';
 import { PrismaService, TenantTx } from '../../prisma/prisma.service';
-import { CreateGuestDto, RecordIdDocumentDto } from './dto/guest.dto';
+import { AddGuestNoteDto, CreateGuestDto, RecordIdDocumentDto, UpdateGuestDto } from './dto/guest.dto';
 
 /** Deliberately excludes ID-document/loyalty/preference fields — see `CreateGuestDto`'s own header comment. */
 const GUEST_SUMMARY_SELECT = {
@@ -24,6 +25,47 @@ export type GuestSummary = {
   notes: string | null;
   createdAt: Date;
   updatedAt: Date;
+};
+
+/** The CRM's own "Guest Profile" (architecture map, `page-guestprofile`) — `GET /guests/:guestId`'s full response, nothing currently calls the old thin `GuestSummary` shape through this route, so this replaces it outright rather than adding a second endpoint. */
+const GUEST_PROFILE_SELECT = {
+  ...GUEST_SUMMARY_SELECT,
+  preferences: true,
+  vipLevel: true,
+  tags: true,
+  loyaltyTier: true,
+  loyaltyPoints: true,
+} as const;
+
+export interface GuestStaySummary {
+  id: string;
+  confirmationNumber: string;
+  status: string;
+  checkInDate: Date;
+  checkOutDate: Date;
+  confirmedRate: Prisma.Decimal;
+  roomType: { name: string };
+}
+
+export interface GuestNoteSummary {
+  id: string;
+  body: string;
+  createdAt: Date;
+  author: { id: string; name: string } | null;
+}
+
+export type GuestProfile = GuestSummary & {
+  preferences: Prisma.JsonValue | null;
+  vipLevel: number | null;
+  tags: string[];
+  loyaltyTier: string | null;
+  loyaltyPoints: number | null;
+  /** Every reservation ever made by this guest, newest check-in first. */
+  stayHistory: GuestStaySummary[];
+  /** Sum of every non-void payment across every folio this guest has ever had — a plain string, already rounded to 2dp. */
+  totalSpend: string;
+  /** The append-only feed (`GuestNote`) — distinct from the legacy single `notes` column above, which stays read-only/historical. */
+  notesFeed: GuestNoteSummary[];
 };
 
 const GUEST_DETAIL_SELECT = {
@@ -58,16 +100,94 @@ export class GuestsService {
     return this.prisma.withTenant(tenantId, (tx) => this.createGuestInTx(tx, tenantId, dto));
   }
 
-  async getGuestById(tenantId: string, guestId: string): Promise<GuestSummary> {
+  async getGuestById(tenantId: string, guestId: string): Promise<GuestProfile> {
     return this.prisma.withTenant(tenantId, async (tx) => {
       const guest = await tx.guestProfile.findFirst({
         where: { id: guestId, deletedAt: null },
-        select: GUEST_SUMMARY_SELECT,
+        select: GUEST_PROFILE_SELECT,
       });
       if (!guest) {
         throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Guest not found' });
       }
-      return guest;
+
+      const [stayHistory, payments, notesFeed] = await Promise.all([
+        tx.reservation.findMany({
+          where: { guestId },
+          select: { id: true, confirmationNumber: true, status: true, checkInDate: true, checkOutDate: true, confirmedRate: true, roomType: { select: { name: true } } },
+          orderBy: { checkInDate: 'desc' },
+        }),
+        // Payment has no direct guestId — only reachable via its folio.
+        tx.payment.findMany({ where: { folio: { guestId }, isVoid: false, deletedAt: null }, select: { amount: true } }),
+        tx.guestNote.findMany({
+          where: { guestId },
+          select: { id: true, body: true, createdAt: true, author: { select: { id: true, name: true } } },
+          orderBy: { createdAt: 'desc' },
+        }),
+      ]);
+
+      const totalSpend = payments.reduce((sum, p) => sum.plus(p.amount), new Prisma.Decimal(0));
+
+      return { ...guest, stayHistory, totalSpend: totalSpend.toFixed(2), notesFeed };
+    });
+  }
+
+  /** Every field optional — a caller changes just the one thing (VIP level, a tag, a preference) they're editing. */
+  async updateGuest(tenantId: string, guestId: string, dto: UpdateGuestDto, actorId: string): Promise<GuestProfile> {
+    await this.prisma.withTenant(tenantId, async (tx) => {
+      const existing = await tx.guestProfile.findFirst({ where: { id: guestId, deletedAt: null } });
+      if (!existing) {
+        throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Guest not found' });
+      }
+      await tx.guestProfile.update({
+        where: { id: guestId },
+        data: {
+          name: dto.name,
+          email: dto.email,
+          phone: dto.phone,
+          preferences: dto.preferences as unknown as Prisma.InputJsonValue | undefined,
+          vipLevel: dto.vipLevel,
+          tags: dto.tags,
+          loyaltyTier: dto.loyaltyTier,
+          loyaltyPoints: dto.loyaltyPoints,
+        },
+      });
+      await tx.auditLog.create({ data: { tenantId, userId: actorId, action: 'guest.updated', entityType: 'guest_profile', entityId: guestId, after: dto as unknown as Prisma.InputJsonValue } });
+    });
+    return this.getGuestById(tenantId, guestId);
+  }
+
+  async addGuestNote(tenantId: string, guestId: string, dto: AddGuestNoteDto, actorId: string): Promise<GuestNoteSummary> {
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const guest = await tx.guestProfile.findFirst({ where: { id: guestId, deletedAt: null } });
+      if (!guest) {
+        throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Guest not found' });
+      }
+      const note = await tx.guestNote.create({
+        data: { tenantId, guestId, authorId: actorId, body: dto.body },
+        select: { id: true, body: true, createdAt: true, author: { select: { id: true, name: true } } },
+      });
+      await tx.auditLog.create({ data: { tenantId, userId: actorId, action: 'guest.note_added', entityType: 'guest_profile', entityId: guestId } });
+      return note;
+    });
+  }
+
+  /**
+   * The CRM's own browsable list — separate from `searchGuests` (used
+   * elsewhere for a quick "find one guest" picker, always requires a `q`,
+   * capped at 20) so that existing caller stays untouched. `q` here is
+   * optional — omit it to page through everyone.
+   */
+  async listGuests(tenantId: string, q: string | undefined, page: number, limit: number): Promise<{ rows: GuestSummary[]; total: number; page: number; limit: number }> {
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const where: Prisma.GuestProfileWhereInput = {
+        deletedAt: null,
+        ...(q ? { OR: [{ name: { contains: q, mode: 'insensitive' } }, { email: { contains: q, mode: 'insensitive' } }] } : {}),
+      };
+      const [rows, total] = await Promise.all([
+        tx.guestProfile.findMany({ where, select: GUEST_SUMMARY_SELECT, orderBy: { name: 'asc' }, skip: (page - 1) * limit, take: limit }),
+        tx.guestProfile.count({ where }),
+      ]);
+      return { rows, total, page, limit };
     });
   }
 
