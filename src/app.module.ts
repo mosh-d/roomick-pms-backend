@@ -10,12 +10,14 @@ import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import { RolesGuard } from './common/guards/roles.guard';
 import { TenantGuard } from './common/guards/tenant.guard';
 import { AuditInterceptor } from './common/interceptors/audit.interceptor';
+import { MetricsInterceptor } from './common/interceptors/metrics.interceptor';
 import { TenantContextInterceptor } from './common/interceptors/tenant-context.interceptor';
 import { JwtStrategy } from './common/strategies/jwt.strategy';
 import { envValidationSchema } from './config/env.validation';
 import { AlertsModule } from './modules/alerts/alerts.module';
 import { AuditLogsModule } from './modules/audit-logs/audit-logs.module';
 import { AuthModule } from './modules/auth/auth.module';
+import { FeatureFlagsModule } from './modules/feature-flags/feature-flags.module';
 import { FoliosModule } from './modules/folios/folios.module';
 import { GdprModule } from './modules/gdpr/gdpr.module';
 import { GuestsModule } from './modules/guests/guests.module';
@@ -82,6 +84,7 @@ import { PrismaModule } from './prisma/prisma.module';
     AuditLogsModule,
     GdprModule,
     MaintenanceModule,
+    FeatureFlagsModule,
   ],
   providers: [
     JwtStrategy,
@@ -92,7 +95,11 @@ import { PrismaModule } from './prisma/prisma.module';
     { provide: APP_GUARD, useClass: JwtAuthGuard },
     { provide: APP_GUARD, useClass: TenantGuard },
     { provide: APP_GUARD, useClass: RolesGuard },
-    // Context first so the audit interceptor can read it.
+    // Metrics first — its own `next.handle()` wraps every interceptor after
+    // it, timing the full remaining pipeline (every request, including
+    // @Public() ones) rather than just its own no-op work. Context next so
+    // the audit interceptor can read it.
+    { provide: APP_INTERCEPTOR, useClass: MetricsInterceptor },
     { provide: APP_INTERCEPTOR, useClass: TenantContextInterceptor },
     { provide: APP_INTERCEPTOR, useClass: AuditInterceptor },
   ],

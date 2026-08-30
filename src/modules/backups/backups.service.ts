@@ -1,9 +1,20 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
 import { gunzipSync, gzipSync } from 'zlib';
+import { ErrorCode } from '../../common/errors/error-codes';
 import { PrismaService } from '../../prisma/prisma.service';
 import { BACKUP_STORAGE_ADAPTER, BackupStorageAdapter } from './storage/backup-storage.interface';
+
+export interface BackupRecordSummary {
+  id: string;
+  type: string;
+  status: string;
+  sizeBytes: string | null;
+  startedAt: Date;
+  completedAt: Date | null;
+  retainUntil: Date | null;
+}
 
 /**
  * Not real tenant business data — `UserEmailIndex` is a global lookup table
@@ -120,6 +131,53 @@ export class BackupsService {
       });
       return { id: record.id, status: 'failed' };
     }
+  }
+
+  /**
+   * System Admin's own "Backup Management" card (ref: "scheduled backups,
+   * restore, retention") had a real backend service behind it with ZERO
+   * HTTP surface — no controller anywhere referenced `BackupsService` before
+   * this. `sizeBytes` is stringified here, not left as a raw `BigInt` — the
+   * exact serialization crash this file's own `runTenantBackup` comment
+   * already fixed for the JSON snapshot applies equally to a plain JSON API
+   * response.
+   */
+  async listBackups(tenantId: string): Promise<BackupRecordSummary[]> {
+    const records = await this.prisma.backupRecord.findMany({ where: { tenantId }, orderBy: { startedAt: 'desc' } });
+    return records.map((r) => ({
+      id: r.id,
+      type: r.type,
+      status: r.status,
+      sizeBytes: r.sizeBytes?.toString() ?? null,
+      startedAt: r.startedAt,
+      completedAt: r.completedAt,
+      retainUntil: r.retainUntil,
+    }));
+  }
+
+  /**
+   * `BackupRecord` has NO RLS (see its own schema comment — it's a global
+   * system table, `tenantId` nullable for full-system dumps) — without this
+   * check, any tenant's Owner could verify or restore-drill ANOTHER
+   * tenant's backup just by guessing a UUID. Every controller-facing call
+   * into `verifyBackup`/`runRestoreDrill` goes through this first; the
+   * cron-triggered `runBackupForAllTenants`/`runRestoreDrillForAllTenants`
+   * paths call the underlying methods directly since they already iterate
+   * per-tenant with a known-correct id.
+   */
+  private async assertOwnedBackup(tenantId: string, backupRecordId: string): Promise<void> {
+    const record = await this.prisma.backupRecord.findFirst({ where: { id: backupRecordId, tenantId } });
+    if (!record) throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Backup record not found' });
+  }
+
+  async verifyOwnedBackup(tenantId: string, backupRecordId: string): ReturnType<BackupsService['verifyBackup']> {
+    await this.assertOwnedBackup(tenantId, backupRecordId);
+    return this.verifyBackup(backupRecordId);
+  }
+
+  async restoreDrillOwnedBackup(tenantId: string, backupRecordId: string): ReturnType<BackupsService['runRestoreDrill']> {
+    await this.assertOwnedBackup(tenantId, backupRecordId);
+    return this.runRestoreDrill(backupRecordId);
   }
 
   /** Every tenant actually in use — `suspended`/`cancelled` ones don't need a fresh nightly snapshot of data nobody's adding to. */

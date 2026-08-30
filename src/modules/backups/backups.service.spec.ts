@@ -42,7 +42,7 @@ describe('BackupsService', () => {
   let tx: ReturnType<typeof makeTx>;
   let storage: { write: jest.Mock; read: jest.Mock };
   let prisma: {
-    backupRecord: { create: jest.Mock; update: jest.Mock; findFirst: jest.Mock };
+    backupRecord: { create: jest.Mock; update: jest.Mock; findFirst: jest.Mock; findMany: jest.Mock };
     tenant: { findMany: jest.Mock; create: jest.Mock; delete: jest.Mock };
     withTenant: jest.Mock;
   };
@@ -55,6 +55,7 @@ describe('BackupsService', () => {
         create: jest.fn().mockResolvedValue({ id: 'backup-1' }),
         update: jest.fn().mockImplementation(({ data }: { data: Record<string, unknown> }) => Promise.resolve({ id: 'backup-1', ...data })),
         findFirst: jest.fn(),
+        findMany: jest.fn().mockResolvedValue([]),
       },
       tenant: {
         findMany: jest.fn().mockResolvedValue([]),
@@ -272,6 +273,37 @@ describe('BackupsService', () => {
       expect(result.ok).toBe(false);
       expect(result.error).toContain('constraint violation');
       expect(prisma.tenant.delete).toHaveBeenCalledWith({ where: { id: 'drill-tenant-1' } });
+    });
+  });
+
+  describe('listBackups', () => {
+    it('scopes the query to the given tenant and stringifies BigInt sizeBytes for safe JSON serialization', async () => {
+      prisma.backupRecord.findMany.mockResolvedValue([
+        { id: 'b1', type: 'full', status: 'completed', sizeBytes: BigInt(123456), startedAt: new Date(), completedAt: new Date(), retainUntil: new Date() },
+        { id: 'b2', type: 'full', status: 'running', sizeBytes: null, startedAt: new Date(), completedAt: null, retainUntil: null },
+      ]);
+      const result = await service.listBackups(TENANT_ID);
+      expect(prisma.backupRecord.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { tenantId: TENANT_ID } }));
+      expect(result[0].sizeBytes).toBe('123456');
+      expect(typeof result[0].sizeBytes).toBe('string');
+      expect(result[1].sizeBytes).toBeNull();
+    });
+  });
+
+  describe('tenant-ownership checks (verifyOwnedBackup / restoreDrillOwnedBackup)', () => {
+    it('rejects with NOT_FOUND when the backup belongs to a different tenant', async () => {
+      prisma.backupRecord.findFirst.mockResolvedValue(null); // findFirst({ id, tenantId }) — no match for the wrong tenant
+      await expect(service.verifyOwnedBackup(TENANT_ID, 'someone-elses-backup')).rejects.toMatchObject({ status: 404 });
+      await expect(service.restoreDrillOwnedBackup(TENANT_ID, 'someone-elses-backup')).rejects.toMatchObject({ status: 404 });
+    });
+
+    it('delegates to the real verify/restore-drill once ownership is confirmed', async () => {
+      prisma.backupRecord.findFirst.mockImplementation(({ where }: { where: { id: string; tenantId?: string } }) =>
+        Promise.resolve(where.tenantId === TENANT_ID ? { id: where.id, storageUrl: null } : null),
+      );
+      const verifySpy = jest.spyOn(service, 'verifyBackup');
+      await service.verifyOwnedBackup(TENANT_ID, 'backup-1');
+      expect(verifySpy).toHaveBeenCalledWith('backup-1');
     });
   });
 });
