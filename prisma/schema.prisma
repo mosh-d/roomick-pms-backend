@@ -351,6 +351,8 @@ model Tenant {
   auditLogs         AuditLog[]
   gdprRequests      GdprRequest[]
   guestNotes        GuestNote[]
+  apiKeys           ApiKey[]
+  webhooks          Webhook[]
 
   @@index([isDemo, demoExpiresAt])
   @@map("tenants")
@@ -746,6 +748,57 @@ model GuestNote {
 
   @@index([guestId, createdAt])
   @@map("guest_notes")
+}
+
+/**
+ * Integrations & APIs' own "API Keys" card. The raw key is shown to the
+ * caller exactly once, at creation — only `keyHash` (SHA-256; the key
+ * itself is high-entropy random data, not a user-chosen password, so a
+ * slow KDF like bcrypt buys nothing here) and `keyPrefix` (for on-screen
+ * identification in a list) are ever persisted. Not yet consumed by any
+ * authentication path in this app — see `IntegrationsService`'s own header
+ * comment for why that's a deliberate, stated limitation, not an oversight.
+ */
+model ApiKey {
+  id         String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId   String    @db.Uuid
+  name       String    @db.VarChar(200)
+  keyPrefix  String    @db.VarChar(12)
+  keyHash    String    @db.VarChar(64)
+  createdAt  DateTime  @default(now()) @db.Timestamptz(6)
+  createdBy  String?   @db.Uuid
+  lastUsedAt DateTime? @db.Timestamptz(6)
+  revokedAt  DateTime? @db.Timestamptz(6)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@map("api_keys")
+}
+
+/**
+ * Integrations & APIs' own "Webhooks" card — subscription definitions
+ * only. `secret` (for signing a delivered payload) is shown once at
+ * creation, same discipline as `ApiKey`'s own raw key. Not yet triggered by
+ * any real PMS event — delivery infrastructure (matching subscriptions
+ * against an event, POSTing, retry/backoff) is real, cross-cutting
+ * infrastructure work this pass deliberately doesn't take on; see
+ * `IntegrationsService`'s own header comment.
+ */
+model Webhook {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId   String   @db.Uuid
+  url        String   @db.VarChar(500)
+  eventTypes String[]
+  secret     String   @db.VarChar(64)
+  isActive   Boolean  @default(true)
+  createdAt  DateTime @default(now()) @db.Timestamptz(6)
+  createdBy  String?  @db.Uuid
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@map("webhooks")
 }
 
 model Reservation {
