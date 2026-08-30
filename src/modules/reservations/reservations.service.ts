@@ -12,6 +12,7 @@ import { HousekeepingService } from '../housekeeping/housekeeping.service';
 import { RateResolverService } from '../rate-resolver/rate-resolver.service';
 import { RegistrationCardsService } from '../registration-cards/registration-cards.service';
 import { CommsLogService } from '../comms-log/comms-log.service';
+import { RestrictionsService } from '../revenue-management/restrictions.service';
 import {
   AvailabilityCalendarQueryDto,
   AvailabilityQueryDto,
@@ -64,6 +65,7 @@ export class ReservationsService {
     private readonly rateResolverService: RateResolverService,
     private readonly registrationCardsService: RegistrationCardsService,
     private readonly commsLogService: CommsLogService,
+    private readonly restrictionsService: RestrictionsService,
   ) {}
 
   // -------------------------------------------------------------------------
@@ -290,6 +292,10 @@ export class ReservationsService {
       await this.propertyService.assertBranch(tx, branchId);
       const roomType = await this.assertRoomType(tx, branchId, dto.roomTypeId);
       this.assertWithinCapacity(roomType, dto.adults, dto.children ?? 0);
+      // Additive — a tenant with no configured restriction sees zero
+      // behavior change; a match throws the SAME RESERVATION_NOT_AVAILABLE
+      // conflict the plain availability check below already uses.
+      await this.restrictionsService.assertNoViolation(tx, branchId, dto.roomTypeId, checkInDate, checkOutDate);
       const guest = await this.guestsService.findOrCreateGuestInTx(tx, tenantId, guestInput);
 
       // Serializes concurrent creates for the SAME room type only — closes

@@ -10,6 +10,7 @@ import { HousekeepingService } from '../housekeeping/housekeeping.service';
 import { RateResolverService } from '../rate-resolver/rate-resolver.service';
 import { RegistrationCardsService } from '../registration-cards/registration-cards.service';
 import { CommsLogService } from '../comms-log/comms-log.service';
+import { RestrictionsService } from '../revenue-management/restrictions.service';
 import { ReservationsService } from './reservations.service';
 
 const TENANT_ID = '11111111-1111-4111-8111-111111111111';
@@ -93,6 +94,7 @@ describe('ReservationsService', () => {
   let rateResolverService: { resolveStay: jest.Mock; linkAuditLogsToReservation: jest.Mock };
   let registrationCardsService: { generateCardInTx: jest.Mock };
   let commsLogService: { logAutomatedInTx: jest.Mock };
+  let restrictionsService: { assertNoViolation: jest.Mock };
 
   beforeEach(async () => {
     tx = makeTx();
@@ -134,6 +136,9 @@ describe('ReservationsService', () => {
     };
     registrationCardsService = { generateCardInTx: jest.fn().mockResolvedValue({ id: 'card-1' }) };
     commsLogService = { logAutomatedInTx: jest.fn().mockResolvedValue({ id: 'comm-1' }) };
+    // Every existing test books a stay with no restrictions configured —
+    // matches real behavior exactly (a tenant with none sees no violation).
+    restrictionsService = { assertNoViolation: jest.fn().mockResolvedValue(undefined) };
 
     const moduleRef = await Test.createTestingModule({
       providers: [
@@ -150,6 +155,7 @@ describe('ReservationsService', () => {
         { provide: RateResolverService, useValue: rateResolverService },
         { provide: RegistrationCardsService, useValue: registrationCardsService },
         { provide: CommsLogService, useValue: commsLogService },
+        { provide: RestrictionsService, useValue: restrictionsService },
       ],
     }).compile();
     service = moduleRef.get(ReservationsService);
@@ -309,6 +315,17 @@ describe('ReservationsService', () => {
     it('allows a party at exactly the room type\'s capacity', async () => {
       tx.roomType.findFirst.mockResolvedValueOnce({ id: TYPE_ID, branchId: BRANCH_ID, name: 'Standard', baseRate: '100.00', capacity: { adults: 2, children: 1 } });
       await expect(service.createReservation(TENANT_ID, BRANCH_ID, { ...dto, adults: 2, children: 1 }, ACTOR_ID)).resolves.toBeDefined();
+    });
+
+    it('checks Revenue Management restrictions with the resolved branch/room type/dates', async () => {
+      await service.createReservation(TENANT_ID, BRANCH_ID, dto, ACTOR_ID);
+      expect(restrictionsService.assertNoViolation).toHaveBeenCalledWith(tx, BRANCH_ID, TYPE_ID, new Date('2026-09-01T00:00:00.000Z'), new Date('2026-09-04T00:00:00.000Z'));
+    });
+
+    it('propagates a restriction violation and never creates the reservation row', async () => {
+      restrictionsService.assertNoViolation.mockRejectedValueOnce(new ConflictException({ code: 'RESERVATION_NOT_AVAILABLE', message: 'A minimum stay of 3 nights is required for these dates' }));
+      await expect(service.createReservation(TENANT_ID, BRANCH_ID, dto, ACTOR_ID)).rejects.toThrow(ConflictException);
+      expect(tx.reservation.create).not.toHaveBeenCalled();
     });
 
     it('sets confirmedRate = baseRate × nights as a Decimal', async () => {

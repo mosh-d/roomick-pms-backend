@@ -287,75 +287,76 @@ enum GdprStatus {
 // ---------------------------------------------------------------------------
 
 model Tenant {
-  id          String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  id            String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   // Backend-internal identifier only — auto-generated at registration
   // (slugified groupName, retried with a random suffix on collision, see
   // AuthService.register), never user-typed or shown. Login no longer
   // uses it at all (see UserEmailIndex below); nothing else in the app
   // consumes it as a real subdomain/URL either.
-  subdomain   String       @unique @db.VarChar(63)
-  groupName   String       @db.VarChar(200)
-  brandMode   BrandMode
-  status      TenantStatus @default(trial)
-  trialEndsAt DateTime?    @db.Timestamptz(6)
+  subdomain     String       @unique @db.VarChar(63)
+  groupName     String       @db.VarChar(200)
+  brandMode     BrandMode
+  status        TenantStatus @default(trial)
+  trialEndsAt   DateTime?    @db.Timestamptz(6)
   // Owner-supplied country at signup (ISO 3166-1 alpha-2, e.g. "NG") —
   // reporting/analytics only for now (which countries onboard from), not
   // consumed by any business logic yet. Optional: not every signup is
   // guaranteed to supply it.
-  country String? @db.VarChar(2)
+  country       String?      @db.VarChar(2)
   // Demo tenants (self-serve "try it" signups, not a sales-assisted trial):
   // auto-expire and get swept by a scheduled job (see
   // TenantsService.deleteOrganization / the demo-cleanup cron), or a user
   // can trigger the same deletion early via DELETE /tenants/:id. Real
   // tenants never set these.
-  isDemo        Boolean   @default(false)
-  demoExpiresAt DateTime? @db.Timestamptz(6)
-  createdAt   DateTime     @default(now()) @db.Timestamptz(6)
-  updatedAt   DateTime     @updatedAt @db.Timestamptz(6)
+  isDemo        Boolean      @default(false)
+  demoExpiresAt DateTime?    @db.Timestamptz(6)
+  createdAt     DateTime     @default(now()) @db.Timestamptz(6)
+  updatedAt     DateTime     @updatedAt @db.Timestamptz(6)
 
-  users             User[]
-  roles             Role[]
-  userBranchRoles   UserBranchRole[]
-  inviteTokens      InviteToken[]
-  brands            Brand[]
-  branches          Branch[]
-  buildings         Building[]
-  floors            Floor[]
-  roomTypes         RoomType[]
-  rooms             Room[]
-  roomBlocks        RoomBlock[]
-  guestProfiles     GuestProfile[]
-  reservations      Reservation[]
-  ratePlans         RatePlan[]
-  rateAuditLogs     RateAuditLog[]
-  noShowRecords     NoShowRecord[]
-  walkRecords       WalkRecord[]
-  corporateAccounts CorporateAccount[]
-  folios            Folio[]
-  lineItems         LineItem[]
-  folioTransfers    FolioTransfer[]
-  payments          Payment[]
-  refunds           Refund[]
-  taxRules          TaxRule[]
-  housekeepingTasks HousekeepingTask[]
-  shifts            Shift[]
-  shiftIssues       ShiftIssue[]
-  maintenanceOrders MaintenanceOrder[]
-  assets            Asset[]
-  registrationCards RegistrationCard[]
-  overbookingConfig OverbookingConfig[]
-  outlets           Outlet[]
-  userOutlets       UserOutlet[]
-  nightAuditLogs    NightAuditLog[]
-  communicationLogs CommunicationLog[]
-  auditLogs         AuditLog[]
-  gdprRequests      GdprRequest[]
-  guestNotes        GuestNote[]
-  apiKeys           ApiKey[]
-  webhooks          Webhook[]
-  groupBlocks       GroupBlock[]
-  eventSpaces       EventSpace[]
-  eventBookings     EventBooking[]
+  users                    User[]
+  roles                    Role[]
+  userBranchRoles          UserBranchRole[]
+  inviteTokens             InviteToken[]
+  brands                   Brand[]
+  branches                 Branch[]
+  buildings                Building[]
+  floors                   Floor[]
+  roomTypes                RoomType[]
+  rooms                    Room[]
+  roomBlocks               RoomBlock[]
+  guestProfiles            GuestProfile[]
+  reservations             Reservation[]
+  ratePlans                RatePlan[]
+  rateAuditLogs            RateAuditLog[]
+  noShowRecords            NoShowRecord[]
+  walkRecords              WalkRecord[]
+  corporateAccounts        CorporateAccount[]
+  folios                   Folio[]
+  lineItems                LineItem[]
+  folioTransfers           FolioTransfer[]
+  payments                 Payment[]
+  refunds                  Refund[]
+  taxRules                 TaxRule[]
+  housekeepingTasks        HousekeepingTask[]
+  shifts                   Shift[]
+  shiftIssues              ShiftIssue[]
+  maintenanceOrders        MaintenanceOrder[]
+  assets                   Asset[]
+  registrationCards        RegistrationCard[]
+  overbookingConfig        OverbookingConfig[]
+  outlets                  Outlet[]
+  userOutlets              UserOutlet[]
+  nightAuditLogs           NightAuditLog[]
+  communicationLogs        CommunicationLog[]
+  auditLogs                AuditLog[]
+  gdprRequests             GdprRequest[]
+  guestNotes               GuestNote[]
+  apiKeys                  ApiKey[]
+  webhooks                 Webhook[]
+  groupBlocks              GroupBlock[]
+  eventSpaces              EventSpace[]
+  eventBookings            EventBooking[]
+  availabilityRestrictions AvailabilityRestriction[]
 
   @@index([isDemo, demoExpiresAt])
   @@map("tenants")
@@ -544,29 +545,30 @@ model Branch {
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict)
   brand  Brand  @relation(fields: [brandId], references: [id], onDelete: Restrict)
 
-  userBranchRoles   UserBranchRole[]
-  inviteTokens      InviteToken[]
-  buildings         Building[]
-  roomTypes         RoomType[]
-  rooms             Room[]
-  reservations      Reservation[]
-  ratePlans         RatePlan[]
-  rateAuditLogs     RateAuditLog[]
-  folios            Folio[]
-  taxRules          TaxRule[]
-  housekeepingTasks HousekeepingTask[]
-  shifts            Shift[]
-  maintenanceOrders MaintenanceOrder[]
-  assets            Asset[]
-  registrationCards RegistrationCard[]
-  overbookingConfig OverbookingConfig[]
-  outlets           Outlet[]
-  userOutlets       UserOutlet[]
-  nightAuditLogs    NightAuditLog[]
-  communicationLogs CommunicationLog[]
-  auditLogs         AuditLog[]
-  groupBlocks       GroupBlock[]
-  eventSpaces       EventSpace[]
+  userBranchRoles          UserBranchRole[]
+  inviteTokens             InviteToken[]
+  buildings                Building[]
+  roomTypes                RoomType[]
+  rooms                    Room[]
+  reservations             Reservation[]
+  ratePlans                RatePlan[]
+  rateAuditLogs            RateAuditLog[]
+  folios                   Folio[]
+  taxRules                 TaxRule[]
+  housekeepingTasks        HousekeepingTask[]
+  shifts                   Shift[]
+  maintenanceOrders        MaintenanceOrder[]
+  assets                   Asset[]
+  registrationCards        RegistrationCard[]
+  overbookingConfig        OverbookingConfig[]
+  outlets                  Outlet[]
+  userOutlets              UserOutlet[]
+  nightAuditLogs           NightAuditLog[]
+  communicationLogs        CommunicationLog[]
+  auditLogs                AuditLog[]
+  groupBlocks              GroupBlock[]
+  eventSpaces              EventSpace[]
+  availabilityRestrictions AvailabilityRestriction[]
 
   @@index([tenantId, brandId])
   @@index([tenantId, deletedAt])
@@ -625,11 +627,12 @@ model RoomType {
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict)
   branch Branch @relation(fields: [branchId], references: [id], onDelete: Restrict)
 
-  rooms             Room[]
-  reservations      Reservation[]
-  ratePlans         RatePlan[]
-  overbookingConfig OverbookingConfig[]
-  groupBlocks       GroupBlock[]
+  rooms                    Room[]
+  reservations             Reservation[]
+  ratePlans                RatePlan[]
+  overbookingConfig        OverbookingConfig[]
+  groupBlocks              GroupBlock[]
+  availabilityRestrictions AvailabilityRestriction[]
 
   @@index([branchId, deletedAt])
   @@map("room_types")
@@ -839,7 +842,40 @@ model GroupBlock {
   @@map("group_blocks")
 }
 
-/** Sales & Events' own "Event Space Calendar" card — a bookable, non-guestroom venue. Deliberately its own model, not a `Room`: a ballroom has no occupancy/cleanliness status and is booked by time range, not by night. */
+/**
+ * Revenue Management's own "Restrictions Management" card (ref: "MinLOS,
+ * CTA, MaxLOS, stop-sell"). Deliberately a DIFFERENT concept from `RatePlan
+ * .minLOS` — that field decides which rate-cascade TIER applies for a
+ * given stay length, never rejects a booking outright. This model is a
+ * genuine, date-ranged, hard availability restriction, enforced as an
+ * additive check in `ReservationsService.createReservation` (a tenant that
+ * never configures one sees zero behavior change).
+ */
+model AvailabilityRestriction {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId        String   @db.Uuid
+  branchId        String   @db.Uuid
+  roomTypeId      String?  @db.Uuid // NULL = applies to every room type at the branch
+  startDate       DateTime @db.Date
+  endDate         DateTime @db.Date // exclusive, matching this codebase's own date-range convention
+  minLOS          Int?     @db.SmallInt
+  maxLOS          Int?     @db.SmallInt
+  closedToArrival Boolean  @default(false)
+  stopSell        Boolean  @default(false)
+  createdAt       DateTime @default(now()) @db.Timestamptz(6)
+  createdBy       String?  @db.Uuid
+
+  tenant   Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  branch   Branch    @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  roomType RoomType? @relation(fields: [roomTypeId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, branchId, startDate, endDate])
+  @@map("availability_restrictions")
+}
+
+/**
+ * Sales & Events' own "Event Space Calendar" card — a bookable, non-guestroom venue. Deliberately its own model, not a `Room`: a ballroom has no occupancy/cleanliness status and is booked by time range, not by night.
+ */
 model EventSpace {
   id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   tenantId  String   @db.Uuid
@@ -1332,18 +1368,18 @@ model MaintenanceOrder {
 }
 
 model Asset {
-  id            String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  tenantId      String    @db.Uuid
-  branchId      String    @db.Uuid
-  roomId        String?   @db.Uuid // NULL = common-area asset
-  name          String    @db.VarChar(200)
-  category      String?   @db.VarChar(100) // hvac | plumbing | electrical | furniture | appliance
-  serialNumber  String?   @db.VarChar(100)
-  purchaseDate  DateTime? @db.Date
-  warrantyUntil DateTime? @db.Date
+  id                  String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId            String    @db.Uuid
+  branchId            String    @db.Uuid
+  roomId              String?   @db.Uuid // NULL = common-area asset
+  name                String    @db.VarChar(200)
+  category            String?   @db.VarChar(100) // hvac | plumbing | electrical | furniture | appliance
+  serialNumber        String?   @db.VarChar(100)
+  purchaseDate        DateTime? @db.Date
+  warrantyUntil       DateTime? @db.Date
   serviceIntervalDays Int? // preventive maintenance cadence — "next service due" = last resolved order's resolvedAt (or purchaseDate if none yet) + this
-  notes         String?
-  createdAt     DateTime  @default(now()) @db.Timestamptz(6)
+  notes               String?
+  createdAt           DateTime  @default(now()) @db.Timestamptz(6)
 
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   branch Branch @relation(fields: [branchId], references: [id], onDelete: Cascade)
