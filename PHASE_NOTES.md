@@ -1,5 +1,23 @@
 # Phase Notes
 
+## Loyalty & Marketing — the display-only slice, exactly as scoped (2026-08-30)
+
+Seventh of the 11 Management/Admin gaps, and the last one this sequence originally scoped in detail — deliberately scoped from the start (see the sequence's own memory note) as "just surfaces `loyaltyTier`/`loyaltyPoints`, no earn/redeem logic," not a full loyalty program.
+
+### New `LoyaltyModule` — a read-only aggregate over data that already existed
+`GuestProfile.loyaltyTier` (`String?`, free text — not a foreign key into any tiers table) and `loyaltyPoints` (`Int?`) have been editable per-guest since the Guest Profiles & CRM pass, but nothing anywhere read them in aggregate. `LoyaltyService.getSummary` queries every non-deleted guest with a tier set OR points above zero, defaults a null tier to `'Untiered'`, and groups by tier for per-tier member counts and point totals. `GET /loyalty/summary`, `@Roles(Owner, Manager)` — a genuinely new, separate module (matching the "each sidebar section gets its own backend module" pattern `feature-flags`/`audit-logs`/`gdpr` already established) rather than bolting onto `GuestsService`, since Loyalty & Marketing is its own top-level Management section in the reference, not part of Guest Profiles & CRM.
+
+### What stayed deliberately unbuilt
+Loyalty Program Config (points-earning rules, tier-benefit definitions) and Email Campaign Builder (bulk marketing, segmentation, A/B testing) are both real, substantial systems this schema has no foundation for — `loyaltyTier` being free text rather than an enum/FK is itself evidence no tier-rules system was ever designed here, and `CommsLogService` only sends per-reservation transactional messages, nothing bulk. Inventing either would be building fake scope, not closing this item's actual, narrower gap.
+
+### Verified
+`npx tsc --noEmit`, `npm run lint` (0 errors), `npm test` — 488 tests, all green (5 new: the `WHERE` clause correctly includes tier-set-OR-points-positive and excludes soft-deleted guests; null tier defaults to "Untiered" and null points to 0; per-tier grouping produces correct member counts and point totals; totals aggregate correctly across tiers; an empty, well-shaped summary when no guest has any loyalty data).
+
+Live, against real Postgres: created four guests, set a tier and points on three of them (two Gold, one Silver) and deliberately left the fourth untouched, confirmed via the API that the summary correctly reports 3 members (not 4), the right per-tier counts/totals, and that the untouched guest never appears anywhere in the response. See the frontend's own `PHASE_NOTES.md` for the UI pass.
+
+### Carried forward
+4 of the 11 gaps remain, all previously deferred as needing real new domain design rather than a quick wrap: Revenue Management, Sales & Events, Integrations & APIs, Enterprise/HQ.
+
 ## System Admin — a real architectural fork resolved deliberately, not guessed at (2026-08-30)
 
 Sixth of the 11 Management/Admin gaps. Researched first, before writing anything: `BackupsService` (full backup/verify/restore-drill/scheduler) has existed since a prior pass with **zero HTTP surface** — no controller anywhere ever called it; `FeatureFlag` has existed in the schema since P0 with **zero references anywhere in `src/`** — pure scaffolding; system health was a bare `@Public() GET /system/health` (DB connectivity only, nothing else).
