@@ -24,6 +24,7 @@ import { GuestsModule } from './modules/guests/guests.module';
 import { HousekeepingModule } from './modules/housekeeping/housekeeping.module';
 import { HqModule } from './modules/hq/hq.module';
 import { IntegrationsModule } from './modules/integrations/integrations.module';
+import { SalesEventsModule } from './modules/sales-events/sales-events.module';
 import { LoyaltyModule } from './modules/loyalty/loyalty.module';
 import { MaintenanceModule } from './modules/maintenance/maintenance.module';
 import { NightAuditModule } from './modules/night-audit/night-audit.module';
@@ -91,6 +92,7 @@ import { PrismaModule } from './prisma/prisma.module';
     LoyaltyModule,
     HqModule,
     IntegrationsModule,
+    SalesEventsModule,
   ],
   providers: [
     JwtStrategy,

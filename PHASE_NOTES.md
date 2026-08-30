@@ -1,5 +1,26 @@
 # Phase Notes
 
+## Sales & Events — the last of the 11 architecture-map gaps (2026-08-30)
+
+Third and final best-fit pick, closing out every item the architecture-map audit originally surfaced. Chosen over Revenue Management specifically to avoid a subtler risk that item carried: two of its four cards (Demand Forecast, Rate Recommendations) are described in the reference as "AI-based"/"AI-suggested," and this app has no ML/forecasting infrastructure — building simple rule-based versions would have meant either fabricating an "AI" label on a heuristic or spending significant effort threading careful non-AI wording throughout the UI. Sales & Events carries no such risk: both its cards (Group Block Creation, Event Space Calendar) are pure operational features with real, honest, buildable value — no AI-adjacent framing needed anywhere.
+
+### Group Block Creation reuses the EXACT rate-override mechanism Manager Dashboard already built — no parallel rate path
+A reservation booked into a `GroupBlock` gets the block's own `blockRate` applied through `Reservation.overrideRate`/`overrideReason`, via the SAME `ReservationsService.setRateOverride` method Manager Dashboard's own Rate Override feature already calls. `GroupBlocksService.bookIntoBlock` composes three already-independent, already-tested pieces — `createReservation` (unmodified), `setRateOverride` (unmodified), then a direct `groupBlockId` link — rather than reimplementing reservation creation or inventing a second rate mechanism. `pickup` is always computed live via `reservation.groupBy` over real, currently-open reservations, never a stored counter that could drift from what actually got booked or cancelled.
+
+### Event Space Calendar is deliberately its own domain, not a reuse of `Room`
+A ballroom or meeting room has no occupancy/cleanliness status and is booked by time range, not by night — modeling it as a `Room` would have meant fighting that model's own night-based assumptions at every turn. New `EventSpace`/`EventBooking` models instead. The one piece of real business logic: `createBooking` rejects an overlapping booking on the same space using a genuine interval-overlap test (`existing.starts < new.ends AND existing.ends > new.starts`), not a naive same-day check — two bookings on the same day that don't actually overlap in time both succeed, tested explicitly.
+
+### A closing note on this Management/Admin gap-closing effort
+This is the third and final "no existing backend, needs real new domain design" item, and the last of the original 11 architecture-map gaps overall. Every one of the 11 is now either fully built (8 items) or has an honestly-scoped partial build with explicitly-stated, deliberate limitations (System Admin's tenant-scoping, Integrations & APIs' unwired auth/delivery, Loyalty & Marketing's display-only slice) — none was silently skipped or half-built without saying so.
+
+### Verified
+`npx tsc --noEmit`, `npm run lint` (0 errors), `npm test` — 524 tests, all green (17 new: pickup computed correctly from real `groupBy` reservation counts and returns empty without an extra query when there are no blocks; booking rejected once the allotment is full or the block is released; the rate-override call receives the exact block rate and a reason naming the block; `groupBlockId` correctly linked after booking; overlapping-interval rejection tested against a genuinely overlapping AND a genuinely non-overlapping same-day case; cancellation is a real delete, freeing the slot).
+
+Live, against real Postgres: created a 2-room block, booked two reservations into it (confirming each carries the block's own `overrideRate` and a reason naming the block), confirmed a third booking is rejected once full, confirmed booking is rejected again after releasing the block; created an event space, booked it, confirmed an overlapping booking on the same space is rejected while a genuinely non-overlapping same-day booking succeeds, confirmed the calendar read reflects a real cancellation. See the frontend's own `PHASE_NOTES.md` for the UI pass.
+
+### Carried forward
+Revenue Management remains explicitly deferred — the one Management/Admin gap this pass chose not to close, specifically because of the AI-labeling risk described above, not because it's less real work.
+
 ## Integrations & APIs — API Keys and Webhooks real, Payment Gateway honestly not (2026-08-30)
 
 Second best-fit pick from the 3 remaining architecture-map gaps (after Enterprise/HQ). Unlike HQ, this one had zero existing backend to reuse — `ApiKey`/`Webhook` didn't exist in the schema at all, confirmed via grep before writing anything. Picked over Revenue Management (needs AI forecasting + a competitor-rate feed this app has neither of) and Sales & Events (needs entirely new booking-domain models) because two of its three cards are genuinely buildable as real, self-contained CRUD without fabricating anything.

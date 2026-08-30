@@ -353,6 +353,9 @@ model Tenant {
   guestNotes        GuestNote[]
   apiKeys           ApiKey[]
   webhooks          Webhook[]
+  groupBlocks       GroupBlock[]
+  eventSpaces       EventSpace[]
+  eventBookings     EventBooking[]
 
   @@index([isDemo, demoExpiresAt])
   @@map("tenants")
@@ -562,6 +565,8 @@ model Branch {
   nightAuditLogs    NightAuditLog[]
   communicationLogs CommunicationLog[]
   auditLogs         AuditLog[]
+  groupBlocks       GroupBlock[]
+  eventSpaces       EventSpace[]
 
   @@index([tenantId, brandId])
   @@index([tenantId, deletedAt])
@@ -624,6 +629,7 @@ model RoomType {
   reservations      Reservation[]
   ratePlans         RatePlan[]
   overbookingConfig OverbookingConfig[]
+  groupBlocks       GroupBlock[]
 
   @@index([branchId, deletedAt])
   @@map("room_types")
@@ -801,6 +807,75 @@ model Webhook {
   @@map("webhooks")
 }
 
+/**
+ * Sales & Events' own "Group Block Creation" card. Deliberately does NOT
+ * invent a parallel rate mechanism — a reservation booked against a block
+ * gets the block's own `blockRate` applied through the SAME `Reservation
+ * .overrideRate`/`overrideReason` fields (and the same `setRateOverride`
+ * method) Manager Dashboard's own Rate Override already uses, just called
+ * from `GroupBlocksService` instead of a controller. Pickup is a computed
+ * count of `Reservation`s with this `groupBlockId`, never a stored counter
+ * that could drift from reality.
+ */
+model GroupBlock {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId   String   @db.Uuid
+  branchId   String   @db.Uuid
+  roomTypeId String   @db.Uuid
+  name       String   @db.VarChar(200)
+  blockSize  Int
+  blockRate  Decimal  @db.Decimal(12, 2)
+  cutoffDate DateTime @db.Date
+  status     String   @default("active") @db.VarChar(20) // active | released | cancelled
+  createdAt  DateTime @default(now()) @db.Timestamptz(6)
+  createdBy  String?  @db.Uuid
+
+  tenant       Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  branch       Branch        @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  roomType     RoomType      @relation(fields: [roomTypeId], references: [id], onDelete: Restrict)
+  reservations Reservation[]
+
+  @@index([tenantId, branchId])
+  @@map("group_blocks")
+}
+
+/** Sales & Events' own "Event Space Calendar" card — a bookable, non-guestroom venue. Deliberately its own model, not a `Room`: a ballroom has no occupancy/cleanliness status and is booked by time range, not by night. */
+model EventSpace {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String   @db.Uuid
+  branchId  String   @db.Uuid
+  name      String   @db.VarChar(200)
+  category  String   @db.VarChar(20) // meeting_room | ballroom | outdoor
+  capacity  Int
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+
+  tenant   Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  branch   Branch         @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  bookings EventBooking[]
+
+  @@index([tenantId, branchId])
+  @@map("event_spaces")
+}
+
+model EventBooking {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId     String   @db.Uuid
+  eventSpaceId String   @db.Uuid
+  title        String   @db.VarChar(200)
+  startsAt     DateTime @db.Timestamptz(6)
+  endsAt       DateTime @db.Timestamptz(6)
+  contactName  String?  @db.VarChar(200)
+  notes        String?
+  createdAt    DateTime @default(now()) @db.Timestamptz(6)
+  createdBy    String?  @db.Uuid
+
+  tenant     Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  eventSpace EventSpace @relation(fields: [eventSpaceId], references: [id], onDelete: Cascade)
+
+  @@index([eventSpaceId, startsAt])
+  @@map("event_bookings")
+}
+
 model Reservation {
   id                 String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   confirmationNumber String             @db.VarChar(20) // RES-2024-00001, sequence per branch — unique per tenant, see @@unique below
@@ -813,6 +888,7 @@ model Reservation {
   confirmedRate      Decimal            @db.Decimal(12, 2) // snapshot at booking — never changes
   overrideRate       Decimal?           @db.Decimal(12, 2) // manager rate override (absolute nightly rate) — NOT a rate_plans row
   overrideReason     String? // mandatory when overrideRate is set
+  groupBlockId       String?            @db.Uuid // NULL = not booked against a group block; the block's own rate is applied via the SAME overrideRate mechanism, not a parallel one
   status             ReservationStatus  @default(confirmed)
   channel            ReservationChannel
   checkInDate        DateTime           @db.Date
@@ -835,6 +911,7 @@ model Reservation {
   room          Room?        @relation(fields: [roomId], references: [id], onDelete: SetNull)
   ratePlan      RatePlan?    @relation(fields: [ratePlanId], references: [id], onDelete: SetNull)
   createdByUser User?        @relation(fields: [createdBy], references: [id], onDelete: SetNull)
+  groupBlock    GroupBlock?  @relation(fields: [groupBlockId], references: [id], onDelete: SetNull)
 
   rateAuditLogs              RateAuditLog[]
   noShowRecords              NoShowRecord[]
@@ -850,6 +927,7 @@ model Reservation {
   @@index([roomId, checkInDate, checkOutDate])
   @@index([guestId])
   @@index([branchId, status, checkInDate])
+  @@index([groupBlockId])
   @@map("reservations")
 }
 
