@@ -6,6 +6,7 @@ import { Public } from '../../common/decorators/public.decorator';
 import { Roles, SystemRole } from '../../common/decorators/roles.decorator';
 import {
   LookupBookingDto,
+  PreArrivalCheckInDto,
   PublicAvailabilityQueryDto,
   PublicCreateReservationDto,
   PublicQuoteQueryDto,
@@ -83,6 +84,16 @@ export class PublicBookingController {
   @ApiOperation({ summary: 'Guest self-service — look up your own booking with its confirmation number and the email address on it' })
   lookupBooking(@Param('slug') slug: string, @Body() dto: LookupBookingDto): ReturnType<PublicBookingService['lookupBooking']> {
     return this.publicBookingService.lookupBooking(slug, dto);
+  }
+
+  @Post(':slug/bookings/pre-arrival')
+  @HttpCode(HttpStatus.OK)
+  // Same credentials as the lookup, so the same brute-force surface and the
+  // same limit.
+  @Throttle({ default: { limit: 10, ttl: 3_600_000 } })
+  @ApiOperation({ summary: 'Guest pre-arrival check-in — corrects contact details and accepts house rules before arrival, so the desk only has to confirm and assign a room' })
+  preArrivalCheckIn(@Param('slug') slug: string, @Body() dto: PreArrivalCheckInDto): ReturnType<PublicBookingService['preArrivalCheckIn']> {
+    return this.publicBookingService.preArrivalCheckIn(slug, dto);
   }
 
   @Post(':slug/reservations')

@@ -5,10 +5,20 @@ import { toBranchDate } from '../../common/utils/branch-date';
 import { PrismaService } from '../../prisma/prisma.service';
 import { RateResolverService } from '../rate-resolver/rate-resolver.service';
 import { ReservationsService } from '../reservations/reservations.service';
-import { LookupBookingDto, PublicAvailabilityQueryDto, PublicCreateReservationDto, PublicQuoteQueryDto, PublishBookingEngineDto } from './dto/public-booking.dto';
+import {
+  LookupBookingDto,
+  PreArrivalCheckInDto,
+  PublicAvailabilityQueryDto,
+  PublicCreateReservationDto,
+  PublicQuoteQueryDto,
+  PublishBookingEngineDto,
+} from './dto/public-booking.dto';
 
 /** A tenant in one of these states has stopped paying for / closed its account — its properties stop accepting public bookings. */
 const BOOKABLE_TENANT_STATUSES = new Set(['trial', 'active']);
+
+/** Only a stay that hasn't started yet can be pre-checked-in. `waitlisted` is excluded too — there's no confirmed stay to prepare for. */
+const PRE_ARRIVAL_ELIGIBLE_STATUSES = new Set(['confirmed']);
 
 interface ResolvedBookableBranch {
   tenantId: string;
@@ -51,8 +61,13 @@ export interface PublicBookingDetail {
   roomTypeName: string;
   guestName: string;
   guestEmail: string | null;
+  guestPhone: string | null;
+  guestNationality: string | null;
   totalRate: string;
   currency: string;
+  preArrivalCompletedAt: Date | null;
+  estimatedArrivalTime: string | null;
+  houseRules: string | null;
   property: PublicPropertyInfo;
 }
 
@@ -127,6 +142,14 @@ export class PublicBookingService {
 
   private notFound(): NotFoundException {
     return new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'No bookable property found at this address' });
+  }
+
+  /** One message for every way a booking lookup can fail. A wrong confirmation number and a wrong email must be indistinguishable, or sequential numbers become enumerable. */
+  private bookingNotFound(): NotFoundException {
+    return new NotFoundException({
+      code: ErrorCode.NOT_FOUND,
+      message: 'We could not find a booking with that confirmation number and email address',
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -360,20 +383,31 @@ export class PublicBookingService {
    * internals. The folio view the growth plan describes is a separate,
    * later slice.
    */
+  /**
+   * The one definition of "this caller has proved they own this booking",
+   * shared by lookup and pre-arrival so the two can never drift apart — a
+   * weaker check on the write path than the read path would be exactly the
+   * kind of asymmetry that gets missed.
+   *
+   * `mode: 'insensitive'` rather than a lowercase compare: `GuestProfile
+   * .email` is stored as entered, so a guest who typed "Ada@Example.com" at
+   * booking must still match when they type it differently later.
+   */
+  private bookingCredentialsWhere(branchId: string, credentials: { confirmationNumber: string; email: string }) {
+    return {
+      branchId,
+      confirmationNumber: credentials.confirmationNumber.trim().toUpperCase(),
+      deletedAt: null,
+      guest: { email: { equals: credentials.email.trim(), mode: 'insensitive' as const } },
+    };
+  }
+
   async lookupBooking(slug: string, dto: LookupBookingDto): Promise<PublicBookingDetail> {
     const { tenantId, branchId } = await this.resolveBookableBranch(slug);
 
     const reservation = await this.prisma.withTenant(tenantId, (tx) =>
       tx.reservation.findFirst({
-        where: {
-          branchId,
-          confirmationNumber: dto.confirmationNumber.trim().toUpperCase(),
-          deletedAt: null,
-          // Prisma's `mode: 'insensitive'` rather than a lowercase compare:
-          // `GuestProfile.email` is stored as entered, and a guest who typed
-          // "Ada@Example.com" at booking must still be able to find it.
-          guest: { email: { equals: dto.email.trim(), mode: 'insensitive' } },
-        },
+        where: this.bookingCredentialsWhere(branchId, dto),
         select: {
           confirmationNumber: true,
           status: true,
@@ -384,19 +418,16 @@ export class PublicBookingService {
           specialRequests: true,
           confirmedRate: true,
           overrideRate: true,
+          preArrivalCompletedAt: true,
+          estimatedArrivalTime: true,
           roomType: { select: { name: true } },
-          guest: { select: { name: true, email: true } },
-          branch: { select: { currency: true } },
+          guest: { select: { name: true, email: true, phone: true, nationality: true } },
+          branch: { select: { currency: true, regCardTemplate: true } },
         },
       }),
     );
 
-    if (!reservation) {
-      throw new NotFoundException({
-        code: ErrorCode.NOT_FOUND,
-        message: 'We could not find a booking with that confirmation number and email address',
-      });
-    }
+    if (!reservation) throw this.bookingNotFound();
 
     const property = await this.getProperty(slug);
 
@@ -411,13 +442,98 @@ export class PublicBookingService {
       roomTypeName: reservation.roomType.name,
       guestName: reservation.guest.name,
       guestEmail: reservation.guest.email,
+      guestPhone: reservation.guest.phone,
+      guestNationality: reservation.guest.nationality,
       // The stay total the guest agreed to. `overrideRate` is a NIGHTLY
       // absolute set by staff (group blocks, manager overrides), so it can't
       // be shown as a stay total — `confirmedRate` already reflects it.
       totalRate: reservation.confirmedRate.toFixed(2),
       currency: reservation.branch.currency,
+      preArrivalCompletedAt: reservation.preArrivalCompletedAt,
+      estimatedArrivalTime: reservation.estimatedArrivalTime,
+      // The property's own house rules, so the guest can actually read what
+      // they're being asked to accept. Only this one field is surfaced from
+      // `regCardTemplate` — the rest of it (logo, required-field config,
+      // language) is staff-facing setup, not something a guest needs.
+      houseRules: ((reservation.branch.regCardTemplate ?? {}) as { houseRules?: string }).houseRules ?? null,
       property,
     };
+  }
+
+  /**
+   * Guest pre-arrival check-in. Same credentials as the lookup — deliberately
+   * the same `bookingCredentialsWhere`, so the write path can never end up
+   * easier to pass than the read path.
+   *
+   * Corrected contact details are written to the guest's own `GuestProfile`
+   * rather than copied onto the reservation, because the registration card
+   * generated at check-in snapshots that record at that moment. A guest
+   * fixing their phone number here therefore flows through to the card with
+   * no extra plumbing, which is the whole point of the feature.
+   *
+   * Only forward-looking states accept a pre-arrival: someone already checked
+   * in, checked out, cancelled or no-showed has nothing to pre-arrive for,
+   * and silently accepting it would write misleading data onto a closed stay.
+   */
+  async preArrivalCheckIn(slug: string, dto: PreArrivalCheckInDto): Promise<PublicBookingDetail> {
+    const { tenantId, branchId } = await this.resolveBookableBranch(slug);
+
+    if (!dto.acceptHouseRules) {
+      throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: 'The house rules must be accepted to complete check-in' });
+    }
+
+    await this.prisma.withTenant(tenantId, async (tx) => {
+      const reservation = await tx.reservation.findFirst({
+        where: this.bookingCredentialsWhere(branchId, dto),
+        select: { id: true, guestId: true, status: true },
+      });
+      if (!reservation) throw this.bookingNotFound();
+
+      if (!PRE_ARRIVAL_ELIGIBLE_STATUSES.has(reservation.status)) {
+        throw new ConflictException({
+          code: ErrorCode.INVALID_STATUS_TRANSITION,
+          message: 'This booking can no longer be checked in online — please speak to the property directly',
+        });
+      }
+
+      const guestUpdates: { phone?: string; nationality?: string } = {};
+      if (dto.phone?.trim()) guestUpdates.phone = dto.phone.trim();
+      if (dto.nationality?.trim()) guestUpdates.nationality = dto.nationality.trim().toUpperCase();
+      if (Object.keys(guestUpdates).length > 0) {
+        await tx.guestProfile.update({ where: { id: reservation.guestId }, data: guestUpdates });
+      }
+
+      const now = new Date();
+      await tx.reservation.update({
+        where: { id: reservation.id },
+        data: {
+          preArrivalCompletedAt: now,
+          houseRulesAcceptedAt: now,
+          estimatedArrivalTime: dto.estimatedArrivalTime ?? null,
+        },
+      });
+
+      // `userId: null` — a guest acted, not a staff member, the same way a
+      // public booking records `createdBy: null`. The audit row still exists
+      // because "who changed this guest's phone number and when" is exactly
+      // the sort of question a dispute asks later.
+      await tx.auditLog.create({
+        data: {
+          tenantId,
+          branchId,
+          userId: null,
+          action: 'reservation.pre_arrival_completed',
+          entityType: 'reservation',
+          entityId: reservation.id,
+          after: { estimatedArrivalTime: dto.estimatedArrivalTime ?? null, updatedGuestFields: Object.keys(guestUpdates) },
+        },
+      });
+    });
+
+    // Re-read through the ordinary lookup so the guest gets back exactly the
+    // same shape they'd see on a refresh, rather than a hand-built echo that
+    // could drift from it.
+    return this.lookupBooking(slug, { confirmationNumber: dto.confirmationNumber, email: dto.email });
   }
 
   // ---------------------------------------------------------------------------

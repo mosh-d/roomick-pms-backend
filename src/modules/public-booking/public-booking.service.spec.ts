@@ -25,7 +25,9 @@ describe('PublicBookingService', () => {
   let tx: {
     branch: { findFirst: jest.Mock; findFirstOrThrow: jest.Mock; update: jest.Mock };
     roomType: { findMany: jest.Mock; findFirst: jest.Mock };
-    reservation: { findFirstOrThrow: jest.Mock; findFirst: jest.Mock };
+    reservation: { findFirstOrThrow: jest.Mock; findFirst: jest.Mock; update: jest.Mock };
+    guestProfile: { update: jest.Mock };
+    auditLog: { create: jest.Mock };
   };
 
   beforeEach(async () => {
@@ -36,7 +38,9 @@ describe('PublicBookingService', () => {
         update: jest.fn().mockResolvedValue({}),
       },
       roomType: { findMany: jest.fn().mockResolvedValue([]), findFirst: jest.fn().mockResolvedValue({ id: ROOM_TYPE_ID, name: 'Standard' }) },
-      reservation: { findFirstOrThrow: jest.fn(), findFirst: jest.fn().mockResolvedValue(null) },
+      reservation: { findFirstOrThrow: jest.fn(), findFirst: jest.fn().mockResolvedValue(null), update: jest.fn().mockResolvedValue({}) },
+      guestProfile: { update: jest.fn().mockResolvedValue({}) },
+      auditLog: { create: jest.fn().mockResolvedValue({}) },
     };
     prisma = {
       withTenant: jest.fn((_t: string, fn: (x: unknown) => unknown) => fn(tx)),
@@ -278,9 +282,15 @@ describe('PublicBookingService', () => {
 
     it('returns only guest-safe fields — no ids, no folio internals, no staff-only data', async () => {
       const result = await service.lookupBooking(SLUG, lookup);
+      // An explicit allow-list, not a deny-list: any field added to the
+      // response fails this until someone consciously confirms a guest is
+      // entitled to see it. Everything here is either the guest's own data or
+      // the property's own public information.
       expect(Object.keys(result).sort()).toEqual([
         'adults', 'checkInDate', 'checkOutDate', 'children', 'confirmationNumber', 'currency',
-        'guestEmail', 'guestName', 'property', 'roomTypeName', 'specialRequests', 'status', 'totalRate',
+        'estimatedArrivalTime', 'guestEmail', 'guestName', 'guestNationality', 'guestPhone',
+        'houseRules', 'preArrivalCompletedAt', 'property', 'roomTypeName', 'specialRequests',
+        'status', 'totalRate',
       ]);
     });
 
@@ -294,6 +304,97 @@ describe('PublicBookingService', () => {
       tx.branch.findFirst.mockResolvedValue(null);
       await expect(service.lookupBooking(SLUG, lookup)).rejects.toMatchObject({ status: 404 });
       expect(tx.reservation.findFirst).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('preArrivalCheckIn', () => {
+    const preArrival = { confirmationNumber: 'RES-2026-00001', email: 'ada@example.com', acceptHouseRules: true };
+
+    beforeEach(() => {
+      tx.branch.findFirstOrThrow.mockResolvedValue({
+        name: 'Grand Hotel', category: 'hotel', currency: 'NGN', timezone: 'Africa/Lagos',
+        checkInTime: new Date('1970-01-01T14:00:00.000Z'), checkOutTime: new Date('1970-01-01T11:00:00.000Z'),
+        address: {}, brand: { name: 'Grand Group' },
+      });
+      // First call resolves the reservation for the write; the re-read at the
+      // end goes through lookupBooking and needs the fuller shape.
+      tx.reservation.findFirst
+        .mockResolvedValueOnce({ id: 'res-1', guestId: 'guest-1', status: 'confirmed' })
+        .mockResolvedValue({
+          confirmationNumber: 'RES-2026-00001', status: 'confirmed',
+          checkInDate: new Date('2026-10-01T00:00:00.000Z'), checkOutDate: new Date('2026-10-04T00:00:00.000Z'),
+          adults: 2, children: 0, specialRequests: null,
+          confirmedRate: { toFixed: () => '90000.00' }, overrideRate: null,
+          preArrivalCompletedAt: new Date(), estimatedArrivalTime: '15:30',
+          roomType: { name: 'Standard' },
+          guest: { name: 'Ada Okafor', email: 'ada@example.com', phone: '+2348012345678', nationality: 'NG' },
+          branch: { currency: 'NGN', regCardTemplate: { houseRules: 'No smoking.' } },
+        });
+    });
+
+    it('rejects a submission that does not accept the house rules, before touching anything', async () => {
+      await expect(service.preArrivalCheckIn(SLUG, { ...preArrival, acceptHouseRules: false })).rejects.toMatchObject({ status: 400 });
+      expect(tx.reservation.update).not.toHaveBeenCalled();
+    });
+
+    it('uses the SAME credential check as the lookup, so the write path is no easier to pass', async () => {
+      await service.preArrivalCheckIn(SLUG, preArrival);
+      const where = (tx.reservation.findFirst.mock.calls[0][0] as { where: { guest: unknown; confirmationNumber: string } }).where;
+      expect(where.confirmationNumber).toBe('RES-2026-00001');
+      expect(where.guest).toEqual({ email: { equals: 'ada@example.com', mode: 'insensitive' } });
+    });
+
+    it('404s with the generic booking message when credentials do not match', async () => {
+      tx.reservation.findFirst.mockReset();
+      tx.reservation.findFirst.mockResolvedValue(null);
+      await expect(service.preArrivalCheckIn(SLUG, preArrival)).rejects.toMatchObject({ status: 404 });
+    });
+
+    it('refuses a stay that has already started or ended', async () => {
+      for (const status of ['checked_in', 'checked_out', 'cancelled', 'no_show', 'waitlisted']) {
+        tx.reservation.findFirst.mockReset();
+        tx.reservation.findFirst.mockResolvedValue({ id: 'res-1', guestId: 'guest-1', status });
+        await expect(service.preArrivalCheckIn(SLUG, preArrival)).rejects.toMatchObject({ status: 409 });
+      }
+    });
+
+    it('records completion and house-rules acceptance on the reservation', async () => {
+      await service.preArrivalCheckIn(SLUG, preArrival);
+      const data = (tx.reservation.update.mock.calls[0][0] as { data: Record<string, unknown> }).data;
+      expect(data.preArrivalCompletedAt).toBeInstanceOf(Date);
+      expect(data.houseRulesAcceptedAt).toBeInstanceOf(Date);
+    });
+
+    it('writes corrected contact details to the GUEST profile, not onto the reservation', async () => {
+      await service.preArrivalCheckIn(SLUG, { ...preArrival, phone: ' +2348012345678 ', nationality: 'ng' });
+      expect(tx.guestProfile.update).toHaveBeenCalledWith({ where: { id: 'guest-1' }, data: { phone: '+2348012345678', nationality: 'NG' } });
+      const reservationData = (tx.reservation.update.mock.calls[0][0] as { data: Record<string, unknown> }).data;
+      expect(reservationData).not.toHaveProperty('phone');
+      expect(reservationData).not.toHaveProperty('nationality');
+    });
+
+    it('does not touch the guest profile when no contact details were supplied', async () => {
+      await service.preArrivalCheckIn(SLUG, preArrival);
+      expect(tx.guestProfile.update).not.toHaveBeenCalled();
+    });
+
+    it('stores the estimated arrival time, and clears it when omitted', async () => {
+      await service.preArrivalCheckIn(SLUG, { ...preArrival, estimatedArrivalTime: '15:30' });
+      expect((tx.reservation.update.mock.calls[0][0] as { data: { estimatedArrivalTime: string } }).data.estimatedArrivalTime).toBe('15:30');
+    });
+
+    it('audits the change with a NULL user — a guest acted, not a staff member', async () => {
+      await service.preArrivalCheckIn(SLUG, preArrival);
+      const data = (tx.auditLog.create.mock.calls[0][0] as { data: { userId: null; action: string } }).data;
+      expect(data.userId).toBeNull();
+      expect(data.action).toBe('reservation.pre_arrival_completed');
+    });
+
+    it('returns the same shape the lookup returns, rather than a hand-built echo', async () => {
+      const result = await service.preArrivalCheckIn(SLUG, preArrival);
+      expect(result.confirmationNumber).toBe('RES-2026-00001');
+      expect(result.houseRules).toBe('No smoking.');
+      expect(result.preArrivalCompletedAt).toBeInstanceOf(Date);
     });
   });
 

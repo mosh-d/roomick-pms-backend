@@ -1,5 +1,36 @@
 # Phase Notes
 
+## Month 9 (second slice) — guest pre-arrival check-in (2026-09-12)
+
+The operational half of the Guest Self-Service Portal, and the reason the plan wants it: a guest completes their own details before travelling, so desk check-in becomes confirm-and-assign rather than a data-entry session.
+
+### Corrected details are written to the guest, not copied onto the reservation
+This is the design decision the whole feature turns on. `RegistrationCardsService.generateCardInTx` already snapshots the guest record **at the moment of check-in**, so writing a corrected phone number or nationality to `GuestProfile` means it flows onto the registration card with **no extra plumbing at all**. Duplicating those values onto the reservation would have created a second source of truth that the card would then have had to choose between.
+
+Three new nullable columns on `reservations` hold only what is genuinely reservation-specific: `preArrivalCompletedAt`, `houseRulesAcceptedAt`, and `estimatedArrivalTime`. All default to unset, so a booking nobody pre-checks in behaves exactly as before.
+
+`estimatedArrivalTime` is `VARCHAR(5)` (HH:mm), not a timestamp. It's a stated intention for the arrival date, not an instant; storing it as a timestamp would imply a precision the guest never gave and force a timezone decision that has no correct answer.
+
+### The write path uses the identical credential check as the read path
+`bookingCredentialsWhere` is one private helper shared by `lookupBooking` and `preArrivalCheckIn`. A write that was easier to pass than the corresponding read is exactly the asymmetry that gets missed in review, so there is deliberately only one definition of "this caller owns this booking". A wrong email on pre-arrival returns the same generic 404, word for word, verified live.
+
+### Only a `confirmed` stay can be pre-checked-in
+Someone already checked in, checked out, cancelled or no-showed has nothing to prepare for, and silently accepting a pre-arrival would write misleading data onto a closed stay. All five ineligible statuses are covered exhaustively in unit tests; the live pass confirmed it against a genuinely cancelled reservation.
+
+### Audited with a NULL user, like every other guest action
+A guest acted, not a staff member — the same reasoning as `createdBy: null` on a public booking. The row still exists because "who changed this guest's phone number, and when" is precisely the question a later dispute asks.
+
+### ID documents are deliberately NOT collected
+The growth plan lists them and `GuestProfile` has encrypted columns ready. But accepting identity documents over an anonymous public endpoint is a materially different security surface — file upload, encryption-at-rest from an unauthenticated context, and a far higher cost to getting it wrong. It gets its own pass. The guest-facing page says plainly that photo ID is still needed at the desk, rather than implying check-in is fully done.
+
+### Verified
+`npx tsc --noEmit`, `npm run lint` (0 errors), `npm test` — 604 tests, all green (11 new). The existing guest-safe-field allow-list test **caught the new response fields and failed until each was consciously confirmed as guest-visible** — which is exactly what that test is for.
+
+Live against real Postgres (26/26): house rules surface from the branch template; a submission that doesn't accept them is refused; a wrong email is refused identically to the lookup; a successful pre-arrival returns 200 with the corrected phone and an uppercased nationality; **staff then see the completion, arrival time and acceptance timestamp on the reservation, and the guest profile itself is corrected**; an audit row records it with a NULL user; a cancelled stay is refused with 409; and the whole flow works in a logged-out browser, including the button staying disabled until the rules are accepted and a re-lookup showing the completed state rather than an empty form.
+
+### Carried forward
+ID document capture (its own security pass) · the read-only folio view for mid-stay guests · guest-initiated change/cancel · surfacing "pre-arrival done / expects 15:30" on the Arrivals Dashboard, which now has real data to show but no UI for it yet.
+
 ## Month 9 (first slice) — guest booking lookup (2026-09-12)
 
 The first piece of the growth plan's Guest Self-Service Portal, and it closes a plain hole in the Direct Booking Engine: a guest booked online, got a confirmation number, and had no way to ever see that booking again. Read-only by design — changing or cancelling a stay has real policy consequences (penalties, rate re-resolution) and belongs in its own pass rather than being bolted on here.

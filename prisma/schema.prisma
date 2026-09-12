@@ -958,32 +958,51 @@ model EventBooking {
 }
 
 model Reservation {
-  id                 String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  confirmationNumber String             @db.VarChar(20) // RES-2024-00001, sequence per branch — unique per tenant, see @@unique below
-  tenantId           String             @db.Uuid
-  branchId           String             @db.Uuid
-  guestId            String             @db.Uuid
-  roomTypeId         String             @db.Uuid
-  roomId             String?            @db.Uuid // NULL until check-in (or assignment); always NULL while waitlisted
-  ratePlanId         String?            @db.Uuid // plan that won at booking time
-  confirmedRate      Decimal            @db.Decimal(12, 2) // snapshot at booking — never changes
-  overrideRate       Decimal?           @db.Decimal(12, 2) // manager rate override (absolute nightly rate) — NOT a rate_plans row
-  overrideReason     String? // mandatory when overrideRate is set
-  groupBlockId       String?            @db.Uuid // NULL = not booked against a group block; the block's own rate is applied via the SAME overrideRate mechanism, not a parallel one
-  status             ReservationStatus  @default(confirmed)
-  channel            ReservationChannel
-  checkInDate        DateTime           @db.Date
-  checkOutDate       DateTime           @db.Date
-  actualCheckIn      DateTime?          @db.Timestamptz(6)
-  actualCheckOut     DateTime?          @db.Timestamptz(6)
-  adults             Int                @db.SmallInt
-  children           Int                @default(0) @db.SmallInt
-  specialRequests    String?
-  depositAmount      Decimal?           @db.Decimal(12, 2)
-  createdBy          String?            @db.Uuid // NULL = online booking
-  createdAt          DateTime           @default(now()) @db.Timestamptz(6)
-  updatedAt          DateTime           @updatedAt @db.Timestamptz(6)
-  deletedAt          DateTime?          @db.Timestamptz(6) // soft delete only — cancelled reservations stay
+  id                    String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  confirmationNumber    String             @db.VarChar(20) // RES-2024-00001, sequence per branch — unique per tenant, see @@unique below
+  tenantId              String             @db.Uuid
+  branchId              String             @db.Uuid
+  guestId               String             @db.Uuid
+  roomTypeId            String             @db.Uuid
+  roomId                String?            @db.Uuid // NULL until check-in (or assignment); always NULL while waitlisted
+  ratePlanId            String?            @db.Uuid // plan that won at booking time
+  confirmedRate         Decimal            @db.Decimal(12, 2) // snapshot at booking — never changes
+  overrideRate          Decimal?           @db.Decimal(12, 2) // manager rate override (absolute nightly rate) — NOT a rate_plans row
+  overrideReason        String? // mandatory when overrideRate is set
+  groupBlockId          String?            @db.Uuid // NULL = not booked against a group block; the block's own rate is applied via the SAME overrideRate mechanism, not a parallel one
+  status                ReservationStatus  @default(confirmed)
+  channel               ReservationChannel
+  checkInDate           DateTime           @db.Date
+  checkOutDate          DateTime           @db.Date
+  actualCheckIn         DateTime?          @db.Timestamptz(6)
+  actualCheckOut        DateTime?          @db.Timestamptz(6)
+  adults                Int                @db.SmallInt
+  children              Int                @default(0) @db.SmallInt
+  specialRequests       String?
+  depositAmount         Decimal?           @db.Decimal(12, 2)
+  createdBy             String?            @db.Uuid // NULL = online booking
+  // --- Guest pre-arrival check-in (Month 9) --------------------------------
+  // Filled by the guest themselves through the public booking engine's
+  // "Manage your booking" page, before they ever reach the desk, so check-in
+  // becomes confirm-and-assign rather than a data-entry session.
+  //
+  // All nullable and unset by default: a reservation nobody pre-checks in
+  // behaves exactly as before. Corrected contact details are written to the
+  // guest's own `GuestProfile` rather than duplicated here, which means the
+  // registration card generated at check-in picks them up automatically —
+  // it snapshots the guest record at that moment (see
+  // RegistrationCardsService.generateCardInTx).
+  preArrivalCompletedAt DateTime?          @db.Timestamptz(6)
+  // Guest's own estimate, as HH:mm in the BRANCH's timezone. Stored as text,
+  // not a timestamp: it's a stated intention for the arrival date, not an
+  // instant, and turning it into one would imply a precision the guest never
+  // gave.
+  estimatedArrivalTime  String?            @db.VarChar(5)
+  houseRulesAcceptedAt  DateTime?          @db.Timestamptz(6)
+
+  createdAt DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime  @updatedAt @db.Timestamptz(6)
+  deletedAt DateTime? @db.Timestamptz(6) // soft delete only — cancelled reservations stay
 
   tenant        Tenant       @relation(fields: [tenantId], references: [id], onDelete: Restrict)
   branch        Branch       @relation(fields: [branchId], references: [id], onDelete: Restrict)

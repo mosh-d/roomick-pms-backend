@@ -1,6 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
-import { IsEmail, IsISO8601, IsInt, IsOptional, IsString, IsUUID, Matches, MaxLength, Max, Min } from 'class-validator';
+import { IsBoolean, IsEmail, IsISO8601, IsInt, IsOptional, IsString, IsUUID, Matches, MaxLength, Max, Min } from 'class-validator';
 
 export class PublicAvailabilityQueryDto {
   @ApiProperty({ example: '2026-10-01' })
@@ -142,6 +142,49 @@ export class LookupBookingDto {
   @IsEmail()
   @MaxLength(320)
   email!: string;
+}
+
+/**
+ * Guest pre-arrival check-in. Carries the same confirmation-number + email
+ * credentials as the lookup, because it's the same guest proving the same
+ * thing — there's no session to hold between the two calls.
+ *
+ * Deliberately absent: ID document type, number and photo. The growth plan
+ * lists them, and `GuestProfile` has encrypted columns ready for them, but
+ * accepting identity documents over an anonymous public endpoint is a
+ * materially different security surface (file upload, encryption-at-rest from
+ * an unauthenticated context, and a much higher cost to getting it wrong). It
+ * belongs in its own pass, not folded in here.
+ */
+export class PreArrivalCheckInDto {
+  @ApiProperty({ example: 'RES-2026-00001' })
+  @IsString()
+  @MaxLength(40)
+  confirmationNumber!: string;
+
+  @ApiProperty({ example: 'ada@example.com' })
+  @IsEmail()
+  @MaxLength(320)
+  email!: string;
+
+  @ApiPropertyOptional({ example: '+2348012345678', description: "Corrects the guest's own stored phone number" })
+  @IsOptional()
+  @Matches(/^\+?[0-9\s-]{7,20}$/, { message: 'phone must be a valid phone number' })
+  phone?: string;
+
+  @ApiPropertyOptional({ example: 'NG', description: 'ISO 3166-1 alpha-2' })
+  @IsOptional()
+  @Matches(/^[A-Za-z]{2}$/, { message: 'nationality must be a 2-letter country code' })
+  nationality?: string;
+
+  @ApiPropertyOptional({ example: '15:30', description: "Expected arrival time (HH:mm) in the property's own timezone" })
+  @IsOptional()
+  @Matches(/^([01][0-9]|2[0-3]):[0-5][0-9]$/, { message: 'estimatedArrivalTime must be HH:mm' })
+  estimatedArrivalTime?: string;
+
+  @ApiProperty({ description: "Must be true — the guest confirming they've read the property's house rules" })
+  @IsBoolean()
+  acceptHouseRules!: boolean;
 }
 
 export class PublishBookingEngineDto {
