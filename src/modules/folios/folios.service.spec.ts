@@ -256,20 +256,84 @@ describe('FoliosService', () => {
   });
 
   describe('correctLineItem — append-only', () => {
-    it('appends a negating correction and never mutates the original', async () => {
-      tx.lineItem.findFirst.mockResolvedValue({ id: 'li-original', folioId: FOLIO_ID, description: 'Minibar', amount: new Prisma.Decimal('5000'), serviceDate: new Date('2026-09-01') });
-      tx.folio.findFirst.mockResolvedValue(folio());
-      await service.correctLineItem(TENANT_ID, 'li-original', { reason: 'Guest disputed' }, ACTOR_ID);
+    const original = (over: Record<string, unknown> = {}) => ({
+      id: 'li-original', folioId: FOLIO_ID, description: 'Minibar', chargeType: 'minibar', taxRuleIds: [],
+      amount: new Prisma.Decimal('5000'), serviceDate: new Date('2026-09-01'), ...over,
+    });
+    const taxLine = (over: Record<string, unknown> = {}) => ({
+      id: 'li-vat', folioId: FOLIO_ID, description: 'VAT (7.5%) — Minibar', chargeType: 'tax', taxRuleIds: ['rule-vat'],
+      amount: new Prisma.Decimal('375'), serviceDate: new Date('2026-09-01'), correctedBy: null, ...over,
+    });
 
+    beforeEach(() => {
+      tx.folio.findFirst.mockResolvedValue(folio());
+      // 1st findFirst: the line being corrected. 2nd: "already corrected?" — no.
+      tx.lineItem.findFirst.mockResolvedValueOnce(original()).mockResolvedValueOnce(null);
+    });
+
+    it('appends a negating correction and never mutates the original', async () => {
+      await service.correctLineItem(TENANT_ID, 'li-original', { reason: 'Guest disputed' }, ACTOR_ID);
       const created = tx.lineItem.create.mock.calls[0][0].data;
       expect(created.amount.toFixed(2)).toBe('-5000.00');
       expect(created.chargeType).toBe('correction');
+      expect(created.correctsLineItemId).toBe('li-original');
       expect(created.description).toContain('Guest disputed');
       // The original row must be untouched — no update call anywhere.
       expect(tx.lineItem).not.toHaveProperty('update');
     });
 
+    it("reverses the charge's own tax lines with it — VAT on a corrected charge no longer survives", async () => {
+      tx.lineItem.findMany.mockResolvedValue([taxLine()]);
+      await service.correctLineItem(TENANT_ID, 'li-original', { reason: 'Returned unopened' }, ACTOR_ID);
+      expect(tx.lineItem.create).toHaveBeenCalledTimes(2);
+      const reversal = tx.lineItem.create.mock.calls[1][0].data;
+      expect(reversal.amount.toFixed(2)).toBe('-375.00');
+      expect(reversal.chargeType).toBe('tax'); // stays tax, so tax totals and the breakdown net down
+      expect(reversal.taxRuleIds).toEqual(['rule-vat']);
+      expect(reversal.correctsLineItemId).toBe('li-vat');
+      expect(reversal.parentLineItemId).toBe('li-1'); // the new correction row
+      expect(tx.lineItem.create.mock.calls[0][0].data.taxAmount.toFixed(2)).toBe('-375.00');
+    });
+
+    it('only looks for tax lines linked to this charge, on this folio', async () => {
+      await service.correctLineItem(TENANT_ID, 'li-original', { reason: 'x' }, ACTOR_ID);
+      expect(tx.lineItem.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { parentLineItemId: 'li-original', folioId: FOLIO_ID, chargeType: 'tax', isVoid: false, deletedAt: null } }),
+      );
+    });
+
+    it('skips a tax line that staff already corrected on its own', async () => {
+      tx.lineItem.findMany.mockResolvedValue([taxLine({ correctedBy: { id: 'earlier-fix' } })]);
+      await service.correctLineItem(TENANT_ID, 'li-original', { reason: 'x' }, ACTOR_ID);
+      expect(tx.lineItem.create).toHaveBeenCalledTimes(1);
+    });
+
+    it('refuses to correct a line twice — the charge and its tax would reverse again', async () => {
+      tx.lineItem.findFirst.mockReset();
+      tx.lineItem.findFirst.mockResolvedValueOnce(original()).mockResolvedValueOnce({ id: 'earlier-correction' });
+      await expect(service.correctLineItem(TENANT_ID, 'li-original', { reason: 'x' }, ACTOR_ID)).rejects.toThrow(ConflictException);
+      expect(tx.lineItem.create).not.toHaveBeenCalled();
+    });
+
+    it('a tax line corrected on its own becomes a negating tax line for that rule, nothing else touched', async () => {
+      tx.lineItem.findFirst.mockReset();
+      tx.lineItem.findFirst.mockResolvedValueOnce(taxLine()).mockResolvedValueOnce(null);
+      await service.correctLineItem(TENANT_ID, 'li-vat', { reason: 'Guest is tax-exempt' }, ACTOR_ID);
+      expect(tx.lineItem.findMany).not.toHaveBeenCalled();
+      expect(tx.lineItem.create).toHaveBeenCalledTimes(1);
+      const created = tx.lineItem.create.mock.calls[0][0].data;
+      expect(created.chargeType).toBe('tax');
+      expect(created.taxRuleIds).toEqual(['rule-vat']);
+      expect(created.amount.toFixed(2)).toBe('-375.00');
+    });
+
+    it('turns a concurrent double-correction (unique index) into the same 409', async () => {
+      tx.lineItem.create.mockRejectedValueOnce(new Prisma.PrismaClientKnownRequestError('Unique constraint failed', { code: 'P2002', clientVersion: 'test' }));
+      await expect(service.correctLineItem(TENANT_ID, 'li-original', { reason: 'x' }, ACTOR_ID)).rejects.toThrow(ConflictException);
+    });
+
     it('404s on a missing line item', async () => {
+      tx.lineItem.findFirst.mockReset();
       tx.lineItem.findFirst.mockResolvedValue(null);
       await expect(service.correctLineItem(TENANT_ID, 'nope', { reason: 'x' }, ACTOR_ID)).rejects.toThrow(NotFoundException);
     });
@@ -306,6 +370,29 @@ describe('FoliosService', () => {
     it('records the transfer amount as the sum of what moved (balance is conserved across the pair)', async () => {
       await service.splitFolio(TENANT_ID, FOLIO_ID, dto, ACTOR_ID);
       expect(tx.folioTransfer.create.mock.calls[0][0].data.amount.toFixed(2)).toBe('21500.00');
+    });
+
+    it("moves a charge's linked tax lines with it even when only the charge was selected", async () => {
+      tx.lineItem.findMany
+        .mockResolvedValueOnce([
+          { id: 'li-1', amount: new Prisma.Decimal('20000'), chargeType: 'room', parentLineItemId: null },
+          { id: 'li-2', amount: new Prisma.Decimal('1500'), chargeType: 'minibar', parentLineItemId: null },
+        ])
+        .mockResolvedValueOnce([{ id: 'li-1-vat', amount: new Prisma.Decimal('1500'), chargeType: 'tax', parentLineItemId: 'li-1' }]);
+      await service.splitFolio(TENANT_ID, FOLIO_ID, dto, ACTOR_ID);
+      expect(tx.lineItem.updateMany).toHaveBeenCalledWith({ where: { id: { in: ['li-1', 'li-2', 'li-1-vat'] } }, data: { folioId: TARGET_ID } });
+      const transferData = tx.folioTransfer.create.mock.calls[0][0].data;
+      expect(transferData.lineItemIds).toEqual(['li-1', 'li-2', 'li-1-vat']);
+      expect(transferData.amount.toFixed(2)).toBe('23000.00');
+    });
+
+    it('refuses to move a linked tax line away from its charge', async () => {
+      tx.lineItem.findMany.mockResolvedValueOnce([
+        { id: 'li-1', amount: new Prisma.Decimal('1500'), chargeType: 'tax', parentLineItemId: 'charge-staying-behind' },
+        { id: 'li-2', amount: new Prisma.Decimal('500'), chargeType: 'minibar', parentLineItemId: null },
+      ]);
+      await expect(service.splitFolio(TENANT_ID, FOLIO_ID, dto, ACTOR_ID)).rejects.toThrow(BadRequestException);
+      expect(tx.lineItem.updateMany).not.toHaveBeenCalled();
     });
 
     it('rejects splitting a folio into itself', async () => {
@@ -390,6 +477,18 @@ describe('FoliosService', () => {
       expect(tx.lineItem.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ amount: expect.objectContaining({ toString: expect.any(Function) }), chargeType: 'penalty' }) }));
     });
 
+    it('links every tax line to the charge it was computed on', async () => {
+      taxesService.computeTaxesForCharge.mockResolvedValue([
+        { ruleId: 'vat', ruleName: 'VAT', rate: new Prisma.Decimal('0.075'), taxAmount: new Prisma.Decimal('3.75') },
+        { ruleId: 'levy', ruleName: 'Levy', rate: new Prisma.Decimal('0.05'), taxAmount: new Prisma.Decimal('2.50') },
+      ]);
+      await service.postAdHocCharge(tx as never, adHocReservation as never, folio() as never, 'penalty', new Prisma.Decimal('50'), 'No-show penalty', ACTOR_ID);
+      const [parentData, ...taxData] = tx.lineItem.create.mock.calls.map((call) => (call as [{ data: Record<string, unknown> }])[0].data);
+      expect(parentData.parentLineItemId).toBeUndefined();
+      expect(taxData).toHaveLength(2);
+      taxData.forEach((data) => expect(data.parentLineItemId).toBe('li-1'));
+    });
+
     it('a negative amount reverses the charge as a correction — no lookup of the original row needed', async () => {
       taxesService.computeTaxesForCharge.mockResolvedValue([{ ruleId: 'vat', ruleName: 'VAT', rate: new Prisma.Decimal('0.1'), taxAmount: new Prisma.Decimal('-5') }]);
       await service.postAdHocCharge(tx as never, adHocReservation as never, folio() as never, 'correction', new Prisma.Decimal('-50'), 'Penalty waived', ACTOR_ID);
@@ -440,6 +539,13 @@ describe('FoliosService', () => {
       tx.lineItem.findMany.mockResolvedValue([]);
       const [row] = await service.listFolios(TENANT_ID, BRANCH_ID, 'all');
       expect(row.guestStatus).toBeNull();
+    });
+
+    it("carries each folio's label, so a split folio isn't listed under the same name as the guest's primary folio", async () => {
+      tx.folio.findMany.mockResolvedValue([folioRow({ id: 'f-primary', label: null }), folioRow({ id: 'f-company', label: 'Company' })]);
+      tx.lineItem.findMany.mockResolvedValue([]);
+      const rows = await service.listFolios(TENANT_ID, BRANCH_ID, 'all');
+      expect(rows.map((r) => r.label)).toEqual([null, 'Company']);
     });
 
     /**

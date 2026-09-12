@@ -1189,22 +1189,30 @@ model Folio {
 
 // Append-only: no UPDATE of amounts, no DELETE. Corrections = new negative line item.
 model LineItem {
-  id          String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  tenantId    String     @db.Uuid
-  folioId     String     @db.Uuid
-  description String     @db.VarChar(300)
-  amount      Decimal    @db.Decimal(12, 2) // negative = credit/correction; CHECK (amount != 0) in migration
-  taxAmount   Decimal    @default(0) @db.Decimal(12, 2)
-  chargeType  ChargeType // NO deposit — deposits are payments
-  outletId    String?    @db.Uuid // NULL for room / night-audit / system posts
-  taxRuleIds  String[]   @db.Uuid
-  serviceDate DateTime?  @db.Date // date the service occurred (e.g. room-night date)
-  postedBy    String?    @db.Uuid // NULL = system-posted (night audit)
-  postedAt    DateTime   @default(now()) @db.Timestamptz(6)
-  isVoid      Boolean    @default(false) // voided but retained in ledger
-  voidedAt    DateTime?  @db.Timestamptz(6)
-  voidedBy    String?    @db.Uuid
-  deletedAt   DateTime?  @db.Timestamptz(6) // display suppression only, never financial calculation
+  id                 String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId           String     @db.Uuid
+  folioId            String     @db.Uuid
+  description        String     @db.VarChar(300)
+  amount             Decimal    @db.Decimal(12, 2) // negative = credit/correction; CHECK (amount != 0) in migration
+  taxAmount          Decimal    @default(0) @db.Decimal(12, 2)
+  chargeType         ChargeType // NO deposit — deposits are payments
+  outletId           String?    @db.Uuid // NULL for room / night-audit / system posts
+  taxRuleIds         String[]   @db.Uuid
+  serviceDate        DateTime?  @db.Date // date the service occurred (e.g. room-night date)
+  postedBy           String?    @db.Uuid // NULL = system-posted (night audit)
+  postedAt           DateTime   @default(now()) @db.Timestamptz(6)
+  isVoid             Boolean    @default(false) // voided but retained in ledger
+  voidedAt           DateTime?  @db.Timestamptz(6)
+  voidedBy           String?    @db.Uuid
+  deletedAt          DateTime?  @db.Timestamptz(6) // display suppression only, never financial calculation
+  // Tax lines only: the charge this tax was computed on. Lets a correction
+  // reverse a charge's tax with it, and lets a split move tax with its charge.
+  // NULL on charges, and on any tax line posted before this link existed.
+  parentLineItemId   String?    @db.Uuid
+  // Reversal lines only: the line this reverses. Unique — a line can be
+  // corrected once; a second correction would reverse the charge (and now
+  // its tax) twice.
+  correctsLineItemId String?    @unique @db.Uuid
 
   tenant       Tenant  @relation(fields: [tenantId], references: [id], onDelete: Restrict)
   folio        Folio   @relation(fields: [folioId], references: [id], onDelete: Restrict)
@@ -1212,6 +1220,12 @@ model LineItem {
   postedByUser User?   @relation("LineItemPostedBy", fields: [postedBy], references: [id], onDelete: SetNull)
   voidedByUser User?   @relation("LineItemVoidedBy", fields: [voidedBy], references: [id], onDelete: SetNull)
 
+  parentLineItem   LineItem?  @relation("TaxOfCharge", fields: [parentLineItemId], references: [id], onDelete: Restrict)
+  taxLines         LineItem[] @relation("TaxOfCharge")
+  correctsLineItem LineItem?  @relation("CorrectionOf", fields: [correctsLineItemId], references: [id], onDelete: Restrict)
+  correctedBy      LineItem?  @relation("CorrectionOf")
+
+  @@index([parentLineItemId])
   @@index([folioId, postedAt])
   @@index([folioId, chargeType])
   @@index([outletId])

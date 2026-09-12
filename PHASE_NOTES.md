@@ -1,5 +1,39 @@
 # Phase Notes
 
+## Correcting a charge reverses its tax; a split moves tax with its charge (2026-09-12)
+
+The bug the guest bill view surfaced (entry below): `correctLineItem` negated only the line it was given, so the VAT posted with a charge survived the charge's correction — a returned ₦5,000 minibar item still carried ₦375 VAT. The fix needed a schema change, which was the owner's call; the owner said fix it.
+
+### The link
+Migration `20260912020000_line_item_tax_and_correction_links` adds two nullable self-references to `line_items`:
+- **`parentLineItemId`** — tax lines only: the charge the tax was computed on. Set in `writeChargeWithTaxes`, the one place tax lines are created (check-in and night-audit room nights, hand-posted charges, ad-hoc charges such as no-show penalties).
+- **`correctsLineItemId`** — reversal lines only: the line being reversed. **Unique**, so a line can be corrected once; Postgres treats NULLs as distinct, so every ordinary line is unaffected.
+
+Both `ON DELETE RESTRICT` (the ledger never deletes anyway). No RLS statements — new columns inherit `line_items`' tenant policy.
+
+### `correctLineItem`
+- **Correcting a charge** appends the negating correction *and* a negating tax line for each of its linked tax lines not already reversed — same rule ids, `parentLineItemId` pointing at the new correction (so the reversal pair mirrors the original pair), `correctsLineItemId` at the tax line it reverses. The correction's display-only `taxAmount` is the reversed tax, negated.
+- **Correcting a tax line on its own** (a tax-exempt guest, say) now appends a negating line that stays `chargeType: 'tax'` with the same rule ids. It used to become a `correction`, which `computeTotals` counts as subtotal and the Tax Breakdown ignores — so the balance was right but tax collected was overstated. Correcting that charge afterwards skips the tax already reversed, so tax never goes negative.
+- **Correcting a correction** reinstates the charge and its tax together, because the reversal tax lines are linked to the correction row.
+- **A second correction of the same line → 409** "This line has already been corrected". Checked up front; the unique index backs it against a race (P2002 maps to the same 409). Before this, nothing stopped a line being reversed twice.
+- Still append-only: nothing is updated or deleted.
+
+### `splitFolio`
+Tax travels with its charge. Selecting a charge moves its non-void tax lines too, and the `FolioTransfer.lineItemIds` snapshot lists everything that actually moved. Selecting a linked tax line without its charge is refused (400, "A tax line moves with the charge it belongs to — select the charge instead") rather than silently dragging the charge along. Before this, a split could leave a charge's VAT on the guest's bill while the charge went to the company.
+
+### Folio list rows carry `label`
+`listFolios` rows gained `label` (`null` on the primary folio). The split page built its source options from guest name and room alone, so a reservation's primary and Company folios read identically ("Tunde Bello — Room 101") — found in the browser pass. The other list consumers (In-House, Departures, Check-Out) map reservation → folio and, the list being newest-first, end on the primary folio; unchanged.
+
+### Honest limits
+- **No backfill.** Tax lines posted before this migration have no parent: correcting one of those older charges reverses the charge only, as before, and staff correct its tax line separately; splitting one moves only what's picked. Only local test data exists, and a backfill would mean matching on description text with RLS bypassed — not worth it before launch.
+- **No-show waivers** (`waiveNoShowPenaltyInTx`) still post their own negative charge through `postAdHocCharge`, which recomputes tax at today's rate rather than reversing the penalty's own tax lines, and set no `correctsLineItemId` (the no-show record doesn't store the penalty's line id). So a waived penalty could also be corrected by hand and end up reversed twice. Carried forward.
+- Corrections are still API-only — the staff folio page has no correction action (unchanged by this slice).
+
+### Verified
+`npx tsc --noEmit`, `npm run lint`, `npm test` — 626 tests, all green (10 net new: the correction's link; linked VAT reversed with the same rule ids and linked to the correction; the linked-tax query; already-reversed tax skipped; double correction and a racing duplicate both 409; a tax line corrected alone stays tax; stranded tax refused on split; linked tax auto-included on split; every tax line linked to its charge; folio list rows carry their label). A first test run reported "The system cannot execute the specified program" — an interrupted earlier run had left Jest and six workers alive (~3.5 GB), exhausting the commit limit. Killed, rerun clean.
+
+Live against real Postgres (23/23): check-in and hand-posted charges link their VAT; correcting the minibar charge appends −₦375 VAT linked to the correction, and the folio's tax, total, Tax Breakdown and the **guest's own bill** all net down to the room VAT alone while the original rows stay untouched; a second correction is refused and changes nothing; correcting the correction brings the charge and its VAT back; a tax line corrected alone stays tax, and correcting its room charge afterwards doesn't reverse that VAT again; a split refuses to strand a tax line, moves the laundry charge and its VAT together, and the transfer record lists both.
+
 ## Month 9 (third slice) — a read-only guest bill view (2026-09-12)
 
 `POST /public/properties/:slug/bookings/folio` — the growth plan's "mid-stay: read-only folio view (reuses the existing folio-totals response verbatim — no new money-calculation surface)". Same credentials as the lookup (the shared `bookingCredentialsWhere`), same 10/hour throttle, `@HttpCode(200)`.

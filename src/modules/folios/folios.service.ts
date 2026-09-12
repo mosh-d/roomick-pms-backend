@@ -263,8 +263,30 @@ export class FoliosService {
   /**
    * Append-only correction (spec §4.5: "no UPDATE of amounts, no DELETE.
    * Corrections = new negative line item"). The original row is never
-   * touched — it stays in the ledger exactly as posted, and a new
-   * `correction` row carries the negation plus a mandatory reason.
+   * touched — it stays in the ledger exactly as posted, and a new reversing
+   * row carries the negation plus a mandatory reason.
+   *
+   * **A charge's tax is reversed with it.** This used to negate only the
+   * charge line and leave its tax lines standing — found through the guest
+   * bill view, where correcting a ₦5,000 minibar charge still left ₦375 VAT
+   * owing on an item whose net charge was zero. Tax lines now record the
+   * charge they were computed on (`parentLineItemId`), so correcting a charge
+   * also appends a negating line for each of its taxes.
+   *
+   * Each tax reversal keeps the `tax` category and the original rule ids, so
+   * tax totals and the Tax Breakdown net down — rather than the reversal
+   * landing in the charges subtotal while reported tax stays inflated. The
+   * reversals point at the new correction row as their parent, mirroring how
+   * the originals point at the original charge, so reversing a correction
+   * (reinstating a charge) reinstates its tax too.
+   *
+   * Correcting a tax line on its own — a tax-exempt guest, say — is allowed
+   * and produces a negating `tax` line for that one rule.
+   *
+   * A line can be corrected once (`correctsLineItemId` is unique): a second
+   * correction would reverse the charge, and now its tax, twice. Tax lines
+   * posted before the link existed have no parent, so correcting one of
+   * those older charges still reverses only the charge.
    */
   async correctLineItem(tenantId: string, lineItemId: string, dto: CorrectLineItemDto, actorId: string): Promise<LineItem> {
     return this.prisma.withTenant(tenantId, async (tx) => {
@@ -275,23 +297,74 @@ export class FoliosService {
       const folio = await this.findFolioOrThrow(tx, original.folioId);
       this.assertFolioOpen(folio);
 
-      const correction = await tx.lineItem.create({
-        data: {
-          tenantId,
-          folioId: original.folioId,
-          description: `Correction — ${original.description} (${dto.reason})`.slice(0, 300),
-          amount: original.amount.negated(),
-          chargeType: 'correction',
-          serviceDate: original.serviceDate,
-          postedBy: actorId,
-        },
-      });
-      await this.audit(tx, tenantId, folio.branchId, actorId, 'line_item.corrected', correction.id, {
-        originalLineItemId: lineItemId,
-        reason: dto.reason,
-      });
-      return correction;
+      const alreadyCorrected = await tx.lineItem.findFirst({ where: { correctsLineItemId: original.id }, select: { id: true } });
+      if (alreadyCorrected) throw this.alreadyCorrected();
+
+      const isTaxLine = original.chargeType === 'tax';
+      // Only taxes still standing — one that staff already corrected on its
+      // own must not be reversed a second time here.
+      const taxesToReverse = isTaxLine
+        ? []
+        : (
+            await tx.lineItem.findMany({
+              where: { parentLineItemId: original.id, folioId: original.folioId, chargeType: 'tax', isVoid: false, deletedAt: null },
+              include: { correctedBy: { select: { id: true } } },
+            })
+          ).filter((tax) => !tax.correctedBy);
+      const reversedTaxTotal = taxesToReverse.reduce((sum, tax) => sum.plus(tax.amount), ZERO);
+
+      try {
+        const correction = await tx.lineItem.create({
+          data: {
+            tenantId,
+            folioId: original.folioId,
+            description: `Correction — ${original.description} (${dto.reason})`.slice(0, 300),
+            amount: original.amount.negated(),
+            // Display denormalisation, same as on any charge: the tax this
+            // correction takes back, shown beside it on the staff folio.
+            taxAmount: reversedTaxTotal.negated(),
+            chargeType: isTaxLine ? 'tax' : 'correction',
+            taxRuleIds: isTaxLine ? original.taxRuleIds : [],
+            serviceDate: original.serviceDate,
+            correctsLineItemId: original.id,
+            postedBy: actorId,
+          },
+        });
+
+        for (const tax of taxesToReverse) {
+          await tx.lineItem.create({
+            data: {
+              tenantId,
+              folioId: tax.folioId,
+              description: `Correction — ${tax.description}`.slice(0, 300),
+              amount: tax.amount.negated(),
+              chargeType: 'tax',
+              taxRuleIds: tax.taxRuleIds,
+              serviceDate: tax.serviceDate,
+              parentLineItemId: correction.id,
+              correctsLineItemId: tax.id,
+              postedBy: actorId,
+            },
+          });
+        }
+
+        await this.audit(tx, tenantId, folio.branchId, actorId, 'line_item.corrected', correction.id, {
+          originalLineItemId: lineItemId,
+          reason: dto.reason,
+          reversedTaxLineIds: taxesToReverse.map((tax) => tax.id),
+        });
+        return correction;
+      } catch (err) {
+        // Two staff correcting the same line at once: the unique index lets
+        // only one through. The loser gets the same answer as the check above.
+        if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') throw this.alreadyCorrected();
+        throw err;
+      }
     });
+  }
+
+  private alreadyCorrected(): ConflictException {
+    return new ConflictException({ code: ErrorCode.CONFLICT, message: 'This line has already been corrected' });
   }
 
   /**
@@ -336,12 +409,13 @@ export class FoliosService {
    * unmodified charge belongs to. `FolioTransfer.lineItemIds` snapshots
    * exactly what moved, which is the shape the schema was built for.
    *
-   * Tax rows are independent ledger entries with no parent link in the
-   * schema (`taxRuleIds` names the rule, not the charge), so they do NOT
-   * follow their parent automatically — the caller selects them
-   * explicitly. Surfaced in the UI rather than guessed at by matching
-   * description strings, which would break the moment a description is
-   * edited.
+   * **Tax travels with its charge.** Tax lines record the charge they were
+   * computed on (`parentLineItemId`), so moving a charge moves its tax lines
+   * too, whether or not the caller listed them — previously they stayed put
+   * unless selected by hand, leaving a charge on one bill and its VAT on
+   * another. A linked tax line can't be moved without its charge. Tax lines
+   * posted before the link existed have no parent and still move only when
+   * selected, exactly as before.
    */
   async splitFolio(
     tenantId: string,
@@ -369,25 +443,42 @@ export class FoliosService {
         });
       }
 
-      const lineItems = await tx.lineItem.findMany({
+      const selected = await tx.lineItem.findMany({
         where: { id: { in: dto.lineItemIds }, folioId: sourceFolioId, isVoid: false, deletedAt: null },
       });
-      if (lineItems.length !== dto.lineItemIds.length) {
+      if (selected.length !== dto.lineItemIds.length) {
         throw new BadRequestException({
           code: ErrorCode.VALIDATION_FAILED,
           message: 'One or more line items do not belong to this folio, or are voided',
         });
       }
 
-      const amount = lineItems.reduce((sum, item) => sum.plus(item.amount), ZERO);
-      await tx.lineItem.updateMany({ where: { id: { in: dto.lineItemIds } }, data: { folioId: dto.targetFolioId } });
+      const selectedIds = new Set(selected.map((item) => item.id));
+      const strandedTax = selected.some((item) => item.chargeType === 'tax' && item.parentLineItemId && !selectedIds.has(item.parentLineItemId));
+      if (strandedTax) {
+        throw new BadRequestException({
+          code: ErrorCode.VALIDATION_FAILED,
+          message: 'A tax line moves with the charge it belongs to — select the charge instead',
+        });
+      }
+
+      const linkedTax = await tx.lineItem.findMany({
+        where: { parentLineItemId: { in: [...selectedIds] }, folioId: sourceFolioId, chargeType: 'tax', isVoid: false, deletedAt: null },
+      });
+      const toMove = [...selected, ...linkedTax.filter((tax) => !selectedIds.has(tax.id))];
+      const movedIds = toMove.map((item) => item.id);
+
+      const amount = toMove.reduce((sum, item) => sum.plus(item.amount), ZERO);
+      await tx.lineItem.updateMany({ where: { id: { in: movedIds } }, data: { folioId: dto.targetFolioId } });
 
       const transfer = await tx.folioTransfer.create({
         data: {
           tenantId,
           sourceFolioId,
           targetFolioId: dto.targetFolioId,
-          lineItemIds: dto.lineItemIds,
+          // What actually moved, including tax that came along with its
+          // charge — the transfer record must match the ledger, not the request.
+          lineItemIds: movedIds,
           amount,
           reason: dto.reason,
           approvedBy: actorId,
@@ -395,7 +486,8 @@ export class FoliosService {
       });
       await this.audit(tx, tenantId, source.branchId, actorId, 'folio.split', sourceFolioId, {
         targetFolioId: dto.targetFolioId,
-        lineItemCount: lineItems.length,
+        lineItemCount: toMove.length,
+        taxLinesMovedWithCharges: toMove.length - selected.length,
         amount: amount.toFixed(2),
         reason: dto.reason,
       });
@@ -565,6 +657,9 @@ export class FoliosService {
           const totals = await this.computeTotals(tx, folio.id);
           return {
             id: folio.id,
+            // `null` on the primary folio; a split folio's own name ("Company"). Without it, every folio on a
+            // reservation reads identically in a list — same guest, same room.
+            label: folio.label,
             status: folio.status,
             openedAt: folio.openedAt,
             closedAt: folio.closedAt,
@@ -602,6 +697,11 @@ export class FoliosService {
    * "20,000 NGN +345 tax" per-line suffix) — the ledger entry for tax is
    * the separate `chargeType: 'tax'` row, and balance sums `amount` alone,
    * so nothing is double-counted.
+   *
+   * Every tax row records the charge it was computed on (`parentLineItemId`).
+   * That link is what lets `correctLineItem` reverse a charge's tax along
+   * with the charge, and `splitFolio` move tax together with its charge —
+   * before it existed, both left tax stranded on the wrong bill.
    */
   private async writeChargeWithTaxes(
     tx: TenantTx,
@@ -644,6 +744,7 @@ export class FoliosService {
           chargeType: 'tax',
           taxRuleIds: [tax.ruleId],
           serviceDate: input.serviceDate,
+          parentLineItemId: parent.id,
           postedBy: input.actorId,
         },
       });
