@@ -1,5 +1,33 @@
 # Phase Notes
 
+## Outbound email — the outbox half of the comms log (2026-09-12)
+
+Closes a real hole in the Direct Booking Engine shipped the same day: a guest booked online, saw a confirmation number on screen, and then heard nothing. `CommsLogService` recorded every message faithfully and no code anywhere ever sent one — `deliveryStatus` was hardcoded `queued` forever, as the schema's own comment admitted.
+
+### Sending is deliberately NOT done where the message is recorded
+`logAutomatedInTx` runs **inside** an already-open reservation transaction (booking, check-in, check-out, cancel). Sending from there would be wrong twice over: network I/O held under row locks for the duration of an external call, and — worse — a transaction that later rolled back would leave a real email already delivered for a reservation that no longer exists. **An email cannot be un-sent.**
+
+So this is an outbox. The write stays transactional and `queued`; `CommsDispatcherService` picks rows up on a scheduled pass strictly after commit, at which point a rolled-back booking simply has no row to find. The schema anticipated this shape — the `[branchId, deliveryStatus, sentAt]` index exists precisely to make "find the queued ones" cheap.
+
+### Honest delivery states
+- **`sent`, never `delivered`.** The transport accepting a message is not a mailbox receiving it, which is exactly why `DeliveryStatus` has both. Only a provider webhook could justify `delivered`, and none is wired, so nothing sets it.
+- **Non-email channels are left strictly alone.** `sms`/`push`/`in_app_chat` have no transport, so the dispatcher filters them out entirely rather than marking them anything. Claiming a delivery that never happened would be worse than an honest permanent `queued`.
+- **A guest with no email address is marked `failed`, not retried.** Walk-ins and phone bookings legitimately have no address; retrying forever on every tick would be pointless load.
+- **A transport error also lands on `failed` rather than returning to `queued`** — deliberately, because there is no `attempts` column, so re-queueing would be an unbounded retry loop against a permanently broken address. A real retry policy needs an attempt counter and backoff; that's its own change, not something to fake here.
+
+### Only a log transport exists, and that's stated plainly
+`LogMailTransport` writes the recipient, subject and body to the application log and reports success. Nothing leaves the machine. It is deliberately **not** a silent no-op: a silent one would let the pipeline report `sent` while nobody could see what a guest would actually have received, which is exactly how broken copy or a wrong recipient ships unnoticed.
+
+The interface mirrors `DocumentStorageAdapter`/`BackupStorageAdapter` exactly, so an SMTP or provider-API transport is one new class behind the same DI token with no calling code touched. The token is bound unconditionally rather than behind a `MAIL_TRANSPORT=` env switch, because a switch with exactly one possible value is indirection pretending to be a choice — add it alongside the second implementation.
+
+**Until a real transport is configured, guests still receive nothing.** The pipeline, states and observability are real; the delivery is not yet.
+
+### Verified
+`npx tsc --noEmit`, `npm run lint` (0 errors), `npm test` — 584 tests, all green (12 new: email-only queue selection; oldest-first, capped batches; recipient/subject/body passed through intact; `sent` + provider id recorded; `delivered` never set; missing-address failed without calling the transport; transport errors failed rather than re-queued; one bad row not stopping the batch; only trial/active tenants swept; per-tenant RLS context; one tenant's failure not stopping the others).
+
+### Carried forward
+An SMTP/provider transport (~one class; needs a provider account) · an `attempts` column plus backoff for real retries · provider webhooks to drive `delivered`/`bounced`/`opened`, all of which `DeliveryStatus` already models · richer confirmation content — the body is currently a single inline sentence built in `reservations.service.ts`, which is thin for something a real guest will receive.
+
 ## Month 7 — Direct Booking Engine: the app's first public, unauthenticated surface (2026-09-12)
 
 First item of the growth plan's Months 7–12 (`references/pms-mvp-timeline.html`), and the first work after all 11 architecture-map gaps closed. Month 7 pairs a Channel Manager with a Direct Booking Engine; **only the Direct Booking Engine is built here**, deliberately — see "Channel Manager, and why it isn't here" below.

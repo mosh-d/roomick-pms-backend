@@ -6,13 +6,21 @@ import { SendCommunicationDto } from './dto/comms-log.dto';
 
 /**
  * "Every automated and manual message logged per reservation and guest
- * profile" (MVP timeline Month 5). `CommunicationLog.deliveryStatus`
- * stays `queued` for every row this pass writes — the schema's own comment
- * says the sending adapter is stubbed for MVP, and that's still true here:
- * this module is the LOG, not a mailer. The log itself is the real
- * deliverable (dispute resolution needs a record that a message was meant
- * to go out and what it said, independent of whether delivery is wired up
- * yet).
+ * profile" (MVP timeline Month 5). This module is the LOG, not the mailer:
+ * it records what was meant to go out and what it said, which is what
+ * dispute resolution actually needs, independent of delivery.
+ *
+ * Rows are still written `queued` here and that is deliberate — delivery is
+ * `CommsDispatcherService`'s job, on a scheduled pass strictly after the
+ * surrounding transaction commits. `logAutomatedInTx` runs inside an open
+ * reservation transaction, and sending from there would mean network I/O
+ * under row locks plus real email already delivered for a booking that then
+ * rolled back. See that service's own header for the full reasoning.
+ *
+ * (Historical note: `CommunicationLog.deliveryStatus`'s schema comment still
+ * says the adapter is stubbed for MVP. That was true until the dispatcher
+ * landed; email rows now progress to `sent`/`failed`. Non-email channels
+ * genuinely do still stay `queued` — they have no transport.)
  */
 @Injectable()
 export class CommsLogService {
