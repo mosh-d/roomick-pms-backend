@@ -1,5 +1,33 @@
 # Phase Notes
 
+## Month 9 (first slice) — guest booking lookup (2026-09-12)
+
+The first piece of the growth plan's Guest Self-Service Portal, and it closes a plain hole in the Direct Booking Engine: a guest booked online, got a confirmation number, and had no way to ever see that booking again. Read-only by design — changing or cancelling a stay has real policy consequences (penalties, rate re-resolution) and belongs in its own pass rather than being bolted on here.
+
+### The authentication model, and its honest limits
+Lookup takes a confirmation number **plus the exact email on the booking**, and that pairing is the whole security model, so it's worth stating plainly what it does and doesn't do.
+
+`generateConfirmationNumber` produces **sequential** values (`RES-2026-00001`), so the number alone is trivially guessable and can never be the only credential. The email is what actually protects the record: an attacker needs to already know a specific guest's address at a specific property. On top of that the route is throttled to 10/hour per IP — the tightest limit on the public controller — which makes walking the sequence useless while still leaving a real guest room to mistype.
+
+This is the same trade-off airline and hotel "manage my booking" lookups make. The growth plan calls for a magic-link/OTP flow, which is strictly better; it needs working outbound email, which this app doesn't have yet (only a log transport). The design leaves that as an additional entry path rather than a rewrite.
+
+### Property-scoped, because confirmation numbers are not globally unique
+The unique constraint is `tenantId_confirmationNumber`, so the same `RES-2026-00001` legitimately exists at other properties — verified live by creating two tenants and watching both issue that exact number. A global lookup would therefore be both ambiguous and leaky. Scoping to the property slug reuses the existing `resolveBookableBranch`, which also means lookup inherits every guard that already applies: unpublish a property and lookup stops working with it.
+
+### A wrong number and a wrong email are indistinguishable
+Both return the identical 404 and the identical message, verified word-for-word in the live pass. Telling them apart would confirm which confirmation numbers exist, and since they're sequential that turns the endpoint into an enumeration oracle.
+
+### Returns 200, not Nest's default 201
+Caught by the live pass: a POST returns `201 Created` by default, but this route creates nothing — it uses POST purely to keep the confirmation number and email out of URLs, access logs, browser history and `Referer` headers. `@HttpCode(HttpStatus.OK)` corrects it; `201 Created` on a read would misdescribe the operation to any client.
+
+### Verified
+`npx tsc --noEmit`, `npm run lint` (0 errors), `npm test` — 594 tests, all green (10 new, concentrated on the boundaries: property scoping; email required alongside the number; case-insensitive email and normalised confirmation number; soft-deleted reservations excluded; identical refusal for wrong number vs wrong email; an exact guest-safe key allow-list; confirmed stay total rather than any nightly override; and nothing looked up at all at an unpublished property).
+
+Live against real Postgres (25/25): a real anonymous booking is then found with its number and email; a differently-cased email and lowercase number still match; the correct number with the wrong email is refused; **two tenants were made to issue the same confirmation number** and neither could read the other's booking through its own property while each resolved correctly to its own guest; unpublishing takes lookup down; and the whole flow works in a logged-out browser including the link from the confirmation page.
+
+### Carried forward
+Magic-link/OTP entry (needs outbound email) · guest-initiated change/cancel with real policy handling · the pre-arrival check-in and read-only folio views the plan describes for this month · a guest who books has **no** email discovery path, so the confirmation page's link is currently the only route back to their booking.
+
 ## Outbound email — the outbox half of the comms log (2026-09-12)
 
 Closes a real hole in the Direct Booking Engine shipped the same day: a guest booked online, saw a confirmation number on screen, and then heard nothing. `CommsLogService` recorded every message faithfully and no code anywhere ever sent one — `deliveryStatus` was hardcoded `queued` forever, as the schema's own comment admitted.

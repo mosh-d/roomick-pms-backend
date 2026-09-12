@@ -115,6 +115,35 @@ export class PublicCreateReservationDto {
   promoCode?: string;
 }
 
+/**
+ * Guest booking lookup (Month 9, Guest Self-Service Portal — first slice).
+ *
+ * Both fields are required together and that's the whole security model, so
+ * it's worth being explicit about its limits: `confirmationNumber` is
+ * SEQUENTIAL (`RES-2026-00001`, see `generateConfirmationNumber`), so it is
+ * guessable on its own and can never be the only credential. Pairing it with
+ * the exact email on the booking means an attacker needs to already know the
+ * guest's address for a specific property, and the route is throttled hard on
+ * top of that.
+ *
+ * This is the same trade-off airline and hotel "manage my booking" lookups
+ * make. A magic-link/OTP flow is strictly better and is what the growth plan
+ * actually calls for — it needs working outbound email, which this app does
+ * not have yet (only a log transport). Structured so that becomes an
+ * additional entry path, not a rewrite.
+ */
+export class LookupBookingDto {
+  @ApiProperty({ example: 'RES-2026-00001' })
+  @IsString()
+  @MaxLength(40)
+  confirmationNumber!: string;
+
+  @ApiProperty({ example: 'ada@example.com', description: 'Must match the email on the booking exactly' })
+  @IsEmail()
+  @MaxLength(320)
+  email!: string;
+}
+
 export class PublishBookingEngineDto {
   @ApiProperty({ example: 'grand-hotel-ikeja', description: 'Lowercase letters, digits and hyphens only — this becomes the public booking URL' })
   @Matches(/^[a-z0-9]+(?:-[a-z0-9]+)*$/, { message: 'slug must be lowercase alphanumeric words separated by single hyphens' })

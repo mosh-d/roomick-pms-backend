@@ -25,7 +25,7 @@ describe('PublicBookingService', () => {
   let tx: {
     branch: { findFirst: jest.Mock; findFirstOrThrow: jest.Mock; update: jest.Mock };
     roomType: { findMany: jest.Mock; findFirst: jest.Mock };
-    reservation: { findFirstOrThrow: jest.Mock };
+    reservation: { findFirstOrThrow: jest.Mock; findFirst: jest.Mock };
   };
 
   beforeEach(async () => {
@@ -36,7 +36,7 @@ describe('PublicBookingService', () => {
         update: jest.fn().mockResolvedValue({}),
       },
       roomType: { findMany: jest.fn().mockResolvedValue([]), findFirst: jest.fn().mockResolvedValue({ id: ROOM_TYPE_ID, name: 'Standard' }) },
-      reservation: { findFirstOrThrow: jest.fn() },
+      reservation: { findFirstOrThrow: jest.fn(), findFirst: jest.fn().mockResolvedValue(null) },
     };
     prisma = {
       withTenant: jest.fn((_t: string, fn: (x: unknown) => unknown) => fn(tx)),
@@ -207,6 +207,93 @@ describe('PublicBookingService', () => {
     it('returns only confirmation-safe fields', async () => {
       const result = await service.createReservation(SLUG, validDto);
       expect(Object.keys(result).sort()).toEqual(['checkInDate', 'checkOutDate', 'confirmationNumber', 'currency', 'guestName', 'roomTypeName', 'totalRate']);
+    });
+  });
+
+  describe('lookupBooking', () => {
+    const lookup = { confirmationNumber: 'RES-2026-00001', email: 'ada@example.com' };
+
+    beforeEach(() => {
+      tx.branch.findFirstOrThrow.mockResolvedValue({
+        name: 'Grand Hotel', category: 'hotel', currency: 'NGN', timezone: 'Africa/Lagos',
+        checkInTime: new Date('1970-01-01T14:00:00.000Z'), checkOutTime: new Date('1970-01-01T11:00:00.000Z'),
+        address: {}, brand: { name: 'Grand Group' },
+      });
+      tx.reservation.findFirst.mockResolvedValue({
+        confirmationNumber: 'RES-2026-00001',
+        status: 'confirmed',
+        checkInDate: new Date('2026-10-01T00:00:00.000Z'),
+        checkOutDate: new Date('2026-10-04T00:00:00.000Z'),
+        adults: 2,
+        children: 0,
+        specialRequests: 'Late arrival',
+        confirmedRate: { toFixed: () => '90000.00' },
+        overrideRate: null,
+        roomType: { name: 'Standard' },
+        guest: { name: 'Ada Okafor', email: 'ada@example.com' },
+        branch: { currency: 'NGN' },
+      });
+    });
+
+    it('scopes the lookup to this property, since confirmation numbers are only unique per tenant', async () => {
+      await service.lookupBooking(SLUG, lookup);
+      expect(tx.reservation.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ branchId: BRANCH_ID }) }));
+    });
+
+    it('requires the email to match the booking, not just the confirmation number', async () => {
+      await service.lookupBooking(SLUG, lookup);
+      const where = (tx.reservation.findFirst.mock.calls[0][0] as { where: { guest: unknown } }).where;
+      expect(where.guest).toEqual({ email: { equals: 'ada@example.com', mode: 'insensitive' } });
+    });
+
+    it('matches the email case-insensitively so a differently-cased address still finds the booking', async () => {
+      await service.lookupBooking(SLUG, { ...lookup, email: 'Ada@Example.com' });
+      const where = (tx.reservation.findFirst.mock.calls[0][0] as { where: { guest: { email: { mode: string } } } }).where;
+      expect(where.guest.email.mode).toBe('insensitive');
+    });
+
+    it('normalises a lowercase confirmation number the guest typed', async () => {
+      await service.lookupBooking(SLUG, { ...lookup, confirmationNumber: '  res-2026-00001 ' });
+      const where = (tx.reservation.findFirst.mock.calls[0][0] as { where: { confirmationNumber: string } }).where;
+      expect(where.confirmationNumber).toBe('RES-2026-00001');
+    });
+
+    it('excludes soft-deleted reservations', async () => {
+      await service.lookupBooking(SLUG, lookup);
+      const where = (tx.reservation.findFirst.mock.calls[0][0] as { where: { deletedAt: null } }).where;
+      expect(where.deletedAt).toBeNull();
+    });
+
+    it('404s when nothing matches', async () => {
+      tx.reservation.findFirst.mockResolvedValue(null);
+      await expect(service.lookupBooking(SLUG, lookup)).rejects.toMatchObject({ status: 404 });
+    });
+
+    it('gives an identical message for a wrong number and a wrong email, so sequential numbers cannot be enumerated', async () => {
+      tx.reservation.findFirst.mockResolvedValue(null);
+      const wrongNumber = await service.lookupBooking(SLUG, { ...lookup, confirmationNumber: 'RES-2026-99999' }).catch((e: { response: { message: string } }) => e.response.message);
+      const wrongEmail = await service.lookupBooking(SLUG, { ...lookup, email: 'attacker@example.com' }).catch((e: { response: { message: string } }) => e.response.message);
+      expect(wrongNumber).toBe(wrongEmail);
+    });
+
+    it('returns only guest-safe fields — no ids, no folio internals, no staff-only data', async () => {
+      const result = await service.lookupBooking(SLUG, lookup);
+      expect(Object.keys(result).sort()).toEqual([
+        'adults', 'checkInDate', 'checkOutDate', 'children', 'confirmationNumber', 'currency',
+        'guestEmail', 'guestName', 'property', 'roomTypeName', 'specialRequests', 'status', 'totalRate',
+      ]);
+    });
+
+    it('reports the confirmed stay total rather than any nightly override', async () => {
+      const result = await service.lookupBooking(SLUG, lookup);
+      expect(result.totalRate).toBe('90000.00');
+      expect(result).not.toHaveProperty('overrideRate');
+    });
+
+    it('refuses to look anything up at an unpublished property', async () => {
+      tx.branch.findFirst.mockResolvedValue(null);
+      await expect(service.lookupBooking(SLUG, lookup)).rejects.toMatchObject({ status: 404 });
+      expect(tx.reservation.findFirst).not.toHaveBeenCalled();
     });
   });
 

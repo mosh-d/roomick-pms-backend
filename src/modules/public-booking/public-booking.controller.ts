@@ -1,10 +1,11 @@
-import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Post, Put, Query } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, ParseUUIDPipe, Post, Put, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { CurrentTenant } from '../../common/decorators';
 import { Public } from '../../common/decorators/public.decorator';
 import { Roles, SystemRole } from '../../common/decorators/roles.decorator';
 import {
+  LookupBookingDto,
   PublicAvailabilityQueryDto,
   PublicCreateReservationDto,
   PublicQuoteQueryDto,
@@ -63,6 +64,25 @@ export class PublicBookingController {
   @ApiOperation({ summary: 'A real Rate Resolver quote through the same cascade a staff quote uses — never a separate "direct rate" table' })
   getQuote(@Param('slug') slug: string, @Query() dto: PublicQuoteQueryDto): ReturnType<PublicBookingService['getQuote']> {
     return this.publicBookingService.getQuote(slug, dto);
+  }
+
+  @Post(':slug/bookings/lookup')
+  // 200, not Nest's default 201 for POST. This route creates nothing — it's a
+  // read that uses POST only to keep the confirmation number and email out of
+  // the URL. Returning "201 Created" would misdescribe it to any client.
+  @HttpCode(HttpStatus.OK)
+  // A POST, not a GET, specifically because the body carries a confirmation
+  // number plus an email address: query strings land in server access logs,
+  // browser history and `Referer` headers, and these shouldn't.
+  //
+  // The tightest limit on this controller. Confirmation numbers are
+  // sequential, so this is the one route where brute force is actually
+  // plausible — 10/hour per IP makes walking the sequence useless while
+  // leaving a real guest who mistypes their email several attempts.
+  @Throttle({ default: { limit: 10, ttl: 3_600_000 } })
+  @ApiOperation({ summary: 'Guest self-service — look up your own booking with its confirmation number and the email address on it' })
+  lookupBooking(@Param('slug') slug: string, @Body() dto: LookupBookingDto): ReturnType<PublicBookingService['lookupBooking']> {
+    return this.publicBookingService.lookupBooking(slug, dto);
   }
 
   @Post(':slug/reservations')

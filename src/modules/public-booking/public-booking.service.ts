@@ -5,7 +5,7 @@ import { toBranchDate } from '../../common/utils/branch-date';
 import { PrismaService } from '../../prisma/prisma.service';
 import { RateResolverService } from '../rate-resolver/rate-resolver.service';
 import { ReservationsService } from '../reservations/reservations.service';
-import { PublicAvailabilityQueryDto, PublicCreateReservationDto, PublicQuoteQueryDto, PublishBookingEngineDto } from './dto/public-booking.dto';
+import { LookupBookingDto, PublicAvailabilityQueryDto, PublicCreateReservationDto, PublicQuoteQueryDto, PublishBookingEngineDto } from './dto/public-booking.dto';
 
 /** A tenant in one of these states has stopped paying for / closed its account — its properties stop accepting public bookings. */
 const BOOKABLE_TENANT_STATUSES = new Set(['trial', 'active']);
@@ -37,6 +37,23 @@ export interface PublicRoomType {
   baseRate: string;
   maxAdults: number;
   maxChildren: number;
+}
+
+/** What a guest may see about their own booking. Deliberately no ids, no folio internals, no staff-only fields. */
+export interface PublicBookingDetail {
+  confirmationNumber: string;
+  status: string;
+  checkInDate: Date;
+  checkOutDate: Date;
+  adults: number;
+  children: number;
+  specialRequests: string | null;
+  roomTypeName: string;
+  guestName: string;
+  guestEmail: string | null;
+  totalRate: string;
+  currency: string;
+  property: PublicPropertyInfo;
 }
 
 export interface PublicBookingConfirmation {
@@ -320,6 +337,87 @@ export class PublicBookingService {
         currency: full.branch.currency,
       };
     });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Guest self-service — looking up your own booking
+  // ---------------------------------------------------------------------------
+
+  /**
+   * "Manage my booking" for a guest who has a confirmation number and no
+   * account. Scoped to a property because confirmation numbers are unique
+   * per TENANT, not globally (`tenantId_confirmationNumber`) — the same
+   * number can legitimately exist at another hotel, so a global lookup would
+   * be ambiguous as well as leaky.
+   *
+   * A wrong confirmation number and a wrong email return the identical
+   * "we couldn't find that booking" 404. Distinguishing them would confirm
+   * which confirmation numbers exist, and since they're sequential that turns
+   * the endpoint into an enumeration oracle.
+   *
+   * Returns strictly what the guest already knows or is entitled to see —
+   * never internal ids, never another guest, never staff notes or financial
+   * internals. The folio view the growth plan describes is a separate,
+   * later slice.
+   */
+  async lookupBooking(slug: string, dto: LookupBookingDto): Promise<PublicBookingDetail> {
+    const { tenantId, branchId } = await this.resolveBookableBranch(slug);
+
+    const reservation = await this.prisma.withTenant(tenantId, (tx) =>
+      tx.reservation.findFirst({
+        where: {
+          branchId,
+          confirmationNumber: dto.confirmationNumber.trim().toUpperCase(),
+          deletedAt: null,
+          // Prisma's `mode: 'insensitive'` rather than a lowercase compare:
+          // `GuestProfile.email` is stored as entered, and a guest who typed
+          // "Ada@Example.com" at booking must still be able to find it.
+          guest: { email: { equals: dto.email.trim(), mode: 'insensitive' } },
+        },
+        select: {
+          confirmationNumber: true,
+          status: true,
+          checkInDate: true,
+          checkOutDate: true,
+          adults: true,
+          children: true,
+          specialRequests: true,
+          confirmedRate: true,
+          overrideRate: true,
+          roomType: { select: { name: true } },
+          guest: { select: { name: true, email: true } },
+          branch: { select: { currency: true } },
+        },
+      }),
+    );
+
+    if (!reservation) {
+      throw new NotFoundException({
+        code: ErrorCode.NOT_FOUND,
+        message: 'We could not find a booking with that confirmation number and email address',
+      });
+    }
+
+    const property = await this.getProperty(slug);
+
+    return {
+      confirmationNumber: reservation.confirmationNumber,
+      status: reservation.status,
+      checkInDate: reservation.checkInDate,
+      checkOutDate: reservation.checkOutDate,
+      adults: reservation.adults,
+      children: reservation.children,
+      specialRequests: reservation.specialRequests,
+      roomTypeName: reservation.roomType.name,
+      guestName: reservation.guest.name,
+      guestEmail: reservation.guest.email,
+      // The stay total the guest agreed to. `overrideRate` is a NIGHTLY
+      // absolute set by staff (group blocks, manager overrides), so it can't
+      // be shown as a stay total — `confirmedRate` already reflects it.
+      totalRate: reservation.confirmedRate.toFixed(2),
+      currency: reservation.branch.currency,
+      property,
+    };
   }
 
   // ---------------------------------------------------------------------------
