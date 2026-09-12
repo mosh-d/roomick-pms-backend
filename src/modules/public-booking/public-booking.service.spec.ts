@@ -1,5 +1,6 @@
 import { Test } from '@nestjs/testing';
 import { PrismaService } from '../../prisma/prisma.service';
+import { FoliosService } from '../folios/folios.service';
 import { RateResolverService } from '../rate-resolver/rate-resolver.service';
 import { ReservationsService } from '../reservations/reservations.service';
 import { PublicBookingService } from './public-booking.service';
@@ -22,12 +23,14 @@ describe('PublicBookingService', () => {
   };
   let reservationsService: { createReservation: jest.Mock; getAvailability: jest.Mock; getAvailabilityForRange: jest.Mock };
   let rateResolverService: { calculateQuote: jest.Mock };
+  let foliosService: { getFolio: jest.Mock };
   let tx: {
     branch: { findFirst: jest.Mock; findFirstOrThrow: jest.Mock; update: jest.Mock };
     roomType: { findMany: jest.Mock; findFirst: jest.Mock };
     reservation: { findFirstOrThrow: jest.Mock; findFirst: jest.Mock; update: jest.Mock };
     guestProfile: { update: jest.Mock };
     auditLog: { create: jest.Mock };
+    folio: { findFirst: jest.Mock; count: jest.Mock };
   };
 
   beforeEach(async () => {
@@ -41,6 +44,7 @@ describe('PublicBookingService', () => {
       reservation: { findFirstOrThrow: jest.fn(), findFirst: jest.fn().mockResolvedValue(null), update: jest.fn().mockResolvedValue({}) },
       guestProfile: { update: jest.fn().mockResolvedValue({}) },
       auditLog: { create: jest.fn().mockResolvedValue({}) },
+      folio: { findFirst: jest.fn().mockResolvedValue(null), count: jest.fn().mockResolvedValue(0) },
     };
     prisma = {
       withTenant: jest.fn((_t: string, fn: (x: unknown) => unknown) => fn(tx)),
@@ -65,12 +69,17 @@ describe('PublicBookingService', () => {
       }),
     };
 
+    // Only getFolio — deliberately no ensurePrimaryFolio on this mock, so any
+    // accidental call from the public read path would fail loudly.
+    foliosService = { getFolio: jest.fn() };
+
     const moduleRef = await Test.createTestingModule({
       providers: [
         PublicBookingService,
         { provide: PrismaService, useValue: prisma },
         { provide: ReservationsService, useValue: reservationsService },
         { provide: RateResolverService, useValue: rateResolverService },
+        { provide: FoliosService, useValue: foliosService },
       ],
     }).compile();
     service = moduleRef.get(PublicBookingService);
@@ -395,6 +404,119 @@ describe('PublicBookingService', () => {
       expect(result.confirmationNumber).toBe('RES-2026-00001');
       expect(result.houseRules).toBe('No smoking.');
       expect(result.preArrivalCompletedAt).toBeInstanceOf(Date);
+    });
+  });
+
+  describe('getGuestFolio', () => {
+    const creds = { confirmationNumber: 'RES-2026-00001', email: 'ada@example.com' };
+    const D = (n: string) => ({ toFixed: () => n });
+    const line = (over: Record<string, unknown>) => ({
+      description: 'Room Charge', chargeType: 'room', amount: D('30000.00'), isVoid: false,
+      serviceDate: new Date('2026-09-12T00:00:00.000Z'), postedAt: new Date('2026-09-12T15:00:00.000Z'),
+      postedBy: 'staff-user-1', voidedBy: null, outletId: 'outlet-1', taxRuleIds: ['rule-1'], taxAmount: D('2250.00'), ...over,
+    });
+    const pay = (over: Record<string, unknown>) => ({
+      method: 'cash', paymentPurpose: 'payment', amount: D('10000.00'), isVoid: false, recordedAt: new Date('2026-09-12T16:00:00.000Z'),
+      reference: 'AUTH-4412', recordedBy: 'staff-user-1', shiftId: 'shift-1', voidReason: null, ...over,
+    });
+
+    beforeEach(() => {
+      tx.reservation.findFirst.mockResolvedValue({ id: 'res-1', status: 'checked_in', confirmationNumber: 'RES-2026-00001', confirmedRate: D('90000.00') });
+      tx.folio.findFirst.mockResolvedValue({ id: 'folio-1' });
+      tx.folio.count.mockResolvedValue(0);
+      foliosService.getFolio.mockResolvedValue({
+        currency: 'NGN',
+        lineItems: [
+          line({}),
+          line({ description: 'VAT 7.5%', chargeType: 'tax', amount: D('2250.00'), taxAmount: D('0.00') }),
+          line({ description: 'Minibar — voided', chargeType: 'minibar', amount: D('5000.00'), isVoid: true, voidedBy: 'staff-user-2' }),
+        ],
+        payments: [pay({}), pay({ method: 'card', amount: D('99999.00'), isVoid: true, voidReason: 'Duplicate swipe' })],
+        totals: { subTotal: D('30000.00'), taxTotal: D('2250.00'), totalCost: D('32250.00'), paymentsTotal: D('10000.00'), depositsTotal: D('0.00'), balanceDue: D('22250.00') },
+      });
+    });
+
+    it('uses the same credential check as the lookup — the email must match', async () => {
+      await service.getGuestFolio(SLUG, creds);
+      const where = (tx.reservation.findFirst.mock.calls[0][0] as { where: { guest: unknown } }).where;
+      expect(where.guest).toEqual({ email: { equals: 'ada@example.com', mode: 'insensitive' } });
+    });
+
+    it('404s with the generic booking message when credentials do not match', async () => {
+      tx.reservation.findFirst.mockResolvedValue(null);
+      await expect(service.getGuestFolio(SLUG, creds)).rejects.toMatchObject({ status: 404 });
+      expect(foliosService.getFolio).not.toHaveBeenCalled();
+    });
+
+    it('refuses stays with no bill to show yet, without reading any folio', async () => {
+      for (const status of ['confirmed', 'cancelled', 'no_show', 'waitlisted', 'walked']) {
+        tx.reservation.findFirst.mockResolvedValue({ id: 'res-1', status, confirmationNumber: 'RES-2026-00001', confirmedRate: D('90000.00') });
+        await expect(service.getGuestFolio(SLUG, creds)).rejects.toMatchObject({ status: 409 });
+      }
+      expect(foliosService.getFolio).not.toHaveBeenCalled();
+    });
+
+    it('reads only the PRIMARY folio (label null)', async () => {
+      await service.getGuestFolio(SLUG, creds);
+      expect(tx.folio.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: { reservationId: 'res-1', label: null, deletedAt: null } }));
+      expect(foliosService.getFolio).toHaveBeenCalledWith(TENANT_ID, 'folio-1');
+    });
+
+    it('never conjures a folio — a checked-in stay with none gets a 409, not a write', async () => {
+      tx.folio.findFirst.mockResolvedValue(null);
+      await expect(service.getGuestFolio(SLUG, creds)).rejects.toMatchObject({ status: 409 });
+      expect(foliosService.getFolio).not.toHaveBeenCalled();
+    });
+
+    it('drops voided charges and voided payments from what the guest sees', async () => {
+      const result = await service.getGuestFolio(SLUG, creds);
+      expect(result.lineItems.map((l) => l.description)).toEqual(['Room Charge', 'VAT 7.5%']);
+      expect(result.payments).toHaveLength(1);
+      expect(result.payments[0].amount).toBe('10000.00');
+    });
+
+    it('lines and payments reconcile exactly with the totals shown — the bill adds up', async () => {
+      const result = await service.getGuestFolio(SLUG, creds);
+      const lineSum = result.lineItems.reduce((s, l) => s + Number(l.amount), 0);
+      const paySum = result.payments.reduce((s, p) => s + Number(p.amount), 0);
+      expect(lineSum).toBe(Number(result.totalCost));
+      expect(paySum).toBe(Number(result.paymentsTotal));
+      expect(Number(result.totalCost) - Number(result.paymentsTotal)).toBe(Number(result.balanceDue));
+    });
+
+    it("passes getFolio's own totals through untouched rather than recomputing them", async () => {
+      const result = await service.getGuestFolio(SLUG, creds);
+      expect(result).toMatchObject({ subTotal: '30000.00', taxTotal: '2250.00', totalCost: '32250.00', paymentsTotal: '10000.00', balanceDue: '22250.00', currency: 'NGN' });
+    });
+
+    it('exposes no staff ids, card references, shifts, outlets, tax-rule ids or void reasons', async () => {
+      const result = await service.getGuestFolio(SLUG, creds);
+      expect(Object.keys(result.lineItems[0]).sort()).toEqual(['amount', 'chargeType', 'description', 'postedAt', 'serviceDate']);
+      expect(Object.keys(result.payments[0]).sort()).toEqual(['amount', 'method', 'purpose', 'recordedAt']);
+      expect(Object.keys(result).sort()).toEqual([
+        'asOf', 'balanceDue', 'confirmationNumber', 'currency', 'lineItems', 'otherFoliosExist',
+        'payments', 'paymentsTotal', 'roomTotalForStay', 'stillAccruing', 'subTotal', 'taxTotal', 'totalCost',
+      ]);
+    });
+
+    it('mid-stay, flags the bill as still accruing and shows the full-stay room rate beside it', async () => {
+      const result = await service.getGuestFolio(SLUG, creds);
+      expect(result.stillAccruing).toBe(true);
+      expect(result.roomTotalForStay).toBe('90000.00');
+    });
+
+    it('after check-out, the bill is final — no accrual flag, no projection', async () => {
+      tx.reservation.findFirst.mockResolvedValue({ id: 'res-1', status: 'checked_out', confirmationNumber: 'RES-2026-00001', confirmedRate: D('90000.00') });
+      const result = await service.getGuestFolio(SLUG, creds);
+      expect(result.stillAccruing).toBe(false);
+      expect(result.roomTotalForStay).toBeNull();
+    });
+
+    it('says other folios exist without revealing anything about them', async () => {
+      tx.folio.count.mockResolvedValue(1);
+      const result = await service.getGuestFolio(SLUG, creds);
+      expect(result.otherFoliosExist).toBe(true);
+      expect(tx.folio.count).toHaveBeenCalledWith({ where: { reservationId: 'res-1', deletedAt: null, label: { not: null } } });
     });
   });
 

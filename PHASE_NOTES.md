@@ -1,5 +1,34 @@
 # Phase Notes
 
+## Month 9 (third slice) — a read-only guest bill view (2026-09-12)
+
+`POST /public/properties/:slug/bookings/folio` — the growth plan's "mid-stay: read-only folio view (reuses the existing folio-totals response verbatim — no new money-calculation surface)". Same credentials as the lookup (the shared `bookingCredentialsWhere`), same 10/hour throttle, `@HttpCode(200)`.
+
+### No new money calculation — and one filter the projection genuinely needs
+The totals are `FoliosService.getFolio`'s own `computeTotals` result, passed through untouched; the live pass asserts the guest's subtotal, tax, total, paid and balance equal the staff folio's to the cent. But `getFolio`'s *lists* hide deleted rows while deliberately **keeping voided ones** (staff need to see what was voided), whereas `computeTotals` excludes voided rows from the balance. Handing those lists to a guest as-is would show a charge the total doesn't include, and the bill wouldn't add up. The projection filters `isVoid` — the exact rule `computeTotals` uses — so lines and payments reconcile with the totals by construction. Honest limit: **nothing in the codebase currently sets `isVoid: true`**, so that filter is exercised by unit tests only, not live.
+
+### What a guest sees, and doesn't
+- **Primary folio only** (`label: null`). Split-billing folios can carry a different payer (a company account), so the guest learns only that one exists (`otherFoliosExist`), never its contents — verified live with a ₦25,000 Company-folio charge that never appears.
+- **Excluded from every line and payment:** `postedBy`, `recordedBy`, `voidedBy`, `shiftId`, the card/bank `reference`, `voidReason`, `outletId`, `taxRuleIds`, and the parent line's denormalised `taxAmount` (tax appears as its own lines, so showing both would double-display it). Allow-listed in tests; the live pass scans the raw JSON for the owner's user id, the receipt reference and internal ids.
+- **Accrual is explicit.** Mid-stay, `stillAccruing: true` and `roomTotalForStay` (the agreed full-stay room rate) travel with the bill so one posted night isn't mistaken for the total; after check-out both clear.
+- **Only `checked_in` / `checked_out`.** A `confirmed` stay has no folio yet; no-show penalties are deliberately out of this slice (a disputed penalty is a conversation, not something to surface on an anonymous page first). Past the credential check the caller owns the booking, so a specific 409 ("available once you have checked in") leaks nothing — unlike the credential failure, which stays the generic 404.
+- **Never calls `ensurePrimaryFolio`.** That method creates a folio when none exists; an anonymous read must not write.
+
+`deposit_application` payments would double-count in `paymentsTotal` if they were ever recorded alongside the original deposit — checked: nothing writes that purpose today, so it can't happen yet.
+
+### A pre-existing staff-side bug this view made visible: correcting a charge does not reverse its tax
+`FoliosService.correctLineItem` appends one negated row for the corrected charge and nothing else. The VAT line posted with that charge stays. Live example: a ₦5,000 minibar charge corrected with −₦5,000 ("Guest returned the item unopened") still leaves **₦375 VAT** on the bill — the guest owes tax on an item whose net charge is zero. The method's own comment covers only the append-only rule and never mentions tax, so this is an omission, not a decision.
+
+Not fixed here, deliberately: it's staff-side money logic outside this slice, and `LineItem` has **no parent reference** — the only link between a charge and its tax lines is description text (`VAT (7.5%) — <charge description>`) and `taxRuleIds`. A correct automatic reversal needs that link (a schema change), which is the owner's call. Workaround today: staff also correct the tax line itself (`correctLineItem` works on any line item) — easy to forget.
+
+### Verified
+`npx tsc --noEmit`, `npm run lint` (0 errors), `npm test` — 616 tests, all green (12 new: shared credential check; generic 404; 409 for every non-visible status without reading a folio; primary-only lookup; never conjuring a folio; voided charges and payments dropped; exact reconciliation; totals passed through untouched; field allow-lists; accrual on/off; split-folio existence without contents). An earlier run showed 6 failing suites and a `tsc` crash — V8 "out of memory: Zone" from running backend tsc, Jest and the frontend build concurrently, not code faults; rerun sequentially, clean.
+
+Live against real Postgres (25/25): 409 before check-in; generic 404 for a wrong email; after check-in with a room charge, VAT, a minibar charge, its correction, a cash payment and a Company folio — the guest's bill lists the right lines, excludes the Company charge, reconciles exactly, matches the staff totals to the cent, and leaks no staff id, receipt reference or internal id; after check-out the bill is final (no accrual flag or projection) and still reconciles.
+
+### Carried forward
+Tax reversal on correction (needs a parent link on `LineItem` — owner's decision) · no-show penalty visibility · paying online (Month 11) · guest-initiated change/cancel (needs a cancellation policy decision) · ID document capture (its own security pass).
+
 ## Month 9 (second slice) — guest pre-arrival check-in (2026-09-12)
 
 The operational half of the Guest Self-Service Portal, and the reason the plan wants it: a guest completes their own details before travelling, so desk check-in becomes confirm-and-assign rather than a data-entry session.

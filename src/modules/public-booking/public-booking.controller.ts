@@ -96,6 +96,16 @@ export class PublicBookingController {
     return this.publicBookingService.preArrivalCheckIn(slug, dto);
   }
 
+  @Post(':slug/bookings/folio')
+  @HttpCode(HttpStatus.OK)
+  // Same credentials as the lookup, so the same brute-force surface and the
+  // same limit. Read-only: nothing here can post, pay or change a charge.
+  @Throttle({ default: { limit: 10, ttl: 3_600_000 } })
+  @ApiOperation({ summary: "Guest self-service — a read-only view of your own bill: charges posted so far, payments and balance. Primary folio only." })
+  getGuestFolio(@Param('slug') slug: string, @Body() dto: LookupBookingDto): ReturnType<PublicBookingService['getGuestFolio']> {
+    return this.publicBookingService.getGuestFolio(slug, dto);
+  }
+
   @Post(':slug/reservations')
   // The only public write. 10/hour per IP is generous for a real guest (who
   // books once) and hostile to a bot creating junk reservations against a

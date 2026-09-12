@@ -3,6 +3,7 @@ import { Reservation } from '@prisma/client';
 import { ErrorCode } from '../../common/errors/error-codes';
 import { toBranchDate } from '../../common/utils/branch-date';
 import { PrismaService } from '../../prisma/prisma.service';
+import { FoliosService } from '../folios/folios.service';
 import { RateResolverService } from '../rate-resolver/rate-resolver.service';
 import { ReservationsService } from '../reservations/reservations.service';
 import {
@@ -19,6 +20,14 @@ const BOOKABLE_TENANT_STATUSES = new Set(['trial', 'active']);
 
 /** Only a stay that hasn't started yet can be pre-checked-in. `waitlisted` is excluded too — there's no confirmed stay to prepare for. */
 const PRE_ARRIVAL_ELIGIBLE_STATUSES = new Set(['confirmed']);
+
+/**
+ * Stays where there's a bill to show. A folio is only created at check-in, so
+ * a `confirmed` stay has nothing yet. No-show penalties and walked stays are
+ * deliberately out of this slice — a disputed penalty is a conversation, not
+ * something to surface on an anonymous page first.
+ */
+const FOLIO_VISIBLE_STATUSES = new Set(['checked_in', 'checked_out']);
 
 interface ResolvedBookableBranch {
   tenantId: string;
@@ -71,6 +80,42 @@ export interface PublicBookingDetail {
   property: PublicPropertyInfo;
 }
 
+/** A charge as a guest sees it — no staff ids, outlet, tax-rule ids, or the parent's denormalised `taxAmount` (tax appears as its own lines). */
+export interface PublicFolioLine {
+  description: string;
+  chargeType: string;
+  amount: string;
+  serviceDate: Date | null;
+  postedAt: Date;
+}
+
+/** A payment as a guest sees it — no card/bank reference, shift, or staff ids. */
+export interface PublicFolioPayment {
+  method: string;
+  purpose: string;
+  amount: string;
+  recordedAt: Date;
+}
+
+export interface PublicGuestFolio {
+  confirmationNumber: string;
+  currency: string;
+  lineItems: PublicFolioLine[];
+  payments: PublicFolioPayment[];
+  subTotal: string;
+  taxTotal: string;
+  totalCost: string;
+  paymentsTotal: string;
+  balanceDue: string;
+  /** True mid-stay: room nights are posted one at a time, so the charges shown are only those posted so far. */
+  stillAccruing: boolean;
+  /** The agreed room rate for the whole stay, shown alongside a still-accruing bill so a guest isn't misled into reading one night's charge as their total. */
+  roomTotalForStay: string | null;
+  /** Other folios on this stay (split billing, e.g. to a company) — their contents are never shown here, only that they exist. */
+  otherFoliosExist: boolean;
+  asOf: Date;
+}
+
 export interface PublicBookingConfirmation {
   confirmationNumber: string;
   checkInDate: Date;
@@ -102,6 +147,7 @@ export class PublicBookingService {
     private readonly prisma: PrismaService,
     private readonly reservationsService: ReservationsService,
     private readonly rateResolverService: RateResolverService,
+    private readonly foliosService: FoliosService,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -367,23 +413,6 @@ export class PublicBookingService {
   // ---------------------------------------------------------------------------
 
   /**
-   * "Manage my booking" for a guest who has a confirmation number and no
-   * account. Scoped to a property because confirmation numbers are unique
-   * per TENANT, not globally (`tenantId_confirmationNumber`) — the same
-   * number can legitimately exist at another hotel, so a global lookup would
-   * be ambiguous as well as leaky.
-   *
-   * A wrong confirmation number and a wrong email return the identical
-   * "we couldn't find that booking" 404. Distinguishing them would confirm
-   * which confirmation numbers exist, and since they're sequential that turns
-   * the endpoint into an enumeration oracle.
-   *
-   * Returns strictly what the guest already knows or is entitled to see —
-   * never internal ids, never another guest, never staff notes or financial
-   * internals. The folio view the growth plan describes is a separate,
-   * later slice.
-   */
-  /**
    * The one definition of "this caller has proved they own this booking",
    * shared by lookup and pre-arrival so the two can never drift apart — a
    * weaker check on the write path than the read path would be exactly the
@@ -402,6 +431,22 @@ export class PublicBookingService {
     };
   }
 
+  /**
+   * "Manage my booking" for a guest who has a confirmation number and no
+   * account. Scoped to a property because confirmation numbers are unique
+   * per TENANT, not globally (`tenantId_confirmationNumber`) — the same
+   * number can legitimately exist at another hotel, so a global lookup would
+   * be ambiguous as well as leaky.
+   *
+   * A wrong confirmation number and a wrong email return the identical
+   * "we couldn't find that booking" 404. Distinguishing them would confirm
+   * which confirmation numbers exist, and since they're sequential that turns
+   * the endpoint into an enumeration oracle.
+   *
+   * Returns strictly what the guest already knows or is entitled to see —
+   * never internal ids, never another guest, never staff notes or financial
+   * internals. The guest's bill is a separate call: see `getGuestFolio`.
+   */
   async lookupBooking(slug: string, dto: LookupBookingDto): Promise<PublicBookingDetail> {
     const { tenantId, branchId } = await this.resolveBookableBranch(slug);
 
@@ -534,6 +579,91 @@ export class PublicBookingService {
     // same shape they'd see on a refresh, rather than a hand-built echo that
     // could drift from it.
     return this.lookupBooking(slug, { confirmationNumber: dto.confirmationNumber, email: dto.email });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Guest self-service — a read-only view of your own bill
+  // ---------------------------------------------------------------------------
+
+  /**
+   * The guest's own bill (growth plan Month 9, "read-only folio view").
+   *
+   * No new money calculation: the totals ARE `FoliosService.getFolio`'s own
+   * `computeTotals` result, passed through untouched. What this method adds
+   * is only a projection — and one filter that the projection genuinely
+   * needs. `getFolio` hides deleted rows from its lists but deliberately keeps
+   * VOIDED ones (staff need to see what was voided), while `computeTotals`
+   * excludes voided rows from the balance. Handing those lists to a guest
+   * as-is would show a charge the total doesn't include, and the bill wouldn't
+   * add up. Filtering `isVoid` here applies the exact rule `computeTotals`
+   * uses, so the lines and payments sum to the totals by construction.
+   *
+   * Only the PRIMARY folio (`label: null`). Split-billing folios can carry a
+   * different payer — a company account, say — so a guest learns only that
+   * one exists, never what's on it.
+   *
+   * Never calls `ensurePrimaryFolio`. That method creates a folio when none
+   * exists, and an anonymous read must not write; a checked-in stay that
+   * somehow has no folio gets told so rather than having one conjured up.
+   */
+  async getGuestFolio(slug: string, dto: LookupBookingDto): Promise<PublicGuestFolio> {
+    const { tenantId, branchId } = await this.resolveBookableBranch(slug);
+
+    const { reservation, primaryFolioId, otherFolioCount } = await this.prisma.withTenant(tenantId, async (tx) => {
+      const found = await tx.reservation.findFirst({
+        where: this.bookingCredentialsWhere(branchId, dto),
+        select: { id: true, status: true, confirmationNumber: true, confirmedRate: true },
+      });
+      if (!found) throw this.bookingNotFound();
+
+      // Past this point the caller has proved they own the booking, so a
+      // specific message leaks nothing — unlike the credential failure above.
+      if (!FOLIO_VISIBLE_STATUSES.has(found.status)) {
+        throw new ConflictException({ code: ErrorCode.CONFLICT, message: 'Your bill will be available here once you have checked in' });
+      }
+
+      const primary = await tx.folio.findFirst({ where: { reservationId: found.id, label: null, deletedAt: null }, select: { id: true } });
+      const others = await tx.folio.count({ where: { reservationId: found.id, deletedAt: null, label: { not: null } } });
+      return { reservation: found, primaryFolioId: primary?.id ?? null, otherFolioCount: others };
+    });
+
+    if (!primaryFolioId) {
+      throw new ConflictException({ code: ErrorCode.CONFLICT, message: "Your bill isn't available online yet — please ask the front desk" });
+    }
+
+    const folio = await this.foliosService.getFolio(tenantId, primaryFolioId);
+    const stillAccruing = reservation.status === 'checked_in';
+
+    return {
+      confirmationNumber: reservation.confirmationNumber,
+      currency: folio.currency,
+      lineItems: folio.lineItems
+        .filter((item) => !item.isVoid)
+        .map((item) => ({
+          description: item.description,
+          chargeType: item.chargeType,
+          amount: item.amount.toFixed(2),
+          serviceDate: item.serviceDate,
+          postedAt: item.postedAt,
+        })),
+      payments: folio.payments
+        .filter((payment) => !payment.isVoid)
+        .map((payment) => ({
+          method: payment.method,
+          purpose: payment.paymentPurpose,
+          amount: payment.amount.toFixed(2),
+          recordedAt: payment.recordedAt,
+        })),
+      subTotal: folio.totals.subTotal.toFixed(2),
+      taxTotal: folio.totals.taxTotal.toFixed(2),
+      totalCost: folio.totals.totalCost.toFixed(2),
+      paymentsTotal: folio.totals.paymentsTotal.toFixed(2),
+      balanceDue: folio.totals.balanceDue.toFixed(2),
+      stillAccruing,
+      roomTotalForStay: stillAccruing ? reservation.confirmedRate.toFixed(2) : null,
+      otherFoliosExist: otherFolioCount > 0,
+      asOf: new Date(),
+    };
   }
 
   // ---------------------------------------------------------------------------
