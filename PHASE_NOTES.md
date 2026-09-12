@@ -29,7 +29,7 @@ The growth plan lists them and `GuestProfile` has encrypted columns ready. But a
 Live against real Postgres (26/26): house rules surface from the branch template; a submission that doesn't accept them is refused; a wrong email is refused identically to the lookup; a successful pre-arrival returns 200 with the corrected phone and an uppercased nationality; **staff then see the completion, arrival time and acceptance timestamp on the reservation, and the guest profile itself is corrected**; an audit row records it with a NULL user; a cancelled stay is refused with 409; and the whole flow works in a logged-out browser, including the button staying disabled until the rules are accepted and a re-lookup showing the completed state rather than an empty form.
 
 ### Carried forward
-ID document capture (its own security pass) · the read-only folio view for mid-stay guests · guest-initiated change/cancel · surfacing "pre-arrival done / expects 15:30" on the Arrivals Dashboard, which now has real data to show but no UI for it yet.
+ID document capture (its own security pass) · the read-only folio view for mid-stay guests · guest-initiated change/cancel · ~~surfacing "pre-arrival done / expects 15:30" on the Arrivals Dashboard~~ — **shipped same day**, see the frontend's Phase 69 (no backend change was needed: `include: RESERVATION_INCLUDE` already returns the new columns).
 
 ## Month 9 (first slice) — guest booking lookup (2026-09-12)
 
