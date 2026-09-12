@@ -1,0 +1,30 @@
+# Keeps the build context small and, more importantly, keeps local secrets and
+# local state out of the image entirely.
+node_modules
+dist
+coverage
+
+# Never copy real env files into an image — Render/Railway inject config at
+# runtime. `.env.example` is deliberately NOT excluded: it's documentation.
+.env
+.env.*
+!.env.example
+
+# Local-only state and tooling
+.git
+.github
+docker-compose.yml
+*.log
+.vscode
+.idea
+
+# Tests and HTTP scratch files aren't needed at runtime
+test
+http
+**/*.spec.ts
+**/*.e2e-spec.ts
+http-client.private.env.json
+
+# Docs
+*.md
+!README.md

@@ -46,7 +46,12 @@ async function bootstrap(): Promise<void> {
   SwaggerModule.setup('api/docs', app, document);
 
   const port = Number(process.env.PORT ?? 3000);
-  await app.listen(port);
+  // Bind 0.0.0.0 explicitly rather than relying on Node's default. Node 17+
+  // can resolve the default host to IPv6 `::`, which a container platform
+  // routing only IPv4 won't reach — the failure mode is a deploy that reports
+  // success while every health check times out, with nothing in the logs.
+  // Harmless locally (0.0.0.0 still covers localhost).
+  await app.listen(port, '0.0.0.0');
 
   const logger = new Logger('Bootstrap');
   logger.log(`Roomick API listening on http://localhost:${port}/api/v1`);

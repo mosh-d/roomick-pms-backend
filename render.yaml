@@ -1,0 +1,77 @@
+# Render blueprint for the Roomick API.
+#
+# Optional — everything here can be clicked together in the dashboard instead.
+# Checked in so the deployment's shape is reviewable and reproducible rather
+# than living only in someone's browser session.
+#
+# Apply with: Render Dashboard → New → Blueprint → point at this repo.
+
+databases:
+  - name: roomick-postgres
+    databaseName: roomick
+    user: roomick
+    plan: starter # `free` expires after 90 days; starter is the smallest durable tier
+
+services:
+  - type: web
+    name: roomick-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    healthCheckPath: /api/v1/system/health # @Public(), no auth needed — see SystemController
+    # Migrations run as a release step, BEFORE the new instance takes traffic.
+    # Deliberately `migrate deploy` (applies committed migrations only) and never
+    # `migrate dev` — that one tries to author new migrations and needs a shadow
+    # database it will not have here.
+    preDeployCommand: npx prisma migrate deploy
+
+    # --- Persistent disk ------------------------------------------------------
+    # The app writes four kinds of file to disk: encrypted guest ID photos,
+    # registration-card PDFs, GDPR exports, and nightly backup dumps (see
+    # DOCUMENT_STORAGE_DIR / BACKUP_STORAGE_DIR below). Everything else is in
+    # Postgres.
+    #
+    # A container filesystem WITHOUT a disk is reset on each deploy, so this
+    # mount is what keeps those four durable. Note a service with a disk cannot
+    # run more than one instance — fine now, and the point at which to move to
+    # S3/R2 via the existing DocumentStorageAdapter / BackupStorageAdapter
+    # interfaces (both already exist; only a local implementation is written).
+    disk:
+      name: roomick-data
+      mountPath: /var/roomick
+      sizeGB: 5
+
+    envVars:
+      - key: NODE_ENV
+        value: production
+      # Render injects PORT itself; main.ts reads it and binds 0.0.0.0.
+      - key: DATABASE_URL
+        fromDatabase:
+          name: roomick-postgres
+          property: connectionString
+      # Generated once by Render and then held constant. NEVER rotate
+      # ENCRYPTION_KEY casually: guest ID documents and ID numbers are
+      # AES-256-GCM encrypted with it, and a new key makes every existing one
+      # permanently unreadable.
+      - key: JWT_ACCESS_SECRET
+        generateValue: true
+      - key: JWT_REFRESH_SECRET
+        generateValue: true
+      # Must be exactly 64 hex chars (32 bytes) — Joi rejects anything else at
+      # boot. Render's generateValue does not guarantee that shape, so set this
+      # one by hand:
+      #   node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+      - key: ENCRYPTION_KEY
+        sync: false
+      # The deployed frontend origin, e.g. https://roomick.vercel.app
+      # Comma-separated for more than one. Without this, every browser request
+      # from the frontend is blocked by CORS.
+      - key: CORS_ORIGINS
+        sync: false
+      - key: DOCUMENT_STORAGE_DIR
+        value: /var/roomick/documents
+      - key: BACKUP_STORAGE_DIR
+        value: /var/roomick/backups
+      # Optional — error tracking stays entirely off while unset (src/instrument.ts).
+      - key: SENTRY_DSN
+        sync: false
