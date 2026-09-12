@@ -111,7 +111,19 @@ export class RateResolverService {
   // -------------------------------------------------------------------------
   // Pre-booking quote endpoint
   // -------------------------------------------------------------------------
-  async calculateQuote(tenantId: string, branchId: string, dto: CalculateRateDto, userId: string): Promise<Omit<StayResolution, 'auditLogIds'>> {
+  /**
+   * `userId: null` + `persistAudit: false` is the Direct Booking Engine's
+   * public quote path — an anonymous guest browsing dates has no user row to
+   * attribute, and `RateAuditLog.userId` is already nullable ("NULL =
+   * automated"). Staff callers pass their own id and persist as before.
+   */
+  async calculateQuote(
+    tenantId: string,
+    branchId: string,
+    dto: CalculateRateDto,
+    userId: string | null,
+    options: { persistAudit?: boolean } = {},
+  ): Promise<Omit<StayResolution, 'auditLogIds'>> {
     return this.prisma.withTenant(tenantId, async (tx) => {
       await this.propertyService.assertBranch(tx, branchId);
       const roomType = await tx.roomType.findFirst({ where: { id: dto.roomTypeId, branchId, deletedAt: null } });
@@ -135,7 +147,7 @@ export class RateResolverService {
         checkInDate,
         checkOutDate,
         { promoCode: dto.promoCode, corporateAccountId: dto.corporateAccountId },
-        { triggeredBy: 'booking_create', userId },
+        { triggeredBy: 'booking_create', userId: userId ?? undefined, persistAudit: options.persistAudit },
       );
       return resolution;
     });
@@ -162,7 +174,7 @@ export class RateResolverService {
     checkInDate: Date,
     checkOutDate: Date,
     options: { promoCode?: string; corporateAccountId?: string },
-    context: { triggeredBy: TriggeredBy; userId?: string; reservationId?: string },
+    context: { triggeredBy: TriggeredBy; userId?: string; reservationId?: string; persistAudit?: boolean },
   ): Promise<StayResolution> {
     const nights = this.enumerateNights(checkInDate, checkOutDate);
     const stayLength = nights.length;
@@ -198,8 +210,17 @@ export class RateResolverService {
     // (`ReservationsService`) backfills `reservationId` on them the moment
     // the reservation exists (see `createReservation`/`walkIn`). Only
     // `create` returns the row back with its id; `createMany` doesn't.
+    // `persistAudit: false` is the Direct Booking Engine's public quote path
+    // ONLY. That endpoint is unauthenticated and re-quotes on every date or
+    // room-type change a browsing guest makes, so persisting here would write
+    // one row PER NIGHT per keystroke-level interaction — unbounded write
+    // amplification driven by anonymous traffic. A quote nobody booked has no
+    // dispute to defend, which is what this trail exists for; the moment that
+    // same guest actually books, `createReservation` resolves again through
+    // the ordinary path and DOES persist and link the trail. Defaults to
+    // true, so every existing caller is unchanged.
     const auditLogIds: bigint[] = [];
-    for (const n of perNight) {
+    for (const n of context.persistAudit === false ? [] : perNight) {
       const row = await tx.rateAuditLog.create({
         data: {
           tenantId,

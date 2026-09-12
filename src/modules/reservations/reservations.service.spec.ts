@@ -524,7 +524,13 @@ describe('ReservationsService', () => {
   });
 
   describe('walkIn', () => {
-    const dto = { guestId: GUEST_ID, roomTypeId: TYPE_ID, roomId: ROOM_ID, checkOutDate: '2026-09-04', adults: 2 };
+    // Computed forward from today, never hardcoded: `walkIn` deliberately
+    // forces checkInDate to TODAY in the branch timezone, so a fixed
+    // checkOutDate literal silently becomes a past date once real time passes
+    // it and every test here starts failing on "checkOutDate must be after
+    // checkInDate". That is exactly what happened to the previous
+    // '2026-09-04' literal.
+    const dto = { guestId: GUEST_ID, roomTypeId: TYPE_ID, roomId: ROOM_ID, checkOutDate: new Date(Date.now() + 3 * 86_400_000).toISOString().slice(0, 10), adults: 2 };
 
     it('rejects a party exceeding the room type\'s own capacity', async () => {
       tx.room.findFirst.mockResolvedValue({ id: ROOM_ID, branchId: BRANCH_ID, roomTypeId: TYPE_ID, occupancyStatus: 'vacant', heldStatus: null, deletedAt: null });

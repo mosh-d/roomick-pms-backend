@@ -444,6 +444,33 @@ model UserEmailIndex {
   @@map("user_email_index")
 }
 
+/**
+ * Deliberately NOT RLS-scoped, for exactly the same reason as
+ * `UserEmailIndex` above: `branches` has FORCE ROW LEVEL SECURITY, so a
+ * lookup by public booking slug — which arrives on a completely
+ * unauthenticated request, before any tenant is known — would return zero
+ * rows against `branches` itself. This table answers only "which
+ * tenant/branch does this public slug point at", holding nothing more
+ * sensitive than that pointer.
+ * A row exists ONLY while a branch is actually published to the booking
+ * engine: publishing upserts it, unpublishing (or changing the slug)
+ * deletes it. An unresolvable slug is therefore indistinguishable from a
+ * never-existent one, which is the correct public behavior.
+ * The pointer is never trusted on its own — `PublicBookingService` always
+ * re-loads the real branch inside `withTenant` and re-checks
+ * `bookingEngineEnabled`/`deletedAt` plus the owning tenant's status before
+ * serving anything.
+ */
+model BookingSlugIndex {
+  slug      String   @id @db.VarChar(63)
+  tenantId  String   @db.Uuid
+  branchId  String   @db.Uuid
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+
+  @@index([branchId])
+  @@map("booking_slug_index")
+}
+
 model Role {
   id          String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   tenantId    String  @db.Uuid
@@ -525,22 +552,40 @@ model Brand {
 }
 
 model Branch {
-  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  tenantId        String    @db.Uuid
-  brandId         String    @db.Uuid
-  name            String    @db.VarChar(200)
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId        String   @db.Uuid
+  brandId         String   @db.Uuid
+  name            String   @db.VarChar(200)
   address         Json // {street, city, state, country, zip}
-  timezone        String    @db.VarChar(50) // IANA tz — night audit depends on it
-  currency        String    @db.Char(3) // ISO 4217
-  checkInTime     DateTime  @default(dbgenerated("'14:00:00'::time")) @db.Time(0)
-  checkOutTime    DateTime  @default(dbgenerated("'11:00:00'::time")) @db.Time(0)
-  category        String?   @db.VarChar(30) // hotel | resort | motel | boutique | hostel
+  timezone        String   @db.VarChar(50) // IANA tz — night audit depends on it
+  currency        String   @db.Char(3) // ISO 4217
+  checkInTime     DateTime @default(dbgenerated("'14:00:00'::time")) @db.Time(0)
+  checkOutTime    DateTime @default(dbgenerated("'11:00:00'::time")) @db.Time(0)
+  category        String?  @db.VarChar(30) // hotel | resort | motel | boutique | hostel
   policies        Json? // overrides brand defaultPolicies; merged at read time. Holds idCaptureMandatory, early/late surcharge policy, AR flag rules.
   noShowPolicy    Json? // {cutoffTime, defaultPenalty, autoMark, notifyMinutesBefore}
   regCardTemplate Json? // {logoUrl, houseRules, requiredFields, showRate, language}
-  createdAt       DateTime  @default(now()) @db.Timestamptz(6)
-  updatedAt       DateTime  @updatedAt @db.Timestamptz(6)
-  deletedAt       DateTime? @db.Timestamptz(6)
+
+  // --- Direct Booking Engine (Month 7) -------------------------------------
+  // The public, guest-facing identity of this property. `Tenant.subdomain` is
+  // deliberately NOT reused: its own schema comment marks it backend-internal
+  // ("never user-typed or shown"), it can carry a random hex collision
+  // suffix, and a booking URL identifies a PROPERTY, not the tenant group
+  // that owns it — a group with five hotels needs five distinct booking
+  // pages, not one.
+  //
+  // Both fields are opt-in by default (NULL slug, disabled): an existing
+  // branch accepts no public bookings until its owner explicitly publishes
+  // it, so this migration changes no existing behavior. They're kept
+  // separate rather than folded into "non-null slug means published" so a
+  // property can be unpublished temporarily without releasing its slug for
+  // someone else to claim.
+  bookingSlug          String? @unique @db.VarChar(63)
+  bookingEngineEnabled Boolean @default(false)
+
+  createdAt DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime  @updatedAt @db.Timestamptz(6)
+  deletedAt DateTime? @db.Timestamptz(6)
 
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict)
   brand  Brand  @relation(fields: [brandId], references: [id], onDelete: Restrict)

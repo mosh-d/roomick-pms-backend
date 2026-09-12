@@ -82,6 +82,40 @@ export class ReservationsService {
   }
 
   /**
+   * Every active room type at the branch, per-night, across an ARBITRARY date
+   * range — the Direct Booking Engine's shape ("what can I book for these
+   * dates?"), where `getAvailability` above answers only for one already-
+   * chosen room type and `getAvailabilityCalendar` below is locked to a whole
+   * calendar month.
+   *
+   * Loops `computeAvailabilityPerNight` per room type inside a SINGLE
+   * transaction for the same reason `getAvailabilityCalendar` does (see its
+   * own comment): a branch has single-digit room types in practice, and
+   * reusing the already-correct, already-tested per-room-type logic beats a
+   * riskier combined rewrite. One transaction matters more here than
+   * internally — this runs on an unauthenticated, frequently-hit public
+   * endpoint.
+   */
+  async getAvailabilityForRange(tenantId: string, branchId: string, from: Date, to: Date) {
+    this.assertValidRange(from, to);
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      await this.propertyService.assertBranch(tx, branchId);
+      const roomTypes = await tx.roomType.findMany({
+        where: { branchId, deletedAt: null },
+        select: { id: true, name: true },
+        orderBy: { name: 'asc' },
+      });
+      return Promise.all(
+        roomTypes.map(async (roomType) => ({
+          roomTypeId: roomType.id,
+          roomTypeName: roomType.name,
+          nights: await this.computeAvailabilityPerNight(tx, branchId, roomType.id, from, to),
+        })),
+      );
+    });
+  }
+
+  /**
    * The Availability Calendar (ref p21): every active room type at the
    * branch, per-night available counts across a full month. Loops
    * `computeAvailabilityPerNight` per room type rather than a single
@@ -282,7 +316,14 @@ export class ReservationsService {
   // -------------------------------------------------------------------------
   // Create / walk-in
   // -------------------------------------------------------------------------
-  async createReservation(tenantId: string, branchId: string, dto: CreateReservationDto, actorId: string) {
+  /**
+   * `actorId: null` is a guest self-booking through the Direct Booking Engine
+   * — there is no staff user to attribute. `Reservation.createdBy` was
+   * declared nullable at P0 for exactly this ("NULL = online booking", see
+   * schema.prisma), as was `AuditLog.userId` ("NULL = system action"), so
+   * this widening needed no migration. Every other caller is unchanged.
+   */
+  async createReservation(tenantId: string, branchId: string, dto: CreateReservationDto, actorId: string | null) {
     const checkInDate = toBranchDate(dto.checkInDate);
     const checkOutDate = toBranchDate(dto.checkOutDate);
     this.assertValidRange(checkInDate, checkOutDate);
@@ -317,7 +358,7 @@ export class ReservationsService {
         checkInDate,
         checkOutDate,
         { promoCode: dto.promoCode, corporateAccountId: dto.corporateAccountId },
-        { triggeredBy: 'booking_create', userId: actorId },
+        { triggeredBy: 'booking_create', userId: actorId ?? undefined },
       );
       const confirmationNumber = await this.generateConfirmationNumber(tx, tenantId, branchId);
 
@@ -1431,7 +1472,7 @@ export class ReservationsService {
     tx: TenantTx,
     tenantId: string,
     branchId: string,
-    userId: string,
+    userId: string | null,
     action: string,
     entityId: string,
     after?: Prisma.InputJsonValue,
