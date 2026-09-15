@@ -1,7 +1,7 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
-import { NoShowRecord, PenaltyType, Prisma, Room, RoomType } from '@prisma/client';
+import { Branch, NoShowRecord, PenaltyType, Prisma, Reservation, Room, RoomType } from '@prisma/client';
 import { ErrorCode } from '../../common/errors/error-codes';
-import { todayInTimezone, toBranchDate } from '../../common/utils/branch-date';
+import { timeOfDay, todayInTimezone, toBranchDate } from '../../common/utils/branch-date';
 import { PrismaService, TenantTx } from '../../prisma/prisma.service';
 import { PropertyService } from '../property/property.service';
 import { RoomsService } from '../property/rooms.service';
@@ -14,9 +14,19 @@ import { RegistrationCardsService } from '../registration-cards/registration-car
 import { CommsLogService } from '../comms-log/comms-log.service';
 import { RestrictionsService } from '../revenue-management/restrictions.service';
 import {
+  CANCELLABLE_STATUSES,
+  CancellationQuote,
+  PENALTY_LABELS,
+  cancellationTermsFor,
+  describeCancellationPolicy,
+  penaltyAmountFor,
+  resolveCancellationPolicy,
+} from './policies';
+import {
   AvailabilityCalendarQueryDto,
   AvailabilityQueryDto,
   CancelReservationDto,
+  CancelWithWaiverDto,
   CheckInDto,
   CreateReservationDto,
   ExtendStayDto,
@@ -330,7 +340,7 @@ export class ReservationsService {
     const guestInput = this.resolveGuestInput(dto);
 
     return this.prisma.withTenant(tenantId, async (tx) => {
-      await this.propertyService.assertBranch(tx, branchId);
+      const branch = await this.propertyService.assertBranch(tx, branchId);
       const roomType = await this.assertRoomType(tx, branchId, dto.roomTypeId);
       this.assertWithinCapacity(roomType, dto.adults, dto.children ?? 0);
       // Additive — a tenant with no configured restriction sees zero
@@ -378,6 +388,10 @@ export class ReservationsService {
         children: dto.children ?? 0,
         specialRequests: dto.specialRequests,
         createdBy: actorId,
+        // The terms this booking is made under — resolved, so a branch still on
+        // the default gets the default written down. A later policy change
+        // doesn't reach back into bookings already taken.
+        cancellationPolicy: { ...resolveCancellationPolicy(branch.cancellationPolicy) },
       });
       await this.rateResolverService.linkAuditLogsToReservation(tx, resolved.auditLogIds, reservation.id);
 
@@ -632,33 +646,188 @@ export class ReservationsService {
     });
   }
 
+  // -------------------------------------------------------------------------
+  // Cancellation — policy-enforced (ref: "Cancel with policy enforcement +
+  // optional manager penalty waive", pms-mvp-timeline.html)
+  // -------------------------------------------------------------------------
+
+  /** Staff view of what cancelling would cost right now — the reference's Cancellation Policy summary and Penalty / Refund figures. */
+  async getCancellationQuote(tenantId: string, reservationId: string): Promise<CancellationQuote> {
+    return this.prisma.withTenant(tenantId, (tx) => this.quoteCancellationInTx(tx, reservationId, new Date()));
+  }
+
   async cancel(tenantId: string, reservationId: string, dto: CancelReservationDto, actorId: string) {
     return this.prisma.withTenant(tenantId, async (tx) => {
-      const reservation = await this.findReservationOrThrow(tx, reservationId);
-      if (!['confirmed', 'waitlisted'].includes(reservation.status)) {
-        throw new ConflictException({
-          code: ErrorCode.INVALID_STATUS_TRANSITION,
-          message: `Cannot cancel a reservation with status "${reservation.status}"`,
-        });
-      }
-      // No room-release side effect needed: `roomId` is always null
-      // pre-check-in in this design (§2.7 of the plan).
-      const updated = await tx.reservation.update({
-        where: { id: reservationId },
-        data: { status: 'cancelled' },
-        include: RESERVATION_INCLUDE,
+      const { reservation } = await this.cancelInTx(tx, tenantId, reservationId, {
+        actorId,
+        source: 'staff',
+        reason: dto.reason,
+        acknowledgedPenaltyTotal: dto.acknowledgedPenaltyTotal,
+        now: new Date(),
       });
-      await this.audit(tx, tenantId, reservation.branchId, actorId, 'reservation.cancelled', reservationId, { reason: dto.reason ?? null });
-      await this.commsLogService.logAutomatedInTx(tx, tenantId, reservation.branchId, {
-        reservationId,
-        guestId: updated.guestId,
-        channel: 'email',
-        subject: `Reservation Cancelled — ${updated.confirmationNumber}`,
-        body: `Your reservation ${updated.confirmationNumber} has been cancelled.${dto.reason ? ` Reason: ${dto.reason}` : ''}`,
-        trigger: 'cancellation',
-      });
-      return updated;
+      return reservation;
     });
+  }
+
+  /**
+   * The reference's Manager Override: "bypasses the cancellation penalty —
+   * for goodwill gestures or error corrections. The override is logged with
+   * the manager's ID and a required reason." Owner/Manager only, enforced by
+   * the controller's `@Roles` — a separate route rather than a flag on
+   * `cancel`, so front desk can't reach the waiver by adding a field to the
+   * request body.
+   */
+  async cancelWithWaiver(tenantId: string, reservationId: string, dto: CancelWithWaiverDto, actorId: string) {
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const { reservation } = await this.cancelInTx(tx, tenantId, reservationId, {
+        actorId,
+        source: 'staff',
+        reason: dto.reason,
+        waiverReason: dto.waiverReason,
+        acknowledgedPenaltyTotal: dto.acknowledgedPenaltyTotal,
+        now: new Date(),
+      });
+      return reservation;
+    });
+  }
+
+  /** Shared with the public booking engine's guest quote, which runs inside its own tenant transaction. */
+  async quoteCancellationInTx(tx: TenantTx, reservationId: string, now: Date): Promise<CancellationQuote> {
+    const reservation = await this.findReservationOrThrow(tx, reservationId);
+    const branch = await this.propertyService.assertBranch(tx, reservation.branchId);
+    return this.buildCancellationQuote(tx, reservation, branch, now);
+  }
+
+  /**
+   * THE cancellation path. Staff cancelling (with or without a manager's
+   * waiver) and a guest cancelling from "Manage your booking" all come
+   * through here, so the branch's policy is applied identically however a
+   * booking is cancelled — the guest path only adds its own gates in front
+   * (online cancellation allowed, not yet past check-in time).
+   *
+   * A charge, when there is one, is an ordinary `penalty` line on the
+   * primary folio through `postAdHocCharge` — the primitive no-show
+   * penalties use — so tax follows the branch's own rules and an unpaid
+   * charge shows up as a City Ledger receivable like any other.
+   *
+   * No room release: `roomId` is always NULL before check-in (§2.7 of the
+   * plan), and a cancelled reservation drops out of `HOLDING_STATUSES` the
+   * moment its status changes.
+   */
+  async cancelInTx(
+    tx: TenantTx,
+    tenantId: string,
+    reservationId: string,
+    opts: {
+      /** `null` when a guest cancels their own booking — the convention a public booking's `createdBy` already uses. */
+      actorId: string | null;
+      source: 'staff' | 'guest';
+      reason?: string;
+      /** Only the manager-override route sets this. */
+      waiverReason?: string;
+      /** The charge (tax included) the person cancelling was shown. A mismatch refuses the cancel. */
+      acknowledgedPenaltyTotal?: string;
+      now: Date;
+    },
+  ) {
+    const reservation = await this.findReservationOrThrow(tx, reservationId);
+    if (!CANCELLABLE_STATUSES.has(reservation.status)) {
+      throw new ConflictException({
+        code: ErrorCode.INVALID_STATUS_TRANSITION,
+        message: `Cannot cancel a reservation with status "${reservation.status}"`,
+      });
+    }
+    const branch = await this.propertyService.assertBranch(tx, reservation.branchId);
+    const quote = await this.buildCancellationQuote(tx, reservation, branch, opts.now);
+
+    // What was shown must be what's charged. The free window can close
+    // between reading the quote and confirming; cancelling anyway would
+    // charge an amount nobody saw.
+    if (opts.acknowledgedPenaltyTotal !== undefined && !new Prisma.Decimal(opts.acknowledgedPenaltyTotal).equals(quote.penaltyTotal)) {
+      throw new ConflictException({
+        code: ErrorCode.CANCELLATION_TERMS_CHANGED,
+        message: `The cancellation charge is now ${quote.currency} ${quote.penaltyTotal} — please review it before cancelling`,
+      });
+    }
+
+    const updated = await tx.reservation.update({
+      where: { id: reservationId },
+      data: { status: 'cancelled' },
+      include: RESERVATION_INCLUDE,
+    });
+
+    const penaltyAmount = new Prisma.Decimal(quote.penaltyAmount);
+    const waived = Boolean(opts.waiverReason) && !penaltyAmount.isZero();
+    let charged = new Prisma.Decimal(0);
+    if (!penaltyAmount.isZero() && !waived) {
+      const folio = await this.foliosService.ensurePrimaryFolio(tx, updated, opts.actorId);
+      await this.foliosService.postAdHocCharge(
+        tx,
+        updated,
+        folio,
+        'penalty',
+        penaltyAmount,
+        `Cancellation Charge (${PENALTY_LABELS[quote.penaltyType]})`,
+        opts.actorId,
+      );
+      await this.foliosService.settleIfFullyPaid(tx, folio, opts.actorId, 'cancellation');
+      charged = new Prisma.Decimal(quote.penaltyTotal);
+    }
+
+    await this.audit(tx, tenantId, reservation.branchId, opts.actorId, 'reservation.cancelled', reservationId, {
+      reason: opts.reason ?? null,
+      source: opts.source,
+      freeCancellationUntil: quote.freeCancellationUntil.toISOString(),
+      withinFreeWindow: quote.withinFreeWindow,
+      penaltyType: quote.penaltyType,
+      penaltyTotal: quote.penaltyTotal,
+      charged: charged.toFixed(2),
+      waived,
+      waiverReason: waived ? (opts.waiverReason ?? null) : null,
+    });
+    await this.commsLogService.logAutomatedInTx(tx, tenantId, reservation.branchId, {
+      reservationId,
+      guestId: updated.guestId,
+      channel: 'email',
+      subject: `Reservation Cancelled — ${updated.confirmationNumber}`,
+      body: `Your reservation ${updated.confirmationNumber} has been cancelled.${opts.reason ? ` Reason: ${opts.reason}` : ''}${
+        charged.isZero()
+          ? ' No cancellation charge applies.'
+          : ` A cancellation charge of ${quote.currency} ${charged.toFixed(2)} applies under the property's cancellation policy.`
+      }`,
+      trigger: 'cancellation',
+    });
+    return { reservation: updated, quote, charged };
+  }
+
+  private async buildCancellationQuote(tx: TenantTx, reservation: Reservation, branch: Branch, now: Date): Promise<CancellationQuote> {
+    // The terms the booking was made under, not whatever the branch offers today.
+    const policy = resolveCancellationPolicy(reservation.cancellationPolicy ?? branch.cancellationPolicy);
+    const terms = cancellationTermsFor(reservation, branch, policy, now);
+    const penaltyTax = terms.penaltyAmount.isZero()
+      ? new Prisma.Decimal(0)
+      : await this.foliosService.previewTaxTotal(tx, reservation.branchId, 'penalty', terms.penaltyAmount);
+    const penaltyTotal = terms.penaltyAmount.plus(penaltyTax);
+    const paidSoFar = await this.foliosService.paidOnPrimaryFolio(tx, reservation.id);
+    const net = paidSoFar.minus(penaltyTotal);
+    return {
+      reservationId: reservation.id,
+      status: reservation.status,
+      cancellable: CANCELLABLE_STATUSES.has(reservation.status),
+      currency: branch.currency,
+      policy: { ...policy, summary: describeCancellationPolicy(policy, timeOfDay(branch.checkInTime).slice(0, 5), branch.currency) },
+      checkInAt: terms.checkInAt,
+      freeCancellationUntil: terms.freeUntil,
+      withinFreeWindow: terms.withinFreeWindow,
+      pastCheckInTime: terms.pastCheckInTime,
+      penaltyType: terms.penaltyType,
+      penaltyAmount: terms.penaltyAmount.toFixed(2),
+      penaltyTax: penaltyTax.toFixed(2),
+      penaltyTotal: penaltyTotal.toFixed(2),
+      paidSoFar: paidSoFar.toFixed(2),
+      refundDue: (net.greaterThan(0) ? net : new Prisma.Decimal(0)).toFixed(2),
+      amountOwed: (net.lessThan(0) ? net.negated() : new Prisma.Decimal(0)).toFixed(2),
+    };
   }
 
   // -------------------------------------------------------------------------
@@ -747,12 +916,16 @@ export class ReservationsService {
       include: RESERVATION_INCLUDE,
     });
 
-    const penaltyAmount = this.penaltyAmountFor(reservation, penaltyType, flatFeeAmount);
+    const penaltyAmount = penaltyAmountFor(reservation, penaltyType, flatFeeAmount);
     const noShowRecord = await tx.noShowRecord.create({
       data: { tenantId, reservationId: reservation.id, penaltyType, penaltyAmount, markedBy },
     });
 
-    const folio = await this.foliosService.ensurePrimaryFolio(tx, updated, markedBy ?? reservation.createdBy ?? '');
+    // `markedBy` straight through — NULL for the scheduled sweep, which is
+    // what `postedBy`/`userId` mean by NULL ("system"). This used to fall back
+    // to `''` and `'system'`, which Postgres rejects in those UUID columns;
+    // the error aborted the whole night-audit transaction.
+    const folio = await this.foliosService.ensurePrimaryFolio(tx, updated, markedBy);
     if (penaltyAmount && !penaltyAmount.isZero()) {
       await this.foliosService.postAdHocCharge(
         tx,
@@ -761,12 +934,12 @@ export class ReservationsService {
         'penalty',
         penaltyAmount,
         `No-Show Penalty (${penaltyType.replace('_', ' ')})`,
-        markedBy ?? reservation.createdBy ?? '',
+        markedBy,
       );
     }
-    await this.foliosService.settleIfFullyPaid(tx, folio, markedBy ?? reservation.createdBy ?? '', 'noShow');
+    await this.foliosService.settleIfFullyPaid(tx, folio, markedBy, 'noShow');
 
-    await this.audit(tx, tenantId, reservation.branchId, markedBy ?? 'system', 'reservation.no_show', reservation.id, {
+    await this.audit(tx, tenantId, reservation.branchId, markedBy, 'reservation.no_show', reservation.id, {
       penaltyType,
       penaltyAmount: penaltyAmount?.toFixed(2) ?? null,
       auto: markedBy === null,
@@ -782,27 +955,6 @@ export class ReservationsService {
       trigger: 'no_show_notice',
     });
     return { reservation: updated, noShowRecord };
-  }
-
-  /** Mirrors `NightAuditService`'s own (now-removed) private copy — moved here since it's a per-reservation concern both the manual and automated marking paths need identically. */
-  private penaltyAmountFor(
-    reservation: { confirmedRate: Prisma.Decimal; overrideRate: Prisma.Decimal | null; checkInDate: Date; checkOutDate: Date },
-    penaltyType: PenaltyType,
-    flatFeeAmount: number | undefined,
-  ): Prisma.Decimal | null {
-    const nights = Math.max(1, Math.round((reservation.checkOutDate.getTime() - reservation.checkInDate.getTime()) / 86_400_000));
-    switch (penaltyType) {
-      case 'first_night':
-        return reservation.overrideRate
-          ? new Prisma.Decimal(reservation.overrideRate)
-          : new Prisma.Decimal(reservation.confirmedRate).div(nights).toDecimalPlaces(2);
-      case 'full_stay':
-        return new Prisma.Decimal(reservation.confirmedRate);
-      case 'flat_fee':
-        return flatFeeAmount ? new Prisma.Decimal(flatFeeAmount) : null;
-      default:
-        return null;
-    }
   }
 
   /**

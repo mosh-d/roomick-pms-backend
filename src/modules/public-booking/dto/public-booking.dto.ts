@@ -187,6 +187,34 @@ export class PreArrivalCheckInDto {
   acceptHouseRules!: boolean;
 }
 
+/**
+ * Guest self-cancellation. Same credentials as the lookup. The guest also
+ * confirms the exact charge they were shown (`0.00` when it's free): if the
+ * terms have moved since — the free window closed while the page sat open —
+ * the cancel is refused rather than charging them something they never saw.
+ */
+export class CancelBookingDto {
+  @ApiProperty({ example: 'RES-2026-00001' })
+  @IsString()
+  @MaxLength(40)
+  confirmationNumber!: string;
+
+  @ApiProperty({ example: 'ada@example.com' })
+  @IsEmail()
+  @MaxLength(320)
+  email!: string;
+
+  @ApiProperty({ example: '0.00', description: 'The cancellation charge, tax included, from the quote the guest was shown' })
+  @Matches(/^\d{1,10}(\.\d{1,2})?$/, { message: 'acknowledgedPenaltyTotal must be an amount such as 0.00' })
+  acknowledgedPenaltyTotal!: string;
+
+  @ApiPropertyOptional({ example: 'Travel plans changed' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  reason?: string;
+}
+
 export class PublishBookingEngineDto {
   @ApiProperty({ example: 'grand-hotel-ikeja', description: 'Lowercase letters, digits and hyphens only — this becomes the public booking URL' })
   @Matches(/^[a-z0-9]+(?:-[a-z0-9]+)*$/, { message: 'slug must be lowercase alphanumeric words separated by single hyphens' })

@@ -182,6 +182,25 @@ describe('PropertyService', () => {
     });
   });
 
+  describe('setCancellationPolicy', () => {
+    it('writes the policy onto the branch and audits it', async () => {
+      const dto = { freeCancellationHours: 48, lateCancellationPenalty: 'flat_fee' as const, flatFeeAmount: 5000, allowOnlineCancellation: false };
+      await service.setCancellationPolicy(TENANT_ID, BRANCH_ID, dto, ACTOR);
+      expect(tx.branch.update).toHaveBeenCalledWith({ where: { id: BRANCH_ID }, data: { cancellationPolicy: dto } });
+      expect(tx.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: 'branch.cancellation_policy_updated' }) }));
+    });
+
+    it('drops a fee amount that only a flat-fee policy would use', async () => {
+      await service.setCancellationPolicy(
+        TENANT_ID,
+        BRANCH_ID,
+        { freeCancellationHours: 24, lateCancellationPenalty: 'first_night', flatFeeAmount: 5000, allowOnlineCancellation: true },
+        ACTOR,
+      );
+      expect(tx.branch.update.mock.calls[0][0].data.cancellationPolicy.flatFeeAmount).toBeNull();
+    });
+  });
+
   describe('default structure (3-mode onboarding)', () => {
     it('creates the hidden default building+floor once and reuses them', async () => {
       tx.building.findFirst.mockResolvedValue(null); // no default yet

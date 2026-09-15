@@ -6,6 +6,7 @@ import { JwtPayload } from '../../common/types/request-context';
 import { CreateBrandDto, UpdateBrandDto } from './dto/brand.dto';
 import {
   CreateBranchDto,
+  CancellationPolicyDto,
   NoShowPolicyDto,
   RegCardTemplateDto,
   UpdateBranchDto,
@@ -110,6 +111,18 @@ export class PropertyController {
     @Body() dto: NoShowPolicyDto,
   ): ReturnType<PropertyService['setNoShowPolicy']> {
     return this.propertyService.setNoShowPolicy(tenantId, branchId, dto, user.sub);
+  }
+
+  @Patch('branches/:branchId/policies/cancellation')
+  @Roles(SystemRole.Owner, SystemRole.Manager)
+  @ApiOperation({ summary: 'Set the branch cancellation policy — applied to every cancellation, by staff or by the guest online' })
+  setCancellationPolicy(
+    @CurrentTenant() tenantId: string,
+    @CurrentUser() user: JwtPayload,
+    @Param('branchId', ParseUUIDPipe) branchId: string,
+    @Body() dto: CancellationPolicyDto,
+  ): ReturnType<PropertyService['setCancellationPolicy']> {
+    return this.propertyService.setCancellationPolicy(tenantId, branchId, dto, user.sub);
   }
 
   @Get('branches/:branchId/registration-card-template')

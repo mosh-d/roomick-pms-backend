@@ -9,9 +9,11 @@ import {
   IsOptional,
   IsString,
   IsUUID,
+  Matches,
   Max,
   MaxLength,
   Min,
+  MinLength,
   ValidateNested,
 } from 'class-validator';
 import { ReservationChannel, ReservationStatus } from '@prisma/client';
@@ -200,6 +202,24 @@ export class CancelReservationDto {
   @IsOptional()
   @MaxLength(500)
   reason?: string;
+
+  @ApiPropertyOptional({
+    example: '32250.00',
+    description:
+      'The cancellation charge (tax included) the agent was shown. If it no longer matches — the free window closed in the meantime — the cancel is refused rather than charging an amount nobody saw.',
+  })
+  @IsOptional()
+  @Matches(/^\d{1,10}(\.\d{1,2})?$/, { message: 'acknowledgedPenaltyTotal must be an amount such as 32250.00' })
+  acknowledgedPenaltyTotal?: string;
+}
+
+/** Manager override (ref: "bypasses the cancellation penalty … logged with the manager's ID and a required reason"). */
+export class CancelWithWaiverDto extends CancelReservationDto {
+  @ApiProperty({ example: 'Flight cancelled by the airline — goodwill waiver' })
+  @IsString()
+  @MinLength(3)
+  @MaxLength(500)
+  waiverReason!: string;
 }
 
 export class AvailabilityQueryDto {

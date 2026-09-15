@@ -7,6 +7,7 @@ import {
   AvailabilityCalendarQueryDto,
   AvailabilityQueryDto,
   CancelReservationDto,
+  CancelWithWaiverDto,
   CheckInDto,
   CreateReservationDto,
   ExtendStayDto,
@@ -151,9 +152,19 @@ export class ReservationsController {
     return this.reservationsService.checkOut(tenantId, reservationId, user.sub);
   }
 
+  @Get('reservations/:reservationId/cancellation-quote')
+  @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk)
+  @ApiOperation({ summary: "What cancelling now would cost under the branch's cancellation policy — the charge, its tax, and any refund due" })
+  getCancellationQuote(
+    @CurrentTenant() tenantId: string,
+    @Param('reservationId', ParseUUIDPipe) reservationId: string,
+  ): ReturnType<ReservationsService['getCancellationQuote']> {
+    return this.reservationsService.getCancellationQuote(tenantId, reservationId);
+  }
+
   @Post('reservations/:reservationId/cancel')
   @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk)
-  @ApiOperation({ summary: 'Cancel a confirmed or waitlisted reservation' })
+  @ApiOperation({ summary: "Cancel a confirmed or waitlisted reservation — the branch's cancellation policy decides any charge" })
   cancel(
     @CurrentTenant() tenantId: string,
     @CurrentUser() user: JwtPayload,
@@ -161,6 +172,18 @@ export class ReservationsController {
     @Body() dto: CancelReservationDto,
   ): ReturnType<ReservationsService['cancel']> {
     return this.reservationsService.cancel(tenantId, reservationId, dto, user.sub);
+  }
+
+  @Post('reservations/:reservationId/cancel-with-waiver')
+  @Roles(SystemRole.Owner, SystemRole.Manager)
+  @ApiOperation({ summary: 'Manager override — cancel without the cancellation charge; the waiver and its reason are audited' })
+  cancelWithWaiver(
+    @CurrentTenant() tenantId: string,
+    @CurrentUser() user: JwtPayload,
+    @Param('reservationId', ParseUUIDPipe) reservationId: string,
+    @Body() dto: CancelWithWaiverDto,
+  ): ReturnType<ReservationsService['cancelWithWaiver']> {
+    return this.reservationsService.cancelWithWaiver(tenantId, reservationId, dto, user.sub);
   }
 
   @Patch('reservations/:reservationId/modify')

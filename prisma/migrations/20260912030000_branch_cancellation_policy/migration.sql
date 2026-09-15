@@ -1,0 +1,17 @@
+-- A branch-level cancellation policy, alongside the existing `noShowPolicy`.
+--
+-- Until now cancelling simply flipped a reservation to `cancelled` — no
+-- policy, no charge — and the staff Cancel page said so: the reference's
+-- Cancellation Policy summary, Penalty/Refund figures and Manager Override
+-- were deferred because nothing like this column existed.
+--
+-- Shape: {freeCancellationHours, lateCancellationPenalty, flatFeeAmount,
+-- allowOnlineCancellation}. NULL = the standard default, resolved in code
+-- (reservations/policies.ts): free until 24 hours before check-in time on the
+-- arrival day, first night charged after that, guests may cancel online. So
+-- every existing branch gets the standard policy the moment this ships, and
+-- an owner changes it from Property Config.
+--
+-- No RLS statements: `branches` already has its tenant policy, and a new
+-- column inherits it.
+ALTER TABLE "branches" ADD COLUMN "cancellationPolicy" JSONB;

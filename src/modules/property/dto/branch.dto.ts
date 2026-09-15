@@ -1,14 +1,20 @@
 import { ApiProperty, ApiPropertyOptional, PartialType } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
+  IsBoolean,
   IsIn,
+  IsInt,
   IsISO31661Alpha2,
+  IsNumber,
   IsObject,
   IsOptional,
   IsString,
   Matches,
+  Max,
   MaxLength,
+  Min,
   MinLength,
+  ValidateIf,
   ValidateNested,
 } from 'class-validator';
 
@@ -104,6 +110,38 @@ export class NoShowPolicyDto {
   @ApiPropertyOptional({ example: 120 })
   @IsOptional()
   notifyMinutesBefore?: number;
+
+  // Missing until now: the penalty code has always read `flatFeeAmount`, but
+  // this DTO never declared it, so `forbidNonWhitelisted` rejected it and a
+  // "Flat Fee" no-show policy silently charged nothing. Required with flat_fee.
+  @ApiPropertyOptional({ example: 7500, description: 'Required when defaultPenalty is flat_fee' })
+  @ValidateIf((o: NoShowPolicyDto) => o.defaultPenalty === 'flat_fee')
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0.01)
+  flatFeeAmount?: number;
+}
+
+/** `Branch.cancellationPolicy` — see reservations/policies.ts for how it's applied and what the default is. */
+export class CancellationPolicyDto {
+  @ApiProperty({ example: 24, description: "Free cancellation until this many hours before check-in time on the arrival day. 0 = free right up to check-in." })
+  @IsInt()
+  @Min(0)
+  @Max(720)
+  freeCancellationHours!: number;
+
+  @ApiProperty({ enum: ['first_night', 'full_stay', 'flat_fee', 'none'] })
+  @IsIn(['first_night', 'full_stay', 'flat_fee', 'none'])
+  lateCancellationPenalty!: 'first_night' | 'full_stay' | 'flat_fee' | 'none';
+
+  @ApiPropertyOptional({ example: 5000, description: 'Required when lateCancellationPenalty is flat_fee' })
+  @ValidateIf((o: CancellationPolicyDto) => o.lateCancellationPenalty === 'flat_fee')
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0.01)
+  flatFeeAmount?: number;
+
+  @ApiProperty({ description: 'Whether guests can cancel from "Manage your booking". Staff can always cancel.' })
+  @IsBoolean()
+  allowOnlineCancellation!: boolean;
 }
 
 export class RegCardTemplateDto {

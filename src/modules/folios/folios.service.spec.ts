@@ -548,6 +548,39 @@ describe('FoliosService', () => {
       expect(rows.map((r) => r.label)).toEqual([null, 'Company']);
     });
 
+    it('an unpaid cancellation charge is a City Ledger receivable too', async () => {
+      tx.folio.findMany.mockResolvedValue([folioRow({ reservation: { id: RESERVATION_ID, status: 'cancelled', checkOutDate: new Date('2026-09-04') } })]);
+      tx.lineItem.findMany.mockResolvedValue([{ amount: new Prisma.Decimal('32250'), chargeType: 'penalty' }]);
+      const [row] = await service.listFolios(TENANT_ID, BRANCH_ID, 'all');
+      expect(row.guestStatus).toBe('city_ledger');
+    });
+
+    describe('quoting helpers used by cancellation', () => {
+      it('previewTaxTotal sums what the tax rules would add, without writing anything', async () => {
+        taxesService.computeTaxesForCharge.mockResolvedValue([
+          { ruleId: 'vat', ruleName: 'VAT', rate: new Prisma.Decimal('0.075'), taxAmount: new Prisma.Decimal('2250') },
+          { ruleId: 'svc', ruleName: 'Service', rate: new Prisma.Decimal('0.05'), taxAmount: new Prisma.Decimal('1500') },
+        ]);
+        const total = await service.previewTaxTotal(tx as never, BRANCH_ID, 'penalty', new Prisma.Decimal('30000'));
+        expect(total.toFixed(2)).toBe('3750.00');
+        expect(tx.lineItem.create).not.toHaveBeenCalled();
+      });
+
+      it('paidOnPrimaryFolio is zero when no folio exists — and never creates one', async () => {
+        tx.folio.findFirst.mockResolvedValue(null);
+        const paid = await service.paidOnPrimaryFolio(tx as never, RESERVATION_ID);
+        expect(paid.toFixed(2)).toBe('0.00');
+        expect(tx.folio.create).not.toHaveBeenCalled();
+      });
+
+      it('paidOnPrimaryFolio sums payments on the primary folio', async () => {
+        tx.folio.findFirst.mockResolvedValue({ id: FOLIO_ID });
+        tx.payment.findMany.mockResolvedValue([{ amount: new Prisma.Decimal('20000'), paymentPurpose: 'deposit' }]);
+        const paid = await service.paidOnPrimaryFolio(tx as never, RESERVATION_ID);
+        expect(paid.toFixed(2)).toBe('20000.00');
+      });
+    });
+
     /**
      * Found live, once the Alerts module started aggregating across both:
      * a guest who's STILL checked in past their own checkout date owes a

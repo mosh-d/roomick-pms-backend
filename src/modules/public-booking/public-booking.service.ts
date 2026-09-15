@@ -7,6 +7,14 @@ import { FoliosService } from '../folios/folios.service';
 import { RateResolverService } from '../rate-resolver/rate-resolver.service';
 import { ReservationsService } from '../reservations/reservations.service';
 import {
+  CANCELLABLE_STATUSES,
+  CancellationQuote,
+  cancellationTermsFor,
+  describeCancellationPolicy,
+  resolveCancellationPolicy,
+} from '../reservations/policies';
+import {
+  CancelBookingDto,
   LookupBookingDto,
   PreArrivalCheckInDto,
   PublicAvailabilityQueryDto,
@@ -44,6 +52,19 @@ export interface PublicPropertyInfo {
   checkOutTime: string;
   address: unknown;
   brandName: string;
+  /** Guest-facing by nature — a guest has to be able to read the terms before booking. */
+  cancellationPolicy: { summary: string; freeCancellationHours: number; allowOnlineCancellation: boolean };
+}
+
+export interface PublicQuote {
+  currency: string;
+  nightlyRate: string;
+  subtotal: string;
+  taxTotal: string;
+  totalWithTax: string;
+  nights: number;
+  /** The cancellation terms this stay would book under — including when it starts so soon that the free window has already closed. */
+  cancellation: { summary: string; freeCancellationUntil: Date; freeCancellationAvailable: boolean };
 }
 
 export interface PublicRoomType {
@@ -77,6 +98,8 @@ export interface PublicBookingDetail {
   preArrivalCompletedAt: Date | null;
   estimatedArrivalTime: string | null;
   houseRules: string | null;
+  /** The cancellation terms this booking was made under, as one sentence. */
+  cancellationPolicySummary: string;
   property: PublicPropertyInfo;
 }
 
@@ -123,6 +146,28 @@ export interface PublicBookingConfirmation {
   roomTypeName: string;
   guestName: string;
   totalRate: string;
+  currency: string;
+}
+
+/** What a guest sees before cancelling: the terms and the charge — no ids, no folio internals. */
+export interface PublicCancellationQuote {
+  confirmationNumber: string;
+  currency: string;
+  /** False when the guest can't cancel online — the property has turned it off, or it's past check-in time on the arrival day. `blockedReason` says which. */
+  canCancelOnline: boolean;
+  blockedReason: string | null;
+  policySummary: string;
+  freeCancellationUntil: Date;
+  withinFreeWindow: boolean;
+  charge: { amount: string; tax: string; total: string };
+  paidSoFar: string;
+  refundDue: string;
+}
+
+export interface PublicCancellationResult {
+  booking: PublicBookingDetail;
+  /** What was actually charged, tax included — `0.00` for a free cancellation. */
+  charged: string;
   currency: string;
 }
 
@@ -206,6 +251,10 @@ export class PublicBookingService {
    * Public-safe property detail only. Explicitly NOT returned: tenant id,
    * branch id, internal policies, no-show policy, reg-card template,
    * overbooking configuration, staff, or anything financial.
+   *
+   * The cancellation policy IS returned — as the generated sentence and the
+   * two facts a guest needs — because guests must be able to read the terms
+   * before they book.
    */
   async getProperty(slug: string): Promise<PublicPropertyInfo> {
     const { tenantId, branchId } = await this.resolveBookableBranch(slug);
@@ -220,21 +269,29 @@ export class PublicBookingService {
           checkInTime: true,
           checkOutTime: true,
           address: true,
+          cancellationPolicy: true,
           brand: { select: { name: true } },
         },
       });
+      // Stored as a Postgres TIME, surfaced by Prisma as a 1970-01-01
+      // DateTime — only the time-of-day half is meaningful.
+      const checkInTime = branch.checkInTime.toISOString().slice(11, 16);
+      const cancellation = resolveCancellationPolicy(branch.cancellationPolicy);
       return {
         slug,
         name: branch.name,
         category: branch.category,
         currency: branch.currency,
         timezone: branch.timezone,
-        // Stored as a Postgres TIME, surfaced by Prisma as a 1970-01-01
-        // DateTime — only the time-of-day half is meaningful.
-        checkInTime: branch.checkInTime.toISOString().slice(11, 16),
+        checkInTime,
         checkOutTime: branch.checkOutTime.toISOString().slice(11, 16),
         address: branch.address,
         brandName: branch.brand.name,
+        cancellationPolicy: {
+          summary: describeCancellationPolicy(cancellation, checkInTime, branch.currency),
+          freeCancellationHours: cancellation.freeCancellationHours,
+          allowOnlineCancellation: cancellation.allowOnlineCancellation,
+        },
       };
     });
   }
@@ -301,7 +358,7 @@ export class PublicBookingService {
    * charge to dispute. The moment this guest actually books, the ordinary
    * `createReservation` path resolves again and DOES persist and link it.
    */
-  async getQuote(slug: string, dto: PublicQuoteQueryDto): Promise<{ currency: string; nightlyRate: string; subtotal: string; taxTotal: string; totalWithTax: string; nights: number }> {
+  async getQuote(slug: string, dto: PublicQuoteQueryDto): Promise<PublicQuote> {
     const { tenantId, branchId } = await this.resolveBookableBranch(slug);
     const resolution = await this.rateResolverService.calculateQuote(
       tenantId,
@@ -310,8 +367,29 @@ export class PublicBookingService {
       null,
       { persistAudit: false },
     );
-    const branch = await this.prisma.withTenant(tenantId, (tx) => tx.branch.findFirstOrThrow({ where: { id: branchId }, select: { currency: true } }));
+    const branch = await this.prisma.withTenant(tenantId, (tx) =>
+      tx.branch.findFirstOrThrow({
+        where: { id: branchId },
+        select: { currency: true, timezone: true, checkInTime: true, cancellationPolicy: true },
+      }),
+    );
     const nights = Math.round((Date.parse(dto.checkOutDate) - Date.parse(dto.checkInDate)) / 86_400_000);
+    // The terms this stay would book under, stated before the guest commits —
+    // the one case worth spelling out is a stay starting so soon that
+    // cancelling would already be charged.
+    const policy = resolveCancellationPolicy(branch.cancellationPolicy);
+    const terms = cancellationTermsFor(
+      {
+        status: 'confirmed',
+        checkInDate: toBranchDate(dto.checkInDate),
+        checkOutDate: toBranchDate(dto.checkOutDate),
+        confirmedRate: resolution.subtotal,
+        overrideRate: null,
+      },
+      branch,
+      policy,
+      new Date(),
+    );
     return {
       currency: branch.currency,
       nightlyRate: resolution.nightlyRate.toFixed(2),
@@ -319,6 +397,11 @@ export class PublicBookingService {
       taxTotal: resolution.taxTotal.toFixed(2),
       totalWithTax: resolution.totalWithTax.toFixed(2),
       nights,
+      cancellation: {
+        summary: describeCancellationPolicy(policy, branch.checkInTime.toISOString().slice(11, 16), branch.currency),
+        freeCancellationUntil: terms.freeUntil,
+        freeCancellationAvailable: terms.withinFreeWindow,
+      },
     };
   }
 
@@ -465,6 +548,7 @@ export class PublicBookingService {
           overrideRate: true,
           preArrivalCompletedAt: true,
           estimatedArrivalTime: true,
+          cancellationPolicy: true,
           roomType: { select: { name: true } },
           guest: { select: { name: true, email: true, phone: true, nationality: true } },
           branch: { select: { currency: true, regCardTemplate: true } },
@@ -501,6 +585,12 @@ export class PublicBookingService {
       // `regCardTemplate` — the rest of it (logo, required-field config,
       // language) is staff-facing setup, not something a guest needs.
       houseRules: ((reservation.branch.regCardTemplate ?? {}) as { houseRules?: string }).houseRules ?? null,
+      // The terms THIS booking was made under — which may differ from what the
+      // property offers new bookings today. Older bookings have no snapshot and
+      // use the property's current policy, exactly as a cancellation would.
+      cancellationPolicySummary: reservation.cancellationPolicy
+        ? describeCancellationPolicy(resolveCancellationPolicy(reservation.cancellationPolicy), property.checkInTime, reservation.branch.currency)
+        : property.cancellationPolicy.summary,
       property,
     };
   }
@@ -579,6 +669,114 @@ export class PublicBookingService {
     // same shape they'd see on a refresh, rather than a hand-built echo that
     // could drift from it.
     return this.lookupBooking(slug, { confirmationNumber: dto.confirmationNumber, email: dto.email });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Guest self-service — cancelling your own booking
+  // ---------------------------------------------------------------------------
+
+  /**
+   * What cancelling would cost the guest right now. The figures are
+   * `ReservationsService`'s own quote — the one the staff Cancel page shows —
+   * projected to what a guest needs.
+   */
+  async getCancellationQuote(slug: string, dto: LookupBookingDto): Promise<PublicCancellationQuote> {
+    const { tenantId, branchId } = await this.resolveBookableBranch(slug);
+    const property = await this.getProperty(slug);
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const reservation = await tx.reservation.findFirst({
+        where: this.bookingCredentialsWhere(branchId, dto),
+        select: { id: true, confirmationNumber: true, status: true },
+      });
+      if (!reservation) throw this.bookingNotFound();
+      this.assertGuestCancellable(reservation.status);
+
+      const quote = await this.reservationsService.quoteCancellationInTx(tx, reservation.id, new Date());
+      const blockedReason = this.onlineCancellationBlock(quote, property.name);
+      return {
+        confirmationNumber: reservation.confirmationNumber,
+        currency: quote.currency,
+        canCancelOnline: blockedReason === null,
+        blockedReason,
+        policySummary: quote.policy.summary,
+        freeCancellationUntil: quote.freeCancellationUntil,
+        withinFreeWindow: quote.withinFreeWindow,
+        charge: { amount: quote.penaltyAmount, tax: quote.penaltyTax, total: quote.penaltyTotal },
+        paidSoFar: quote.paidSoFar,
+        refundDue: quote.refundDue,
+      };
+    });
+  }
+
+  /**
+   * The guest cancels their own booking — through `ReservationsService
+   * .cancelInTx`, the same path a front-desk cancellation takes, so the
+   * policy can't be applied differently online. Same credentials as the
+   * lookup; the guest's own two gates (online cancellation allowed, not yet
+   * past check-in) are checked first, and the charge they acknowledged must
+   * match the one recomputed here.
+   *
+   * `actorId: null` — a guest acted, not a staff member, like a public
+   * booking's `createdBy: null`.
+   */
+  async cancelBooking(slug: string, dto: CancelBookingDto): Promise<PublicCancellationResult> {
+    const { tenantId, branchId } = await this.resolveBookableBranch(slug);
+    const property = await this.getProperty(slug);
+    const now = new Date();
+
+    const charged = await this.prisma.withTenant(tenantId, async (tx) => {
+      const reservation = await tx.reservation.findFirst({
+        where: this.bookingCredentialsWhere(branchId, dto),
+        select: { id: true, status: true },
+      });
+      if (!reservation) throw this.bookingNotFound();
+      this.assertGuestCancellable(reservation.status);
+
+      const quote = await this.reservationsService.quoteCancellationInTx(tx, reservation.id, now);
+      const blockedReason = this.onlineCancellationBlock(quote, property.name);
+      if (blockedReason) throw new ConflictException({ code: ErrorCode.CONFLICT, message: blockedReason });
+
+      const result = await this.reservationsService.cancelInTx(tx, tenantId, reservation.id, {
+        actorId: null,
+        source: 'guest',
+        reason: dto.reason?.trim() || undefined,
+        acknowledgedPenaltyTotal: dto.acknowledgedPenaltyTotal,
+        now,
+      });
+      return result.charged;
+    });
+
+    return {
+      booking: await this.lookupBooking(slug, { confirmationNumber: dto.confirmationNumber, email: dto.email }),
+      charged: charged.toFixed(2),
+      currency: property.currency,
+    };
+  }
+
+  private assertGuestCancellable(status: string): void {
+    if (!CANCELLABLE_STATUSES.has(status)) {
+      throw new ConflictException({
+        code: ErrorCode.INVALID_STATUS_TRANSITION,
+        message: 'This booking can no longer be cancelled online — please speak to the property directly',
+      });
+    }
+  }
+
+  /**
+   * Why a guest can't cancel online, or `null` if they can. Past check-in
+   * time on the arrival day the stay is due to have started: from then on
+   * it's a no-show matter for the property, not a self-service cancel — and
+   * letting a guest cancel at 11pm would let them sidestep a stricter
+   * no-show penalty.
+   */
+  private onlineCancellationBlock(quote: CancellationQuote, propertyName: string): string | null {
+    if (!quote.policy.allowOnlineCancellation) {
+      return `${propertyName} doesn't take cancellations online — please contact the property directly to cancel.`;
+    }
+    if (quote.pastCheckInTime) {
+      return `It's past check-in time on your arrival day, so this booking can't be cancelled online any more — please contact ${propertyName} directly.`;
+    }
+    return null;
   }
 
   // ---------------------------------------------------------------------------

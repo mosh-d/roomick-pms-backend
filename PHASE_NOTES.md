@@ -1,5 +1,48 @@
 # Phase Notes
 
+## Month 9 (fourth slice) — a cancellation policy, and guests cancelling their own bookings (2026-09-15)
+
+The owner's instruction: "use common standard policies". Until now `cancel()` flipped a reservation to `cancelled` with no policy and no charge, and the staff Cancel page said so — the reference's Cancellation Policy summary, Penalty/Refund figures and Manager Override had been deferred because nothing like a cancellation policy existed.
+
+### The policy
+`Branch.cancellationPolicy` (migration `20260912030000`): `{freeCancellationHours, lateCancellationPenalty, flatFeeAmount, allowOnlineCancellation}`. NULL means the standard default, resolved in `reservations/policies.ts`: **free until 24 hours before check-in time on the arrival day, the first night charged after that, guests may cancel online.** Set per branch with `PATCH /branches/:id/policies/cancellation` (Owner/Manager); a flat fee needs an amount, and the window is capped at 720 hours.
+- **The window runs back from the branch's own check-in time on the arrival day, in the branch timezone** (`branchCutoffInstant`, the helper Alerts already uses) — not midnight, not server time.
+- **The penalty arithmetic is shared with no-shows** (`penaltyAmountFor` moved into `policies.ts`), so "first night" can't be priced two ways: `overrideRate ?? confirmedRate / nights`.
+- **Tax follows the branch's rules.** The charge is an ordinary `penalty` line through `postAdHocCharge`, and the quote previews its tax with the same rules (`FoliosService.previewTaxTotal`).
+- **The guest-facing sentence is generated** from the policy object (`describeCancellationPolicy`), not typed into a free-text field as the reference has it, so what a guest reads can't disagree with what they're charged.
+
+### Each booking keeps the terms it was made under
+`Reservation.cancellationPolicy` (migration `20260912040000`) snapshots the resolved policy in `createReservation`. Without it, an owner tightening the policy would retroactively change the terms of every booking already taken. Bookings made before the snapshot existed fall back to the branch's current policy.
+
+### One cancellation path
+`ReservationsService.cancelInTx` is the only way a booking gets cancelled — front desk, manager override and the guest online all go through it.
+- `GET /reservations/:id/cancellation-quote` — the charge, its tax, paid so far, refund due or amount owed, the deadline, and the policy sentence.
+- `POST /reservations/:id/cancel` — applies the policy. `acknowledgedPenaltyTotal` (optional for staff, required for guests): if the charge shown no longer matches — the free window closed while the page was open — the cancel is refused with `409 CANCELLATION_TERMS_CHANGED` rather than charging an amount nobody saw.
+- `POST /reservations/:id/cancel-with-waiver` — Owner/Manager only, as a separate route so front desk can't reach the waiver by adding a field to the body; a reason is required and audited.
+- A charge opens the primary folio if needed. An unpaid charge is a City Ledger receivable — `deriveGuestStatus` now counts `cancelled` alongside `checked_out` and `no_show`. A free cancellation opens no folio. Waitlisted bookings are always free: they never held a room.
+
+### Guests cancel online
+`POST /public/properties/:slug/bookings/cancellation-quote` and `…/bookings/cancel`, behind the same credentials, generic 404 and 10/hour throttle as the lookup. Two gates beyond the shared path: the branch must allow online cancellation, and it must not yet be check-in time on the arrival day — after that the stay is due and the no-show policy applies (otherwise a guest could cancel at 11pm to sidestep a stricter no-show penalty). `actorId: null`, as a public booking's `createdBy` already is. The property info and the booking quote carry the policy sentence; the quote says when a stay starts so soon that the free window has already passed; the lookup carries the booking's own terms.
+
+### Two existing bugs fixed on the way
+- **The scheduled night audit couldn't mark a no-show, or post a night for an online booking.** `markNoShowInTx` audited with `userId: 'system'` and fell back to `''` as the folio actor; night audit's room-charge posting used the same `''` fallback. Both land in UUID columns, so Postgres rejected the insert and aborted the whole audit transaction. Tests never saw it (folios are mocked) and a manual audit run passes a real user id. The actor is now `null` all the way through — the columns' own "system" convention — and the folio helpers take `string | null`. Proved against real Postgres through the real service: the old `'system'` value is rejected; the fixed path marks the no-show with NULL `postedBy` and audit `userId`.
+- **A "Flat Fee" no-show policy charged nothing.** `NoShowPolicyDto` never declared `flatFeeAmount`, so `forbidNonWhitelisted` rejected it and Property Config had nowhere to enter it, while the penalty code read an amount that could never be set. The DTO now requires it with `flat_fee`.
+
+### Honest limits
+- **Refunds aren't automated.** When a guest has paid more than the charge, the quote shows the refund due and staff record it; paying it back to a card needs the payment processor. A prepayment that covers the charge settles the folio (the rule check-out uses), so the refund is recorded against a settled folio.
+- **No grace period for last-minute bookings.** A booking made inside the late window is charged if cancelled; the booking page warns before the guest books.
+- **Only the policy is snapshotted, not `checkInTime`.** Moving a branch's check-in time moves the deadline for existing bookings.
+- A cancelled booking's charge isn't viewable online afterwards — the guest bill view is `checked_in`/`checked_out` only; the charge is stated at the moment of cancelling.
+- No-show waivers still reverse by recomputation (carried forward from the entry below).
+
+### Verified
+`npx tsc --noEmit`, `npm run lint`, `npm test` — 674 tests, all green (48 net new: the policy rules — window from check-in time in the branch timezone, the boundary minute, override rate, waitlisted, 0-hour window, a fee-less flat fee, the generated sentences; quote figures with tax and deposit refunds; the stale-charge refusal; the waiver; the guest's NULL actor; the booking's snapshot winning over the branch; `createReservation` writing it; public quote/cancel gates, credential check and allow-lists; the policy DTO/service; cancelled balances as City Ledger; the night-audit NULL actor).
+
+Live against real Postgres. API (32 checks): the default stated before booking and a same-day stay flagged; a free guest cancel opening no folio; 409 on cancelling twice; the generic 404 for a wrong email; a booking made under a 720-hour policy keeping it after the property relaxed to 24; the quote's 30,000 + 2,250 = 32,250; a stale acknowledgment refused and changing nothing; the charge posted as "Cancellation Charge (first night)" with its VAT linked and NULL `postedBy`, owing 32,250 as City Ledger; past check-in time closing online cancellation; the desk's matching quote; a waiver refused without a reason and cancelling with one, posting nothing; an online-off booking refused online but cancellable at the desk; policy validation; the no-show flat fee rejected without an amount and charging 7,500 + 562.50 VAT with one. Two of those assertions compared a balance to the string `"32250.00"` / `"8062.50"` while the API returns `32250` / `8062.5` — the printed values were the right ones; a clean re-run was blocked by the booking endpoint's own 10/hour throttle on the owner's running server. Null-actor proof through the real service: 6/6.
+
+### Carried forward
+Refunds to card (Month 11, with the payment processor) · a grace period for last-minute bookings if the owner wants one · no-show waiver reversal by link · changing dates or room online.
+
 ## Correcting a charge reverses its tax; a split moves tax with its charge (2026-09-12)
 
 The bug the guest bill view surfaced (entry below): `correctLineItem` negated only the line it was given, so the VAT posted with a charge survived the charge's correction — a returned ₦5,000 minibar item still carried ₦375 VAT. The fix needed a schema change, which was the owner's call; the owner said fix it.

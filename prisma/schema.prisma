@@ -563,7 +563,10 @@ model Branch {
   checkOutTime    DateTime @default(dbgenerated("'11:00:00'::time")) @db.Time(0)
   category        String?  @db.VarChar(30) // hotel | resort | motel | boutique | hostel
   policies        Json? // overrides brand defaultPolicies; merged at read time. Holds idCaptureMandatory, early/late surcharge policy, AR flag rules.
-  noShowPolicy    Json? // {cutoffTime, defaultPenalty, autoMark, notifyMinutesBefore}
+  noShowPolicy    Json? // {cutoffTime, defaultPenalty, flatFeeAmount, autoMark, notifyMinutesBefore}
+  // {freeCancellationHours, lateCancellationPenalty, flatFeeAmount, allowOnlineCancellation}.
+  // NULL = the standard default (free until 24h before check-in, first night after) — see reservations/policies.ts.
+  cancellationPolicy Json?
   regCardTemplate Json? // {logoUrl, houseRules, requiredFields, showRate, language}
 
   // --- Direct Booking Engine (Month 7) -------------------------------------
@@ -999,6 +1002,11 @@ model Reservation {
   // gave.
   estimatedArrivalTime  String?            @db.VarChar(5)
   houseRulesAcceptedAt  DateTime?          @db.Timestamptz(6)
+  // The branch's cancellation policy as it stood when this booking was made —
+  // the terms that apply to it, however the branch's policy changes later.
+  // NULL for bookings made before snapshots existed (they use the branch's
+  // current policy). See reservations/policies.ts.
+  cancellationPolicy    Json?
 
   createdAt DateTime  @default(now()) @db.Timestamptz(6)
   updatedAt DateTime  @updatedAt @db.Timestamptz(6)

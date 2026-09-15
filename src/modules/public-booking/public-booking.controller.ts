@@ -5,6 +5,7 @@ import { CurrentTenant } from '../../common/decorators';
 import { Public } from '../../common/decorators/public.decorator';
 import { Roles, SystemRole } from '../../common/decorators/roles.decorator';
 import {
+  CancelBookingDto,
   LookupBookingDto,
   PreArrivalCheckInDto,
   PublicAvailabilityQueryDto,
@@ -104,6 +105,25 @@ export class PublicBookingController {
   @ApiOperation({ summary: "Guest self-service — a read-only view of your own bill: charges posted so far, payments and balance. Primary folio only." })
   getGuestFolio(@Param('slug') slug: string, @Body() dto: LookupBookingDto): ReturnType<PublicBookingService['getGuestFolio']> {
     return this.publicBookingService.getGuestFolio(slug, dto);
+  }
+
+  @Post(':slug/bookings/cancellation-quote')
+  @HttpCode(HttpStatus.OK)
+  // Same credentials as the lookup, so the same brute-force surface and the
+  // same limit. Read-only.
+  @Throttle({ default: { limit: 10, ttl: 3_600_000 } })
+  @ApiOperation({ summary: "Guest self-service — what cancelling this booking now would cost under the property's cancellation policy" })
+  getCancellationQuote(@Param('slug') slug: string, @Body() dto: LookupBookingDto): ReturnType<PublicBookingService['getCancellationQuote']> {
+    return this.publicBookingService.getCancellationQuote(slug, dto);
+  }
+
+  @Post(':slug/bookings/cancel')
+  @HttpCode(HttpStatus.OK)
+  // A write behind the same credentials — the same 10/hour.
+  @Throttle({ default: { limit: 10, ttl: 3_600_000 } })
+  @ApiOperation({ summary: 'Guest self-cancellation — the same cancellation path staff use; the guest confirms the exact charge they were shown' })
+  cancelBooking(@Param('slug') slug: string, @Body() dto: CancelBookingDto): ReturnType<PublicBookingService['cancelBooking']> {
+    return this.publicBookingService.cancelBooking(slug, dto);
   }
 
   @Post(':slug/reservations')

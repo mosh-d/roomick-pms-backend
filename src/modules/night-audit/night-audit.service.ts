@@ -94,14 +94,18 @@ export class NightAuditService {
 
       for (const reservation of inHouse) {
         try {
-          const folio = await this.foliosService.ensurePrimaryFolio(tx, reservation, triggeredBy ?? reservation.createdBy ?? '');
+          // `triggeredBy` straight through: NULL for the scheduled sweep is
+          // `postedBy`'s own "system-posted". It used to fall back to `''` for
+          // an online booking (no `createdBy`), which Postgres rejects in the
+          // UUID column — aborting the whole audit transaction.
+          const folio = await this.foliosService.ensurePrimaryFolio(tx, reservation, triggeredBy);
           const posted = await this.foliosService.postRoomChargeForDate(
             tx,
             reservation,
             folio,
             auditDate,
             'Night Audit',
-            triggeredBy ?? reservation.createdBy ?? '',
+            triggeredBy,
           );
           foliosProcessed++;
           if (posted) {

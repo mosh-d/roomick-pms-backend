@@ -46,7 +46,7 @@ export class FoliosService {
    * check-out, so a reservation checked in before this module existed still
    * resolves a folio (empty → balance 0) instead of 404-ing.
    */
-  async ensurePrimaryFolio(tx: TenantTx, reservation: Reservation, actorId: string): Promise<Folio> {
+  async ensurePrimaryFolio(tx: TenantTx, reservation: Reservation, actorId: string | null): Promise<Folio> {
     const existing = await tx.folio.findFirst({
       where: { reservationId: reservation.id, label: null, deletedAt: null },
     });
@@ -94,7 +94,7 @@ export class FoliosService {
     folio: Folio,
     serviceDate: Date,
     label: string,
-    actorId: string,
+    actorId: string | null,
   ): Promise<LineItem | null> {
     const already = await tx.lineItem.findFirst({
       where: { folioId: folio.id, chargeType: 'room', serviceDate, isVoid: false, deletedAt: null },
@@ -147,7 +147,7 @@ export class FoliosService {
     chargeType: ChargeType,
     amount: Prisma.Decimal,
     description: string,
-    actorId: string,
+    actorId: string | null,
   ): Promise<LineItem | null> {
     return this.writeChargeWithTaxes(tx, {
       tenantId: reservation.tenantId,
@@ -159,6 +159,19 @@ export class FoliosService {
       serviceDate: reservation.checkInDate,
       actorId,
     });
+  }
+
+  /** The tax `writeChargeWithTaxes` would add to a charge — for quoting one (a cancellation charge) before it's posted. Same rules, same rounding, nothing written. */
+  async previewTaxTotal(tx: TenantTx, branchId: string, chargeType: ChargeType, amount: Prisma.Decimal): Promise<Prisma.Decimal> {
+    const taxes = await this.taxesService.computeTaxesForCharge(tx, branchId, chargeType, amount);
+    return taxes.reduce((sum, t) => sum.plus(t.taxAmount), ZERO);
+  }
+
+  /** Payments recorded on a reservation's primary folio; zero when it has none yet. Read-only — never creates a folio. */
+  async paidOnPrimaryFolio(tx: TenantTx, reservationId: string): Promise<Prisma.Decimal> {
+    const folio = await tx.folio.findFirst({ where: { reservationId, label: null, deletedAt: null }, select: { id: true } });
+    if (!folio) return ZERO;
+    return (await this.computeTotals(tx, folio.id)).paymentsTotal;
   }
 
   /**
@@ -530,7 +543,7 @@ export class FoliosService {
   }
 
   /** Settles a folio if it is fully paid, WITHOUT throwing when it isn't — the check-out path (which must never block). Returns whether it settled. */
-  async settleIfFullyPaid(tx: TenantTx, folio: Folio, actorId: string, via: string): Promise<boolean> {
+  async settleIfFullyPaid(tx: TenantTx, folio: Folio, actorId: string | null, via: string): Promise<boolean> {
     const totals = await this.computeTotals(tx, folio.id);
     if (totals.balanceDue.greaterThan(0)) return false;
     await tx.folio.update({ where: { id: folio.id }, data: { status: 'settled', closedAt: new Date() } });
@@ -713,7 +726,8 @@ export class FoliosService {
       amount: Prisma.Decimal;
       chargeType: ChargeType;
       serviceDate: Date;
-      actorId: string;
+      /** `null` = system-posted (the scheduled night audit) or a guest acting for themselves — `postedBy`'s own convention. */
+      actorId: string | null;
     },
   ): Promise<LineItem | null> {
     if (input.amount.isZero()) return null;
@@ -792,10 +806,11 @@ export class FoliosService {
    * in-house relationship left at all. Missed originally (found live: a
    * real no-show penalty left `guestStatus: null` despite a positive
    * balance, invisible to anyone scanning the folio list for what's owed).
+   * The same holds for an unpaid cancellation charge.
    */
   private deriveGuestStatus(reservationStatus: string | null, balanceDue: Prisma.Decimal): FolioGuestStatus {
     if (!balanceDue.greaterThan(0)) return null;
-    if (reservationStatus === 'checked_out' || reservationStatus === 'no_show') return 'city_ledger';
+    if (reservationStatus === 'checked_out' || reservationStatus === 'no_show' || reservationStatus === 'cancelled') return 'city_ledger';
     if (reservationStatus === 'checked_in') return 'in_house';
     return null;
   }
@@ -821,7 +836,7 @@ export class FoliosService {
     tx: TenantTx,
     tenantId: string,
     branchId: string,
-    userId: string,
+    userId: string | null,
     action: string,
     entityId: string,
     after?: Prisma.InputJsonValue,

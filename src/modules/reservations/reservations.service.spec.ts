@@ -89,6 +89,8 @@ describe('ReservationsService', () => {
     backfillRoomCharges: jest.Mock;
     settleIfFullyPaid: jest.Mock;
     postAdHocCharge: jest.Mock;
+    previewTaxTotal: jest.Mock;
+    paidOnPrimaryFolio: jest.Mock;
   };
   let housekeepingService: { createTaskInTx: jest.Mock };
   let rateResolverService: { resolveStay: jest.Mock; linkAuditLogsToReservation: jest.Mock };
@@ -98,7 +100,17 @@ describe('ReservationsService', () => {
 
   beforeEach(async () => {
     tx = makeTx();
-    propertyService = { assertBranch: jest.fn().mockResolvedValue({ id: BRANCH_ID, timezone: 'Africa/Lagos', noShowPolicy: null, regCardTemplate: null }) };
+    propertyService = {
+      assertBranch: jest.fn().mockResolvedValue({
+        id: BRANCH_ID,
+        timezone: 'Africa/Lagos',
+        currency: 'NGN',
+        checkInTime: new Date('1970-01-01T14:00:00.000Z'),
+        noShowPolicy: null,
+        cancellationPolicy: null,
+        regCardTemplate: null,
+      }),
+    };
     roomsService = { applyReservationOccupancy: jest.fn().mockResolvedValue({}) };
     guestsService = {
       findOrCreateGuestInTx: jest.fn().mockResolvedValue({ id: GUEST_ID, name: 'John Doe' }),
@@ -110,6 +122,8 @@ describe('ReservationsService', () => {
       backfillRoomCharges: jest.fn().mockResolvedValue(0),
       settleIfFullyPaid: jest.fn().mockResolvedValue(true),
       postAdHocCharge: jest.fn().mockResolvedValue({ id: 'li-penalty' }),
+      previewTaxTotal: jest.fn().mockResolvedValue(new Prisma.Decimal(0)),
+      paidOnPrimaryFolio: jest.fn().mockResolvedValue(new Prisma.Decimal(0)),
     };
     housekeepingService = { createTaskInTx: jest.fn().mockResolvedValue({ id: 'task-1' }) };
     // Mirrors the OLD flat baseRate × nights math the resolver replaced —
@@ -494,6 +508,17 @@ describe('ReservationsService', () => {
       expect(tx.reservation.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ channel: 'direct' }) }));
     });
 
+    it('writes down the cancellation terms in force at booking — the resolved default when the branch has none', async () => {
+      await service.createReservation(TENANT_ID, BRANCH_ID, dto, ACTOR_ID);
+      expect(tx.reservation.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            cancellationPolicy: { freeCancellationHours: 24, lateCancellationPenalty: 'first_night', flatFeeAmount: null, allowOnlineCancellation: true },
+          }),
+        }),
+      );
+    });
+
     it('joinWaitlist SKIPS the availability check and creates as waitlisted', async () => {
       tx.room.count.mockResolvedValue(0); // zero availability — would reject a normal booking
       await service.createReservation(TENANT_ID, BRANCH_ID, { ...dto, joinWaitlist: true }, ACTOR_ID);
@@ -713,29 +738,172 @@ describe('ReservationsService', () => {
   });
 
   describe('cancel', () => {
+    // Far enough ahead that the real clock is always inside the free window.
+    const farAhead = (overrides: Partial<Record<string, unknown>> = {}) =>
+      reservation({
+        status: 'confirmed',
+        checkInDate: new Date('2030-06-01T00:00:00.000Z'),
+        checkOutDate: new Date('2030-06-04T00:00:00.000Z'),
+        confirmedRate: new Prisma.Decimal('90000'),
+        overrideRate: null,
+        ...overrides,
+      });
+
     it('allowed from confirmed', async () => {
-      tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'confirmed' }));
+      tx.reservation.findFirst.mockResolvedValue(farAhead());
       await service.cancel(TENANT_ID, RESERVATION_ID, {}, ACTOR_ID);
       expect(tx.reservation.update).toHaveBeenCalledWith(expect.objectContaining({ data: { status: 'cancelled' } }));
     });
 
     it('rejected from checked_in', async () => {
-      tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'checked_in' }));
+      tx.reservation.findFirst.mockResolvedValue(farAhead({ status: 'checked_in' }));
       await expect(service.cancel(TENANT_ID, RESERVATION_ID, {}, ACTOR_ID)).rejects.toThrow(ConflictException);
     });
 
     it('rejected when already cancelled', async () => {
-      tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'cancelled' }));
+      tx.reservation.findFirst.mockResolvedValue(farAhead({ status: 'cancelled' }));
       await expect(service.cancel(TENANT_ID, RESERVATION_ID, {}, ACTOR_ID)).rejects.toThrow(ConflictException);
     });
 
-    it('logs a cancellation comms row, including the reason when given', async () => {
-      tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'confirmed' }));
+    it('logs a cancellation comms row, including the reason and that nothing was charged', async () => {
+      tx.reservation.findFirst.mockResolvedValue(farAhead());
       await service.cancel(TENANT_ID, RESERVATION_ID, { reason: 'Guest changed plans' }, ACTOR_ID);
       expect(commsLogService.logAutomatedInTx).toHaveBeenCalledWith(
         tx, TENANT_ID, BRANCH_ID,
-        expect.objectContaining({ guestId: GUEST_ID, trigger: 'cancellation', body: expect.stringContaining('Guest changed plans') }),
+        expect.objectContaining({
+          guestId: GUEST_ID,
+          trigger: 'cancellation',
+          body: expect.stringMatching(/Guest changed plans.*No cancellation charge applies/),
+        }),
       );
+    });
+
+    it('inside the free window nothing is charged and no folio is opened', async () => {
+      tx.reservation.findFirst.mockResolvedValue(farAhead());
+      await service.cancel(TENANT_ID, RESERVATION_ID, {}, ACTOR_ID);
+      expect(foliosService.ensurePrimaryFolio).not.toHaveBeenCalled();
+      expect(foliosService.postAdHocCharge).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('cancellation policy — quote and cancelInTx', () => {
+    // Lagos (UTC+1) with a 14:00 check-in: 13:00Z on the arrival day. The
+    // default policy is free until 24 hours before that.
+    const stay = (overrides: Partial<Record<string, unknown>> = {}) =>
+      reservation({
+        status: 'confirmed',
+        checkInDate: new Date('2026-10-10T00:00:00.000Z'),
+        checkOutDate: new Date('2026-10-13T00:00:00.000Z'),
+        confirmedRate: new Prisma.Decimal('90000'),
+        overrideRate: null,
+        ...overrides,
+      });
+    const IN_FREE_WINDOW = new Date('2026-10-09T12:59:00.000Z');
+    const IN_LATE_WINDOW = new Date('2026-10-09T13:00:00.000Z');
+    const lastAudit = () => (tx.auditLog.create.mock.calls[tx.auditLog.create.mock.calls.length - 1][0] as { data: { userId: unknown; after: Record<string, unknown> } }).data;
+
+    beforeEach(() => {
+      tx.reservation.findFirst.mockResolvedValue(stay());
+      // 7.5% VAT on the charge, the way the branch's tax rules would compute it.
+      foliosService.previewTaxTotal.mockImplementation((_tx: unknown, _branchId: string, _type: string, amount: Prisma.Decimal) =>
+        Promise.resolve(amount.mul('0.075').toDecimalPlaces(2)),
+      );
+    });
+
+    it('quotes a free cancellation up to 24 hours before check-in time, and says so in one sentence', async () => {
+      const quote = await service.quoteCancellationInTx(tx as never, RESERVATION_ID, IN_FREE_WINDOW);
+      expect(quote).toMatchObject({ withinFreeWindow: true, penaltyTotal: '0.00', cancellable: true, currency: 'NGN' });
+      expect(quote.freeCancellationUntil.toISOString()).toBe('2026-10-09T13:00:00.000Z');
+      expect(quote.policy.summary).toBe('Free cancellation until 24 hours before check-in (14:00 on your arrival day). After that, the first night is charged.');
+    });
+
+    it('from that moment on, quotes the first night plus its tax', async () => {
+      const quote = await service.quoteCancellationInTx(tx as never, RESERVATION_ID, IN_LATE_WINDOW);
+      expect(quote).toMatchObject({
+        withinFreeWindow: false,
+        penaltyType: 'first_night',
+        penaltyAmount: '30000.00',
+        penaltyTax: '2250.00',
+        penaltyTotal: '32250.00',
+        amountOwed: '32250.00',
+        refundDue: '0.00',
+      });
+    });
+
+    it('a late cancellation posts the charge as an ordinary penalty line on the primary folio', async () => {
+      await service.cancelInTx(tx as never, TENANT_ID, RESERVATION_ID, { actorId: ACTOR_ID, source: 'staff', now: IN_LATE_WINDOW });
+      const call = foliosService.postAdHocCharge.mock.calls[0] as unknown[];
+      expect(call[3]).toBe('penalty');
+      expect((call[4] as Prisma.Decimal).toFixed(2)).toBe('30000.00');
+      expect(call[5]).toBe('Cancellation Charge (first night)');
+      expect(call[6]).toBe(ACTOR_ID);
+      expect(tx.reservation.update).toHaveBeenCalledWith(expect.objectContaining({ data: { status: 'cancelled' } }));
+      expect(lastAudit().after).toMatchObject({ source: 'staff', withinFreeWindow: false, charged: '32250.00', waived: false });
+    });
+
+    it('refuses to charge an amount the person cancelling was not shown — and changes nothing', async () => {
+      const error = await service
+        .cancelInTx(tx as never, TENANT_ID, RESERVATION_ID, { actorId: ACTOR_ID, source: 'staff', acknowledgedPenaltyTotal: '0.00', now: IN_LATE_WINDOW })
+        .catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ConflictException);
+      expect((error as ConflictException).getResponse()).toMatchObject({ code: 'CANCELLATION_TERMS_CHANGED' });
+      expect(tx.reservation.update).not.toHaveBeenCalled();
+      expect(foliosService.postAdHocCharge).not.toHaveBeenCalled();
+    });
+
+    it('goes ahead when the acknowledged charge matches', async () => {
+      await service.cancelInTx(tx as never, TENANT_ID, RESERVATION_ID, { actorId: ACTOR_ID, source: 'staff', acknowledgedPenaltyTotal: '32250.00', now: IN_LATE_WINDOW });
+      expect(foliosService.postAdHocCharge).toHaveBeenCalled();
+    });
+
+    it("a manager's waiver cancels without charging, and audits the waiver with its reason", async () => {
+      await service.cancelInTx(tx as never, TENANT_ID, RESERVATION_ID, { actorId: ACTOR_ID, source: 'staff', waiverReason: 'Flight cancelled', now: IN_LATE_WINDOW });
+      expect(foliosService.postAdHocCharge).not.toHaveBeenCalled();
+      expect(lastAudit().after).toMatchObject({ waived: true, waiverReason: 'Flight cancelled', charged: '0.00', penaltyTotal: '32250.00' });
+    });
+
+    it('a waitlisted booking is always free to cancel', async () => {
+      tx.reservation.findFirst.mockResolvedValue(stay({ status: 'waitlisted' }));
+      const { charged } = await service.cancelInTx(tx as never, TENANT_ID, RESERVATION_ID, { actorId: ACTOR_ID, source: 'staff', now: IN_LATE_WINDOW });
+      expect(charged.toFixed(2)).toBe('0.00');
+      expect(foliosService.postAdHocCharge).not.toHaveBeenCalled();
+    });
+
+    it("applies the branch's own policy — a 48-hour window and a flat fee", async () => {
+      propertyService.assertBranch.mockResolvedValue({
+        id: BRANCH_ID, timezone: 'Africa/Lagos', currency: 'NGN', checkInTime: new Date('1970-01-01T14:00:00.000Z'),
+        cancellationPolicy: { freeCancellationHours: 48, lateCancellationPenalty: 'flat_fee', flatFeeAmount: 5000, allowOnlineCancellation: true },
+      });
+      const quote = await service.quoteCancellationInTx(tx as never, RESERVATION_ID, new Date('2026-10-08T13:00:00.000Z'));
+      expect(quote.freeCancellationUntil.toISOString()).toBe('2026-10-08T13:00:00.000Z');
+      expect(quote).toMatchObject({ penaltyType: 'flat_fee', penaltyAmount: '5000.00', penaltyTotal: '5375.00' });
+    });
+
+    it('counts anything already paid: a deposit larger than the charge leaves a refund due', async () => {
+      foliosService.paidOnPrimaryFolio.mockResolvedValue(new Prisma.Decimal('50000'));
+      const quote = await service.quoteCancellationInTx(tx as never, RESERVATION_ID, IN_LATE_WINDOW);
+      expect(quote).toMatchObject({ paidSoFar: '50000.00', refundDue: '17750.00', amountOwed: '0.00' });
+    });
+
+    it('a guest cancelling is recorded with a NULL actor — never an empty string or "system"', async () => {
+      await service.cancelInTx(tx as never, TENANT_ID, RESERVATION_ID, { actorId: null, source: 'guest', now: IN_LATE_WINDOW });
+      expect(foliosService.ensurePrimaryFolio).toHaveBeenCalledWith(tx, expect.anything(), null);
+      expect(lastAudit()).toMatchObject({ userId: null, after: expect.objectContaining({ source: 'guest' }) });
+    });
+
+    it('reports when check-in time on the arrival day has passed', async () => {
+      const quote = await service.quoteCancellationInTx(tx as never, RESERVATION_ID, new Date('2026-10-10T13:00:00.000Z'));
+      expect(quote.pastCheckInTime).toBe(true);
+    });
+
+    it("uses the terms the booking was made under, not the branch's current policy", async () => {
+      // Booked under a strict 30-day window; the branch has since gone back to the default (NULL).
+      tx.reservation.findFirst.mockResolvedValue(
+        stay({ cancellationPolicy: { freeCancellationHours: 720, lateCancellationPenalty: 'first_night', flatFeeAmount: null, allowOnlineCancellation: true } }),
+      );
+      const quote = await service.quoteCancellationInTx(tx as never, RESERVATION_ID, IN_FREE_WINDOW);
+      expect(quote.policy.freeCancellationHours).toBe(720);
+      expect(quote).toMatchObject({ withinFreeWindow: false, penaltyTotal: '32250.00' });
     });
   });
 
@@ -796,6 +964,15 @@ describe('ReservationsService', () => {
           tx, TENANT_ID, BRANCH_ID,
           expect.objectContaining({ guestId: GUEST_ID, trigger: 'no_show_notice', body: expect.stringContaining('penalty') }),
         );
+      });
+
+      it('the scheduled sweep (markedBy NULL) writes NULL actors — never "" or "system", which the UUID columns reject', async () => {
+        const online = reservation({ status: 'confirmed', confirmedRate: new Prisma.Decimal('300'), overrideRate: null, createdBy: null });
+        await service.markNoShowInTx(tx as never, TENANT_ID, online as never, 'first_night', undefined, null);
+        expect(foliosService.ensurePrimaryFolio).toHaveBeenCalledWith(tx, expect.anything(), null);
+        expect((foliosService.postAdHocCharge.mock.calls[0] as unknown[])[6]).toBeNull();
+        expect(foliosService.settleIfFullyPaid).toHaveBeenCalledWith(tx, expect.anything(), null, 'noShow');
+        expect((tx.auditLog.create.mock.calls[0][0] as { data: { userId: unknown } }).data.userId).toBeNull();
       });
     });
 

@@ -1,0 +1,15 @@
+-- The cancellation terms a booking was made under, captured at booking time.
+--
+-- Without this, a cancellation read the branch's CURRENT policy, so an owner
+-- tightening the policy would retroactively change the terms of every booking
+-- already taken — a guest who booked under "free until 24 hours before" could
+-- find themselves charged under "non-refundable". The standard rule, and the
+-- fair one, is that the terms in force when the guest booked are the ones that
+-- apply.
+--
+-- Written by ReservationsService.createReservation as the RESOLVED policy (the
+-- standard default if the branch had none saved). NULL on reservations made
+-- before this column existed; those fall back to the branch's current policy.
+--
+-- No RLS statements: `reservations` already has its tenant policy.
+ALTER TABLE "reservations" ADD COLUMN "cancellationPolicy" JSONB;

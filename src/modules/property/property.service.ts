@@ -10,6 +10,7 @@ import { PrismaService, TenantTx } from '../../prisma/prisma.service';
 import { CreateBrandDto, UpdateBrandDto } from './dto/brand.dto';
 import {
   CreateBranchDto,
+  CancellationPolicyDto,
   NoShowPolicyDto,
   RegCardTemplateDto,
   UpdateBranchDto,
@@ -219,6 +220,26 @@ export class PropertyService {
         data: { noShowPolicy: dto as unknown as Prisma.InputJsonValue },
       });
       await this.audit(tx, tenantId, actorId, 'branch.no_show_policy_updated', 'branch', branchId, dto as Prisma.InputJsonValue);
+      return updated;
+    });
+  }
+
+  /** `Branch.cancellationPolicy` stays NULL until an owner saves one; NULL means the standard default (reservations/policies.ts). */
+  async setCancellationPolicy(
+    tenantId: string,
+    branchId: string,
+    dto: CancellationPolicyDto,
+    actorId: string,
+  ): Promise<Branch> {
+    // A fee amount only means something for a flat-fee policy — don't keep a stale one around.
+    const policy = { ...dto, flatFeeAmount: dto.lateCancellationPenalty === 'flat_fee' ? (dto.flatFeeAmount ?? null) : null };
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      await this.assertBranch(tx, branchId);
+      const updated = await tx.branch.update({
+        where: { id: branchId },
+        data: { cancellationPolicy: policy },
+      });
+      await this.audit(tx, tenantId, actorId, 'branch.cancellation_policy_updated', 'branch', branchId, policy);
       return updated;
     });
   }

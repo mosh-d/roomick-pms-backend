@@ -1,4 +1,5 @@
 import { Test } from '@nestjs/testing';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { FoliosService } from '../folios/folios.service';
 import { RateResolverService } from '../rate-resolver/rate-resolver.service';
@@ -21,7 +22,13 @@ describe('PublicBookingService', () => {
     bookingSlugIndex: { findUnique: jest.Mock; create: jest.Mock; deleteMany: jest.Mock };
     tenant: { findUnique: jest.Mock };
   };
-  let reservationsService: { createReservation: jest.Mock; getAvailability: jest.Mock; getAvailabilityForRange: jest.Mock };
+  let reservationsService: {
+    createReservation: jest.Mock;
+    getAvailability: jest.Mock;
+    getAvailabilityForRange: jest.Mock;
+    quoteCancellationInTx: jest.Mock;
+    cancelInTx: jest.Mock;
+  };
   let rateResolverService: { calculateQuote: jest.Mock };
   let foliosService: { getFolio: jest.Mock };
   let tx: {
@@ -37,7 +44,9 @@ describe('PublicBookingService', () => {
     tx = {
       branch: {
         findFirst: jest.fn().mockResolvedValue({ id: BRANCH_ID }),
-        findFirstOrThrow: jest.fn().mockResolvedValue({ currency: 'NGN' }),
+        findFirstOrThrow: jest.fn().mockResolvedValue({
+          currency: 'NGN', timezone: 'Africa/Lagos', checkInTime: new Date('1970-01-01T14:00:00.000Z'), cancellationPolicy: null,
+        }),
         update: jest.fn().mockResolvedValue({}),
       },
       roomType: { findMany: jest.fn().mockResolvedValue([]), findFirst: jest.fn().mockResolvedValue({ id: ROOM_TYPE_ID, name: 'Standard' }) },
@@ -59,13 +68,15 @@ describe('PublicBookingService', () => {
       createReservation: jest.fn().mockResolvedValue({ id: 'res-1' }),
       getAvailability: jest.fn().mockResolvedValue([]),
       getAvailabilityForRange: jest.fn().mockResolvedValue([]),
+      quoteCancellationInTx: jest.fn(),
+      cancelInTx: jest.fn(),
     };
     rateResolverService = {
       calculateQuote: jest.fn().mockResolvedValue({
-        nightlyRate: { toFixed: () => '30000.00' },
-        subtotal: { toFixed: () => '90000.00' },
-        taxTotal: { toFixed: () => '6750.00' },
-        totalWithTax: { toFixed: () => '96750.00' },
+        nightlyRate: new Prisma.Decimal('30000'),
+        subtotal: new Prisma.Decimal('90000'),
+        taxTotal: new Prisma.Decimal('6750'),
+        totalWithTax: new Prisma.Decimal('96750'),
       }),
     };
 
@@ -139,9 +150,25 @@ describe('PublicBookingService', () => {
         address: { city: 'Lagos' }, brand: { name: 'Grand Group' },
       });
       const result = await service.getProperty(SLUG);
-      expect(Object.keys(result).sort()).toEqual(['address', 'brandName', 'category', 'checkInTime', 'checkOutTime', 'currency', 'name', 'slug', 'timezone']);
+      expect(Object.keys(result).sort()).toEqual([
+        'address', 'brandName', 'cancellationPolicy', 'category', 'checkInTime', 'checkOutTime', 'currency', 'name', 'slug', 'timezone',
+      ]);
       expect(result.checkInTime).toBe('14:00');
       expect(result.checkOutTime).toBe('11:00');
+    });
+
+    it('states the cancellation policy for guests to read before booking — the default when none is saved', async () => {
+      tx.branch.findFirstOrThrow.mockResolvedValue({
+        name: 'Grand Hotel', category: 'hotel', currency: 'NGN', timezone: 'Africa/Lagos',
+        checkInTime: new Date('1970-01-01T14:00:00.000Z'), checkOutTime: new Date('1970-01-01T11:00:00.000Z'),
+        address: {}, cancellationPolicy: null, brand: { name: 'Grand Group' },
+      });
+      const result = await service.getProperty(SLUG);
+      expect(result.cancellationPolicy).toEqual({
+        summary: 'Free cancellation until 24 hours before check-in (14:00 on your arrival day). After that, the first night is charged.',
+        freeCancellationHours: 24,
+        allowOnlineCancellation: true,
+      });
     });
   });
 
@@ -159,6 +186,17 @@ describe('PublicBookingService', () => {
     it('passes a promo code through to the resolver', async () => {
       await service.getQuote(SLUG, { roomTypeId: ROOM_TYPE_ID, checkInDate: '2026-10-01', checkOutDate: '2026-10-04', promoCode: 'SAVE10' });
       expect(rateResolverService.calculateQuote).toHaveBeenCalledWith(TENANT_ID, BRANCH_ID, expect.objectContaining({ promoCode: 'SAVE10' }), null, expect.anything());
+    });
+
+    it('states the cancellation terms the stay would book under', async () => {
+      const quote = await service.getQuote(SLUG, { roomTypeId: ROOM_TYPE_ID, checkInDate: futureDate(30), checkOutDate: futureDate(33) });
+      expect(quote.cancellation.freeCancellationAvailable).toBe(true);
+      expect(quote.cancellation.summary).toContain('Free cancellation until 24 hours before check-in');
+    });
+
+    it('warns when the stay starts so soon that the free window has already closed', async () => {
+      const quote = await service.getQuote(SLUG, { roomTypeId: ROOM_TYPE_ID, checkInDate: futureDate(0), checkOutDate: futureDate(2) });
+      expect(quote.cancellation.freeCancellationAvailable).toBe(false);
     });
   });
 
@@ -296,7 +334,7 @@ describe('PublicBookingService', () => {
       // entitled to see it. Everything here is either the guest's own data or
       // the property's own public information.
       expect(Object.keys(result).sort()).toEqual([
-        'adults', 'checkInDate', 'checkOutDate', 'children', 'confirmationNumber', 'currency',
+        'adults', 'cancellationPolicySummary', 'checkInDate', 'checkOutDate', 'children', 'confirmationNumber', 'currency',
         'estimatedArrivalTime', 'guestEmail', 'guestName', 'guestNationality', 'guestPhone',
         'houseRules', 'preArrivalCompletedAt', 'property', 'roomTypeName', 'specialRequests',
         'status', 'totalRate',
@@ -404,6 +442,107 @@ describe('PublicBookingService', () => {
       expect(result.confirmationNumber).toBe('RES-2026-00001');
       expect(result.houseRules).toBe('No smoking.');
       expect(result.preArrivalCompletedAt).toBeInstanceOf(Date);
+    });
+  });
+
+  describe('guest cancellation', () => {
+    const creds = { confirmationNumber: 'RES-2026-00001', email: 'ada@example.com' };
+    const quote = (overrides: Record<string, unknown> = {}) => ({
+      reservationId: 'res-1',
+      status: 'confirmed',
+      cancellable: true,
+      currency: 'NGN',
+      policy: {
+        freeCancellationHours: 24, lateCancellationPenalty: 'first_night', flatFeeAmount: null, allowOnlineCancellation: true,
+        summary: 'Free cancellation until 24 hours before check-in (14:00 on your arrival day). After that, the first night is charged.',
+      },
+      checkInAt: new Date('2026-10-10T13:00:00.000Z'),
+      freeCancellationUntil: new Date('2026-10-09T13:00:00.000Z'),
+      withinFreeWindow: false,
+      pastCheckInTime: false,
+      penaltyType: 'first_night',
+      penaltyAmount: '30000.00',
+      penaltyTax: '2250.00',
+      penaltyTotal: '32250.00',
+      paidSoFar: '0.00',
+      refundDue: '0.00',
+      amountOwed: '32250.00',
+      ...overrides,
+    });
+
+    beforeEach(() => {
+      tx.branch.findFirstOrThrow.mockResolvedValue({
+        name: 'Grand Hotel', category: 'hotel', currency: 'NGN', timezone: 'Africa/Lagos',
+        checkInTime: new Date('1970-01-01T14:00:00.000Z'), checkOutTime: new Date('1970-01-01T11:00:00.000Z'),
+        address: {}, cancellationPolicy: null, brand: { name: 'Grand Group' },
+      });
+      // First read: the credential check. Any later read is lookupBooking's re-read of the cancelled booking.
+      tx.reservation.findFirst
+        .mockResolvedValueOnce({ id: 'res-1', confirmationNumber: 'RES-2026-00001', status: 'confirmed' })
+        .mockResolvedValue({
+          confirmationNumber: 'RES-2026-00001', status: 'cancelled',
+          checkInDate: new Date('2026-10-10T00:00:00.000Z'), checkOutDate: new Date('2026-10-13T00:00:00.000Z'),
+          adults: 2, children: 0, specialRequests: null,
+          confirmedRate: { toFixed: () => '90000.00' }, overrideRate: null,
+          preArrivalCompletedAt: null, estimatedArrivalTime: null,
+          roomType: { name: 'Standard' },
+          guest: { name: 'Ada Okafor', email: 'ada@example.com', phone: null, nationality: null },
+          branch: { currency: 'NGN', regCardTemplate: null },
+        });
+      reservationsService.quoteCancellationInTx.mockResolvedValue(quote());
+      reservationsService.cancelInTx.mockResolvedValue({ charged: { toFixed: () => '32250.00' } });
+    });
+
+    it('quotes behind the same credential check as the lookup, and exposes no ids', async () => {
+      const result = await service.getCancellationQuote(SLUG, creds);
+      const where = (tx.reservation.findFirst.mock.calls[0][0] as { where: { guest: unknown } }).where;
+      expect(where.guest).toEqual({ email: { equals: 'ada@example.com', mode: 'insensitive' } });
+      expect(result).toMatchObject({ canCancelOnline: true, blockedReason: null, charge: { amount: '30000.00', tax: '2250.00', total: '32250.00' } });
+      expect(JSON.stringify(result)).not.toContain('res-1');
+    });
+
+    it('404s with the generic booking message when credentials do not match', async () => {
+      tx.reservation.findFirst.mockReset();
+      tx.reservation.findFirst.mockResolvedValue(null);
+      await expect(service.getCancellationQuote(SLUG, creds)).rejects.toMatchObject({ status: 404 });
+      await expect(service.cancelBooking(SLUG, { ...creds, acknowledgedPenaltyTotal: '0.00' })).rejects.toMatchObject({ status: 404 });
+    });
+
+    it('refuses a booking that has already started, ended or been cancelled', async () => {
+      for (const status of ['checked_in', 'checked_out', 'cancelled', 'no_show']) {
+        tx.reservation.findFirst.mockReset();
+        tx.reservation.findFirst.mockResolvedValue({ id: 'res-1', confirmationNumber: 'RES-2026-00001', status });
+        await expect(service.getCancellationQuote(SLUG, creds)).rejects.toMatchObject({ status: 409 });
+      }
+      expect(reservationsService.quoteCancellationInTx).not.toHaveBeenCalled();
+    });
+
+    it("says so when the property doesn't take online cancellations — and refuses the cancel", async () => {
+      reservationsService.quoteCancellationInTx.mockResolvedValue(quote({ policy: { ...quote().policy, allowOnlineCancellation: false } }));
+      const result = await service.getCancellationQuote(SLUG, creds);
+      expect(result.canCancelOnline).toBe(false);
+      expect(result.blockedReason).toContain("doesn't take cancellations online");
+      tx.reservation.findFirst.mockResolvedValueOnce({ id: 'res-1', status: 'confirmed' });
+      await expect(service.cancelBooking(SLUG, { ...creds, acknowledgedPenaltyTotal: '32250.00' })).rejects.toMatchObject({ status: 409 });
+      expect(reservationsService.cancelInTx).not.toHaveBeenCalled();
+    });
+
+    it('stops online cancellation once check-in time on the arrival day has passed', async () => {
+      reservationsService.quoteCancellationInTx.mockResolvedValue(quote({ pastCheckInTime: true }));
+      const result = await service.getCancellationQuote(SLUG, creds);
+      expect(result.blockedReason).toContain('past check-in time');
+    });
+
+    it('cancels through the shared staff path — NULL actor, guest source, the acknowledged charge passed through', async () => {
+      const result = await service.cancelBooking(SLUG, { ...creds, acknowledgedPenaltyTotal: '32250.00', reason: '  Plans changed ' });
+      expect(reservationsService.cancelInTx).toHaveBeenCalledWith(
+        tx,
+        TENANT_ID,
+        'res-1',
+        expect.objectContaining({ actorId: null, source: 'guest', acknowledgedPenaltyTotal: '32250.00', reason: 'Plans changed' }),
+      );
+      expect(result).toMatchObject({ charged: '32250.00', currency: 'NGN' });
+      expect(result.booking).toMatchObject({ confirmationNumber: 'RES-2026-00001', status: 'cancelled' });
     });
   });
 
