@@ -367,6 +367,8 @@ model Tenant {
   availabilityRestrictions AvailabilityRestriction[]
   menuItems                MenuItem[]
   posOrders                PosOrder[]
+  competitors              Competitor[]
+  competitorRates          CompetitorRate[]
 
   @@index([isDemo, demoExpiresAt])
   @@map("tenants")
@@ -629,6 +631,7 @@ model Branch {
   availabilityRestrictions AvailabilityRestriction[]
   menuItems                MenuItem[]
   posOrders                PosOrder[]
+  competitors              Competitor[]
 
   @@index([tenantId, brandId])
   @@index([tenantId, deletedAt])
@@ -693,6 +696,7 @@ model RoomType {
   overbookingConfig        OverbookingConfig[]
   groupBlocks              GroupBlock[]
   availabilityRestrictions AvailabilityRestriction[]
+  competitorRates          CompetitorRate[]
 
   @@index([branchId, deletedAt])
   @@map("room_types")
@@ -881,17 +885,26 @@ model Webhook {
  * that could drift from reality.
  */
 model GroupBlock {
-  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  tenantId   String   @db.Uuid
-  branchId   String   @db.Uuid
-  roomTypeId String   @db.Uuid
-  name       String   @db.VarChar(200)
-  blockSize  Int
-  blockRate  Decimal  @db.Decimal(12, 2)
-  cutoffDate DateTime @db.Date
-  status     String   @default("active") @db.VarChar(20) // active | released | cancelled
-  createdAt  DateTime @default(now()) @db.Timestamptz(6)
-  createdBy  String?  @db.Uuid
+  id            String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId      String    @db.Uuid
+  branchId      String    @db.Uuid
+  roomTypeId    String    @db.Uuid
+  name          String    @db.VarChar(200)
+  blockSize     Int
+  blockRate     Decimal   @db.Decimal(12, 2)
+  cutoffDate    DateTime  @db.Date
+  status        String    @default("active") @db.VarChar(20) // active | released | cancelled
+  createdAt     DateTime  @default(now()) @db.Timestamptz(6)
+  createdBy     String?   @db.Uuid
+  // The group's stay. While the cut-off hasn't passed, every night in
+  // [arrivalDate, departureDate) holds `blockSize` minus the block's own
+  // bookings out of general availability; past the cut-off the hold lapses
+  // on its own. NULL on blocks made before holds existed — those hold nothing.
+  arrivalDate   DateTime? @db.Date
+  departureDate DateTime? @db.Date
+  contactName   String?   @db.VarChar(200)
+  contactEmail  String?   @db.VarChar(320)
+  contactPhone  String?   @db.VarChar(30)
 
   tenant       Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   branch       Branch        @relation(fields: [branchId], references: [id], onDelete: Cascade)
@@ -899,6 +912,7 @@ model GroupBlock {
   reservations Reservation[]
 
   @@index([tenantId, branchId])
+  @@index([branchId, roomTypeId, status])
   @@map("group_blocks")
 }
 
@@ -937,13 +951,16 @@ model AvailabilityRestriction {
  * Sales & Events' own "Event Space Calendar" card — a bookable, non-guestroom venue. Deliberately its own model, not a `Room`: a ballroom has no occupancy/cleanliness status and is booked by time range, not by night.
  */
 model EventSpace {
-  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  tenantId  String   @db.Uuid
-  branchId  String   @db.Uuid
-  name      String   @db.VarChar(200)
-  category  String   @db.VarChar(20) // meeting_room | ballroom | outdoor
-  capacity  Int
-  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId        String   @db.Uuid
+  branchId        String   @db.Uuid
+  name            String   @db.VarChar(200)
+  category        String   @db.VarChar(20) // meeting_room | ballroom | outdoor
+  capacity        Int
+  // Seats per layout — { theater?, classroom?, banquet?, u_shape? }. A layout
+  // left out falls back to `capacity`.
+  setupCapacities Json?
+  createdAt       DateTime @default(now()) @db.Timestamptz(6)
 
   tenant   Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   branch   Branch         @relation(fields: [branchId], references: [id], onDelete: Cascade)
@@ -954,22 +971,72 @@ model EventSpace {
 }
 
 model EventBooking {
-  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  tenantId     String   @db.Uuid
-  eventSpaceId String   @db.Uuid
-  title        String   @db.VarChar(200)
-  startsAt     DateTime @db.Timestamptz(6)
-  endsAt       DateTime @db.Timestamptz(6)
-  contactName  String?  @db.VarChar(200)
-  notes        String?
-  createdAt    DateTime @default(now()) @db.Timestamptz(6)
-  createdBy    String?  @db.Uuid
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId       String   @db.Uuid
+  eventSpaceId   String   @db.Uuid
+  title          String   @db.VarChar(200)
+  startsAt       DateTime @db.Timestamptz(6)
+  endsAt         DateTime @db.Timestamptz(6)
+  contactName    String?  @db.VarChar(200)
+  notes          String?
+  createdAt      DateTime @default(now()) @db.Timestamptz(6)
+  createdBy      String?  @db.Uuid
+  // The Banquet Event Order's details.
+  setupStyle     String?  @db.VarChar(20) // theater | classroom | banquet | u_shape
+  headcount      Int? // guaranteed numbers, checked against the space's capacity for the layout
+  contactEmail   String?  @db.VarChar(320)
+  contactPhone   String?  @db.VarChar(30)
+  catering       Json? // [{ description, quantity, unitPrice }] — totals are computed, never stored
+  avRequirements String?
 
   tenant     Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   eventSpace EventSpace @relation(fields: [eventSpaceId], references: [id], onDelete: Cascade)
 
   @@index([eventSpaceId, startsAt])
   @@map("event_bookings")
+}
+
+// ---------------------------------------------------------------------------
+// Revenue Management — comp set (growth plan Month 8)
+// ---------------------------------------------------------------------------
+
+// A hotel the property prices itself against. Rates are entered by hand; a
+// paid rate-shopping feed would write the same `competitor_rates` rows later.
+model Competitor {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String   @db.Uuid
+  branchId  String   @db.Uuid
+  name      String   @db.VarChar(150)
+  isActive  Boolean  @default(true) // inactive = out of the comp set, rates kept
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+
+  tenant Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  branch Branch           @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  rates  CompetitorRate[]
+
+  @@index([branchId])
+  @@map("competitors")
+}
+
+// One competitor's nightly rate for a date, against one of OUR room types —
+// the room they sell that's comparable. Re-entering a date replaces it.
+model CompetitorRate {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId     String   @db.Uuid
+  competitorId String   @db.Uuid
+  roomTypeId   String   @db.Uuid
+  stayDate     DateTime @db.Date
+  rate         Decimal  @db.Decimal(12, 2)
+  enteredBy    String?  @db.Uuid
+  updatedAt    DateTime @updatedAt @db.Timestamptz(6)
+
+  tenant     Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  competitor Competitor @relation(fields: [competitorId], references: [id], onDelete: Cascade)
+  roomType   RoomType   @relation(fields: [roomTypeId], references: [id], onDelete: Cascade)
+
+  @@unique([competitorId, roomTypeId, stayDate])
+  @@index([roomTypeId, stayDate])
+  @@map("competitor_rates")
 }
 
 model Reservation {

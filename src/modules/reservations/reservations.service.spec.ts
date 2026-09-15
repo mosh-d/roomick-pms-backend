@@ -51,11 +51,14 @@ function makeTx() {
     },
     roomBlock: { findMany: jest.fn().mockResolvedValue([]), findFirst: jest.fn().mockResolvedValue(null) },
     overbookingConfig: { findMany: jest.fn().mockResolvedValue([]) },
+    groupBlock: { findMany: jest.fn().mockResolvedValue([]), findFirst: jest.fn() },
+    branch: { findFirst: jest.fn().mockResolvedValue({ timezone: 'Africa/Lagos' }) },
     walkRecord: { create: jest.fn().mockImplementation(({ data }: { data: Record<string, unknown> }) => Promise.resolve({ id: 'walk-1', ...data })) },
     folio: { findFirst: jest.fn().mockResolvedValue(null) },
     payment: { findMany: jest.fn().mockResolvedValue([]), create: jest.fn().mockResolvedValue({}) },
     reservation: {
       findMany: jest.fn().mockResolvedValue([]),
+      groupBy: jest.fn().mockResolvedValue([]),
       findFirst: jest.fn(),
       findUnique: jest.fn().mockResolvedValue(null),
       count: jest.fn().mockResolvedValue(0),
@@ -310,6 +313,86 @@ describe('ReservationsService', () => {
         const result = await service.getAvailability(TENANT_ID, BRANCH_ID, { from: '2026-09-01', to: '2026-09-02', roomTypeId: TYPE_ID });
         expect(result).toEqual([{ date: '2026-09-01', available: 1 }]);
       });
+    });
+  });
+
+  describe('group block holds', () => {
+    const blockDto = { guestId: GUEST_ID, roomTypeId: TYPE_ID, checkInDate: '2026-09-01', checkOutDate: '2026-09-04', adults: 2 };
+    const heldBlock = (overrides: Record<string, unknown> = {}) => ({
+      id: 'block-1',
+      blockSize: 3,
+      arrivalDate: new Date('2026-09-01T00:00:00.000Z'),
+      departureDate: new Date('2026-09-03T00:00:00.000Z'),
+      cutoffDate: new Date('2099-01-01T00:00:00.000Z'),
+      ...overrides,
+    });
+    const openBlock = (overrides: Record<string, unknown> = {}) => ({
+      id: 'block-1',
+      branchId: BRANCH_ID,
+      roomTypeId: TYPE_ID,
+      status: 'active',
+      blockSize: 10,
+      blockRate: new Prisma.Decimal('45000'),
+      name: 'Acme Conf',
+      ...overrides,
+    });
+
+    it("keeps a block's unbooked rooms out of everyone else's availability until its cut-off", async () => {
+      tx.groupBlock.findMany.mockResolvedValue([heldBlock()]);
+      // One of the block's 3 rooms is booked, for the first night only: it counts once, as a booking,
+      // and the block holds 2 more — the bookings it can still take — on each night of its stay.
+      tx.reservation.findMany.mockResolvedValue([
+        { checkInDate: new Date('2026-09-01T00:00:00.000Z'), checkOutDate: new Date('2026-09-02T00:00:00.000Z'), groupBlockId: 'block-1' },
+      ]);
+      tx.reservation.groupBy.mockResolvedValue([{ groupBlockId: 'block-1', _count: { _all: 1 } }]);
+      const result = await service.getAvailability(TENANT_ID, BRANCH_ID, { from: '2026-09-01', to: '2026-09-04', roomTypeId: TYPE_ID });
+      expect(result).toEqual([
+        { date: '2026-09-01', available: 2 }, // 5 rooms − 1 booked − 2 held
+        { date: '2026-09-02', available: 3 }, // 5 rooms − 2 held
+        { date: '2026-09-03', available: 5 }, // the group has left
+      ]);
+    });
+
+    it("stops holding once the allotment is booked up, even on a night a member left early", async () => {
+      tx.groupBlock.findMany.mockResolvedValue([heldBlock({ blockSize: 2 })]);
+      tx.reservation.findMany.mockResolvedValue([
+        { checkInDate: new Date('2026-09-01T00:00:00.000Z'), checkOutDate: new Date('2026-09-03T00:00:00.000Z'), groupBlockId: 'block-1' },
+        { checkInDate: new Date('2026-09-01T00:00:00.000Z'), checkOutDate: new Date('2026-09-02T00:00:00.000Z'), groupBlockId: 'block-1' },
+      ]);
+      tx.reservation.groupBy.mockResolvedValue([{ groupBlockId: 'block-1', _count: { _all: 2 } }]);
+      const result = await service.getAvailability(TENANT_ID, BRANCH_ID, { from: '2026-09-01', to: '2026-09-03', roomTypeId: TYPE_ID });
+      // Night 2: only one member stays, but the block is full — no room is kept off sale for nobody.
+      expect(result).toEqual([
+        { date: '2026-09-01', available: 3 },
+        { date: '2026-09-02', available: 4 },
+      ]);
+    });
+
+    it('gives the rooms back once the cut-off has passed — nothing has to run', async () => {
+      tx.groupBlock.findMany.mockResolvedValue([heldBlock({ cutoffDate: new Date('2020-01-01T00:00:00.000Z') })]);
+      const result = await service.getAvailability(TENANT_ID, BRANCH_ID, { from: '2026-09-01', to: '2026-09-03', roomTypeId: TYPE_ID });
+      expect(result.every((night) => night.available === 5)).toBe(true);
+    });
+
+    it("books into the block on the block's own held rooms, at its rate, linked in the same transaction", async () => {
+      tx.groupBlock.findFirst.mockResolvedValue(openBlock());
+      tx.reservation.count.mockResolvedValue(2);
+      await service.createReservation(TENANT_ID, BRANCH_ID, blockDto, ACTOR_ID, { groupBlockId: 'block-1' });
+
+      expect(tx.groupBlock.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ id: { not: 'block-1' } }) }));
+      const data = (tx.reservation.create.mock.calls[0] as [{ data: Record<string, unknown> }])[0].data;
+      expect(data).toMatchObject({ groupBlockId: 'block-1', overrideReason: 'Group block: Acme Conf' });
+      expect(String(data.overrideRate)).toBe('45000');
+    });
+
+    it('refuses a booking into a full or released block, before anything is written', async () => {
+      tx.groupBlock.findFirst.mockResolvedValue(openBlock({ blockSize: 2 }));
+      tx.reservation.count.mockResolvedValue(2);
+      await expect(service.createReservation(TENANT_ID, BRANCH_ID, blockDto, ACTOR_ID, { groupBlockId: 'block-1' })).rejects.toThrow(ConflictException);
+
+      tx.groupBlock.findFirst.mockResolvedValue(openBlock({ status: 'released' }));
+      await expect(service.createReservation(TENANT_ID, BRANCH_ID, blockDto, ACTOR_ID, { groupBlockId: 'block-1' })).rejects.toThrow(ConflictException);
+      expect(tx.reservation.create).not.toHaveBeenCalled();
     });
   });
 

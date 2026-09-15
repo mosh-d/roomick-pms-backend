@@ -1,5 +1,118 @@
 # Phase Notes
 
+## Month 8 (the rest) — comp set, group blocks that hold rooms, and Banquet Event Orders (2026-09-15)
+
+Three Month 8 deliverables were still open:
+- "Comp-set table renders manually-entered competitor rates with parity alerts".
+- "A group block can be created, its rooming list uploaded, and pickup tracked against the cut-off date".
+- "Event space bookable with a generated (print-ready) BEO".
+
+Built to pms-frontend-structure's Revenue Management and Sales & Events sections. Migration `20260916010000` adds `competitors` and `competitor_rates` (RLS), plus new columns on `group_blocks`, `event_spaces` and `event_bookings`.
+
+### Comp set
+- `Competitor` is a hotel the branch prices itself against; deactivating one keeps its rates.
+- `CompetitorRate` is their nightly rate on a date, against one of OUR room types. It's unique per competitor, room type and night, so re-entering a night replaces it.
+- Routes (Owner/Manager):
+  - `GET/POST /branches/:id/competitors` and `PATCH /competitors/:id`.
+  - `PUT /branches/:id/competitor-rates` sets one rate across an inclusive run of up to 92 nights, or `clear`s them.
+  - `GET /branches/:id/comp-set?roomTypeId=&from=&days=&thresholdPct=`.
+- "Our rate" for a night is what the Rate Resolver quotes a one-night direct booking (`resolveStay`, `persistAudit: false`). That's the booking engine's own figure, not a second copy of pricing.
+- Each night reports:
+  - the comp set's median, low and high;
+  - our distance from the median in percent;
+  - our rank (1 = cheapest);
+  - a position: above or below market beyond the threshold (default 10%), in line, or `no_data` when no competitor rate was entered. A market is never invented.
+- The median, not the mean, so one competitor's event-week price doesn't drag the whole market.
+- Rates are entered by hand, as the plan says for this month. A rate-shopping feed would write the same rows later.
+
+### Group blocks hold rooms
+Until now a block was a negotiated rate and a cap: it held nothing, so the group's rooms could be sold to anyone before the group booked. Now:
+- **Stay and contact.** A block has the group's stay (`arrivalDate`, `departureDate`) and a contact. Creating one checks that every night has at least the allotment free, under the same room-type lock bookings take. A block can only hold rooms that exist.
+- **Where the hold applies.** Held rooms come off the top in `ReservationsService.computeAvailabilityPerNight`, the one place every booking path checks availability: desk, booking engine, modify, extend, reinstate, promote and the calendars.
+- **How much is held.** Per night, the hold is the allotment minus the block's bookings that night. It's capped at the bookings the block can still take, so a member leaving a night early doesn't keep a room off sale that nobody can book.
+- **Cut-off.** The hold counts only until the cut-off date has passed in the branch's timezone. After that, unbooked rooms are back on sale. This is worked out when availability is read, so there's no job to run or miss. Releasing a block gives its rooms back at once. Blocks made before this have no stay dates and hold nothing.
+- **Booking into a block.** Bookings go through `createReservation(…, { groupBlockId })`:
+  - After the room-type lock, it checks the block is open, for this room type, and not full.
+  - The availability check lets the booking use the block's own held rooms.
+  - The reservation is written already linked to the block, with the block's rate as its nightly override.
+
+  Before, this took three transactions (create, then `setRateOverride`, then link), so a failure in between left a reservation without its group rate. Modify, extend and reinstate now pass the reservation's own block, so a group member can use its hold.
+- **Rooming lists.** `POST /group-blocks/:id/rooming-list` books a whole list:
+  - Every row is checked first, so a bad date books nothing.
+  - The list can't be longer than the rooms left.
+  - Each guest then becomes an ordinary reservation in the block.
+  - A row the booking refuses (a party too big for the room, say) is reported with its reason, and the rest carry on.
+- **Block list.** `GET /branches/:id/group-blocks` now returns the stay, the contact, `holdState` (holding / lapsed / released / none) and `roomsHeld`.
+
+### Events and the BEO
+- **Seats per layout.** `EventSpace.setupCapacities` holds seats for theatre, classroom, banquet and U-shape. A layout left out uses the general capacity.
+- **Booking details.** `EventBooking` gains layout, guaranteed headcount, contact email and phone, catering lines (item, quantity, unit price) and AV requirements. Headcount is checked against the space's seats for the layout, on create and update.
+- **Priced detail.** `GET /event-bookings/:id` prices the catering: each line, subtotal, tax by the branch's F&B rules, and total. Totals are never stored. The tax is labelled an estimate, because events aren't billed through a folio yet.
+- **Updates.** `PATCH /event-bookings/:id` fills details in as they firm up. Moving the event re-checks the space, leaving the booking itself out.
+- **The BEO.** `GET /event-bookings/:id/beo` returns a real PDF, built with pdfkit through the shared `renderPdf`. It contains:
+  - property and BEO number;
+  - the event, with date and time in the branch's timezone;
+  - venue, layout and its seats, and headcount;
+  - contact;
+  - the catering table with totals;
+  - AV and notes;
+  - client and events-manager signature lines.
+
+  Money prints with the currency code, because the standard PDF fonts can't draw ₦.
+
+### Role checks
+`RolesGuard` passes a role held at any branch when the URL names no branch. So routes addressed by a record's id (a block, an event, a competitor) now re-check the caller's role at that record's own branch. This goes through a new shared `assertRoleAtBranch` in `common/utils/branch-roles.ts`.
+
+### Not built
+- Excel rooming lists: the upload takes CSV, and the page says to save a spreadsheet as CSV.
+- A catering package library: catering is lines per event.
+- Billing an event to a folio or the city ledger.
+- Emailing the group contact at cut-off (no email provider).
+- A rate-shopping feed for the comp set.
+
+### Verified
+`npx tsc --noEmit`, `npm run lint`, `npm test`: 750 tests, all green, 28 more than before. They cover:
+- the market comparison: median for odd and even counts, both sides of the threshold, rank, no data;
+- rate runs and clearing, and the comp-set read through the Rate Resolver;
+- block creation: dates, cut-off, and the free-room check under the lock;
+- hold states and rooms held, and release checked against the branch role;
+- booking into a block through `createReservation` with its dates;
+- rooming-list pre-checks and per-row failures;
+- availability with holds: lapsing past cut-off, the early-leaver cap, and a booking into the block using its own hold with rate and link in one transaction;
+- full and released blocks refused;
+- layout seat checks, the overlap re-check on update, catering totals, and the BEO PDF.
+
+Live against real Postgres and the owner's running server:
+- **Comp set:**
+  - a duplicate competitor refused;
+  - a 3-night run;
+  - ₦30,000 against a ₦41,000 median: 26.8% below, cheapest of 3;
+  - one competitor at ₦40,000: 25% below;
+  - a re-entered night at ₦27,000: 11.1% above;
+  - "no data";
+  - deactivating a competitor and clearing a night.
+- **Blocks** (5 rooms, a 3-room block):
+  - 2 rooms available on the group's nights;
+  - a second 3-room block refused ("Only 2 Standard rooms are free");
+  - two ordinary bookings sell and a third is refused while the block holds, but the group still books into it at ₦25,000, linked;
+  - a rooming list books Ada and reports Bola's party of 3 as too big;
+  - a second list books Chidi for one night;
+  - a full block takes no more, with pickup 3 of 3 and nothing held;
+  - night 2 has 1 room free, because Chidi left early;
+  - a lapsed block's room back on sale (4 → 5) with nothing run;
+  - release gives rooms back (3 → 5), and a second release is refused.
+- **Events:**
+  - seats per layout;
+  - 130 guests banquet-style refused at 120 seats;
+  - an overlapping booking refused;
+  - catering ₦1,010,000 + ₦75,750 VAT = ₦1,085,750;
+  - a headcount above the layout refused;
+  - the BEO downloaded as a PDF, with its text read back: every field above, times in Lagos.
+
+The first live run showed 4 failures that were the script's own scenario. It sent 3 guests to a block with 2 rooms left, which the service rightly refused before booking anyone. A rerun with the scenario fixed passed 5/5. The browser run passed 16/16 (see the frontend's Phase 75).
+
+`prisma generate` again couldn't replace the engine DLL while the owner's backend held it. The client code regenerated.
+
 ## Month 10 — Point of Sale: outlets, menus, and orders that post to a guest's bill (2026-09-15)
 
 Growth plan Month 10: restaurant, bar, spa and laundry orders posting to a guest's bill. Built to pms-frontend-structure's POS section (Roomick-UI.pdf shows Point of Sale only as a sidebar entry) on the outlet model the DB doc already defined: `Outlet` (its category fixes the charge type), `UserOutlet` (staff ↔ outlet) and `LineItem.outletId`.

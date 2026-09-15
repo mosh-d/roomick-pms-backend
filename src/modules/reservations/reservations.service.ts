@@ -234,6 +234,11 @@ export class ReservationsService {
    * night; otherwise the branch-wide row is used. This is the ONE place
    * that decision is made — every caller (booking creation, modify,
    * promote, reinstate, the availability calendar) inherits it for free.
+   *
+   * Group blocks come off the top the same way: rooms a block still holds
+   * for its group (see `groupBlockHolds`) aren't for sale to anyone else.
+   * `bookingIntoBlockId` is a booking made FOR that group, which may take
+   * the block's own held rooms.
    */
   private async computeAvailabilityPerNight(
     tx: TenantTx,
@@ -242,6 +247,7 @@ export class ReservationsService {
     from: Date,
     to: Date,
     excludeReservationId?: string,
+    bookingIntoBlockId?: string,
   ): Promise<Array<{ date: string; available: number }>> {
     const physicalPool = await tx.room.count({
       where: { branchId, roomTypeId, deletedAt: null, heldStatus: null },
@@ -276,6 +282,7 @@ export class ReservationsService {
     const overbookingConfigs = await tx.overbookingConfig.findMany({ where: { branchId, OR: [{ roomTypeId }, { roomTypeId: null }] } });
     const roomTypeConfig = overbookingConfigs.find((c) => c.roomTypeId === roomTypeId);
     const branchConfig = overbookingConfigs.find((c) => c.roomTypeId === null);
+    const heldForGroups = await this.groupBlockHolds(tx, branchId, roomTypeId, from, to, bookingIntoBlockId);
 
     return this.enumerateNights(from, to).map((night) => {
       const blockedRoomIds = new Set(
@@ -287,8 +294,9 @@ export class ReservationsService {
       const capacity = governingConfig
         ? Math.floor(netCapacity * (1 + Number(governingConfig.maxOverbookPct ?? 0) / 100))
         : netCapacity;
-      const available = Math.max(0, capacity - reservedCount);
-      return { date: night.toISOString().slice(0, 10), available };
+      const date = night.toISOString().slice(0, 10);
+      const available = Math.max(0, capacity - reservedCount - (heldForGroups.get(date) ?? 0));
+      return { date, available };
     });
   }
 
@@ -300,6 +308,106 @@ export class ReservationsService {
     if (governs(roomTypeConfig)) return roomTypeConfig;
     if (governs(branchConfig)) return branchConfig;
     return null;
+  }
+
+  /**
+   * Rooms group blocks are still holding, per night (`YYYY-MM-DD` → rooms).
+   * An active block with stay dates holds, on each night of its stay, its
+   * allotment minus the block's own bookings that night — but never more
+   * than the bookings it can still take (allotment minus its whole pickup),
+   * so a member leaving a night early doesn't keep a room off sale that no
+   * one in the group can book. Once the cut-off date has passed in the
+   * branch's timezone the hold simply stops counting: the unbooked rooms are
+   * back on sale with no job to run. A block made before holds existed has
+   * no stay dates and holds nothing.
+   */
+  private async groupBlockHolds(
+    tx: TenantTx,
+    branchId: string,
+    roomTypeId: string,
+    from: Date,
+    to: Date,
+    bookingIntoBlockId?: string,
+  ): Promise<Map<string, number>> {
+    const held = new Map<string, number>();
+    const blocks = await tx.groupBlock.findMany({
+      where: {
+        branchId,
+        roomTypeId,
+        status: 'active',
+        arrivalDate: { lt: to },
+        departureDate: { gt: from },
+        ...(bookingIntoBlockId ? { id: { not: bookingIntoBlockId } } : {}),
+      },
+      select: { id: true, blockSize: true, arrivalDate: true, departureDate: true, cutoffDate: true },
+    });
+    if (blocks.length === 0) return held;
+
+    const branch = await tx.branch.findFirst({ where: { id: branchId }, select: { timezone: true } });
+    const today = toBranchDate(todayInTimezone(branch?.timezone ?? 'UTC'));
+    const holding = blocks.filter((b) => b.cutoffDate >= today);
+    if (holding.length === 0) return held;
+
+    const blockIds = holding.map((b) => b.id);
+    const booked = await tx.reservation.findMany({
+      where: {
+        groupBlockId: { in: blockIds },
+        deletedAt: null,
+        status: { in: [...HOLDING_STATUSES] },
+        checkInDate: { lt: to },
+        checkOutDate: { gt: from },
+      },
+      select: { groupBlockId: true, checkInDate: true, checkOutDate: true },
+    });
+    // The same statuses `assertGroupBlockOpen` counts toward a full block.
+    const pickups = await tx.reservation.groupBy({
+      by: ['groupBlockId'],
+      where: { groupBlockId: { in: blockIds }, deletedAt: null, status: { in: ['confirmed', 'checked_in', 'checked_out'] } },
+      _count: { _all: true },
+    });
+    const pickupByBlock = new Map(pickups.map((p) => [p.groupBlockId, p._count._all]));
+
+    for (const night of this.enumerateNights(from, to)) {
+      let rooms = 0;
+      for (const block of holding) {
+        if (!block.arrivalDate || !block.departureDate || block.arrivalDate > night || block.departureDate <= night) continue;
+        const bookedTonight = booked.filter((r) => r.groupBlockId === block.id && r.checkInDate <= night && r.checkOutDate > night).length;
+        const stillBookable = block.blockSize - (pickupByBlock.get(block.id) ?? 0);
+        rooms += Math.max(0, Math.min(block.blockSize - bookedTonight, stillBookable));
+      }
+      if (rooms > 0) held.set(night.toISOString().slice(0, 10), rooms);
+    }
+    return held;
+  }
+
+  /** Per-night availability inside the caller's transaction — creating a group block checks it only holds rooms that are free. */
+  async availabilityPerNightInTx(tx: TenantTx, branchId: string, roomTypeId: string, from: Date, to: Date) {
+    return this.computeAvailabilityPerNight(tx, branchId, roomTypeId, from, to);
+  }
+
+  /**
+   * Booking into a group block: the block must be open, for this room type,
+   * and not yet full. Runs after the caller's room-type lock, so two bookings
+   * can't both take the block's last room.
+   */
+  private async assertGroupBlockOpen(tx: TenantTx, groupBlockId: string, branchId: string, roomTypeId: string) {
+    const block = await tx.groupBlock.findFirst({ where: { id: groupBlockId, branchId } });
+    if (!block) {
+      throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Group block not found' });
+    }
+    if (block.status !== 'active') {
+      throw new ConflictException({ code: ErrorCode.CONFLICT, message: `This block is ${block.status}, not accepting reservations` });
+    }
+    if (block.roomTypeId !== roomTypeId) {
+      throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: 'A group block books only its own room type' });
+    }
+    const pickup = await tx.reservation.count({
+      where: { groupBlockId, deletedAt: null, status: { in: ['confirmed', 'checked_in', 'checked_out'] } },
+    });
+    if (pickup >= block.blockSize) {
+      throw new ConflictException({ code: ErrorCode.CONFLICT, message: `This block's full allotment of ${block.blockSize} rooms is already booked` });
+    }
+    return block;
   }
 
   private assertValidRange(from: Date, to: Date): void {
@@ -333,7 +441,13 @@ export class ReservationsService {
    * schema.prisma), as was `AuditLog.userId` ("NULL = system action"), so
    * this widening needed no migration. Every other caller is unchanged.
    */
-  async createReservation(tenantId: string, branchId: string, dto: CreateReservationDto, actorId: string | null) {
+  async createReservation(
+    tenantId: string,
+    branchId: string,
+    dto: CreateReservationDto,
+    actorId: string | null,
+    options: { groupBlockId?: string } = {},
+  ) {
     const checkInDate = toBranchDate(dto.checkInDate);
     const checkOutDate = toBranchDate(dto.checkOutDate);
     this.assertValidRange(checkInDate, checkOutDate);
@@ -356,8 +470,9 @@ export class ReservationsService {
       // `joinWaitlist` is an explicit request to skip the availability
       // check, not an automatic fallback — a plain booking that finds no
       // rooms still throws `RESERVATION_NOT_AVAILABLE`, same as before.
+      const block = options.groupBlockId ? await this.assertGroupBlockOpen(tx, options.groupBlockId, branchId, dto.roomTypeId) : null;
       if (!dto.joinWaitlist) {
-        await this.assertAvailableForStay(tx, branchId, dto.roomTypeId, checkInDate, checkOutDate);
+        await this.assertAvailableForStay(tx, branchId, dto.roomTypeId, checkInDate, checkOutDate, undefined, block?.id);
       }
 
       const resolved = await this.rateResolverService.resolveStay(
@@ -388,6 +503,12 @@ export class ReservationsService {
         children: dto.children ?? 0,
         specialRequests: dto.specialRequests,
         createdBy: actorId,
+        // A group booking is linked to its block in the same transaction and
+        // takes the block's rate as its nightly override — the field a
+        // manager's rate override writes.
+        groupBlockId: block?.id,
+        overrideRate: block?.blockRate,
+        overrideReason: block ? `Group block: ${block.name}` : undefined,
         // The terms this booking is made under — resolved, so a branch still on
         // the default gets the default written down. A later policy change
         // doesn't reach back into bookings already taken.
@@ -1027,7 +1148,7 @@ export class ReservationsService {
       const checkOutDate = toBranchDate(dto.checkOutDate);
       this.assertValidRange(checkInDate, checkOutDate);
       const roomType = await this.assertRoomType(tx, reservation.branchId, reservation.roomTypeId);
-      await this.assertAvailableForStay(tx, reservation.branchId, reservation.roomTypeId, checkInDate, checkOutDate, reservationId);
+      await this.assertAvailableForStay(tx, reservation.branchId, reservation.roomTypeId, checkInDate, checkOutDate, reservationId, reservation.groupBlockId ?? undefined);
 
       const resolved = await this.rateResolverService.resolveStay(
         tx,
@@ -1104,7 +1225,7 @@ export class ReservationsService {
       // shrinking a stay or nudging it by a day doesn't get rejected for
       // "conflicting" with the booking being changed.
       if (datesOrRoomTypeChanged && reservation.status === 'confirmed') {
-        await this.assertAvailableForStay(tx, reservation.branchId, roomTypeId, checkInDate, checkOutDate, reservationId);
+        await this.assertAvailableForStay(tx, reservation.branchId, roomTypeId, checkInDate, checkOutDate, reservationId, reservation.groupBlockId ?? undefined);
       }
 
       // Re-resolves through the base/cascade tiers only — a promo code or
@@ -1195,7 +1316,7 @@ export class ReservationsService {
       // shape `modifyReservation` already uses. A checked-in guest keeps
       // their own physical room in practice; this proves the type's pool
       // isn't already fully committed to other guests for those nights.
-      await this.assertAvailableForStay(tx, reservation.branchId, reservation.roomTypeId, reservation.checkOutDate, newCheckOutDate, reservationId);
+      await this.assertAvailableForStay(tx, reservation.branchId, reservation.roomTypeId, reservation.checkOutDate, newCheckOutDate, reservationId, reservation.groupBlockId ?? undefined);
 
       // The SPECIFIC assigned room must also be free of any block for the
       // extension nights — the pool check above can't see this; it counts
@@ -1505,8 +1626,9 @@ export class ReservationsService {
     checkInDate: Date,
     checkOutDate: Date,
     excludeReservationId?: string,
+    bookingIntoBlockId?: string,
   ): Promise<void> {
-    const perNight = await this.computeAvailabilityPerNight(tx, branchId, roomTypeId, checkInDate, checkOutDate, excludeReservationId);
+    const perNight = await this.computeAvailabilityPerNight(tx, branchId, roomTypeId, checkInDate, checkOutDate, excludeReservationId, bookingIntoBlockId);
     if (perNight.some((n) => n.available < 1)) {
       throw new ConflictException({ code: ErrorCode.RESERVATION_NOT_AVAILABLE, message: 'No rooms of this type are available for the full requested stay' });
     }
