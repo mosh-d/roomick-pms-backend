@@ -92,7 +92,10 @@ export class ReportsService {
     const roomRevenueRows = await tx.lineItem.findMany({
       where: {
         folio: { branchId, ...(roomTypeId ? { reservation: { roomTypeId } } : {}) },
-        chargeType: 'room',
+        // A night's correction counts against it — otherwise a reversed night
+        // would still be room revenue (the correction row is `correction`,
+        // not `room`).
+        OR: [{ chargeType: 'room' }, { chargeType: 'correction', correctsLineItem: { chargeType: 'room' } }],
         isVoid: false,
         deletedAt: null,
         serviceDate: { gte: from, lt: to },
@@ -268,9 +271,16 @@ export class ReportsService {
   }
 
   /**
-   * Revenue by department (`LineItem.chargeType`, excluding `tax`/
-   * `correction` — display denormalisation and reversals, not real
-   * department revenue) and by payment method, plus a day-level trend.
+   * Revenue by department and by payment method, plus a day-level trend.
+   * Department is `LineItem.chargeType`, tax excluded (collected for the
+   * state, not earned). A correction counts against the department of the
+   * line it reverses (`correctsLineItemId`), so a reversed charge nets out
+   * instead of staying in revenue; one with no link (posted before the link
+   * existed, or a no-show waiver) stays its own `correction` row, so the
+   * total still nets it. Walk-in Point of Sale sales — cash or card, never
+   * on a folio — come from `pos_orders`: pre-tax under the outlet's charge
+   * type, as paid under their payment method. A room-charged sale is already
+   * a folio line, so it isn't counted twice.
    * `groupBy=department` in the reference's own querystring is really just
    * naming which breakdown the UI leads with — this always returns both.
    */
@@ -285,32 +295,37 @@ export class ReportsService {
           folio: { branchId },
           isVoid: false,
           deletedAt: null,
-          chargeType: { notIn: ['tax', 'correction'] },
+          chargeType: { not: 'tax' },
           serviceDate: { gte: from, lt: to },
         },
-        select: { amount: true, chargeType: true, serviceDate: true },
+        select: { amount: true, chargeType: true, serviceDate: true, correctsLineItem: { select: { chargeType: true } } },
       });
       const payments = await tx.payment.findMany({
         where: { folio: { branchId }, isVoid: false, deletedAt: null, recordedAt: { gte: from, lt: to } },
         select: { amount: true, method: true },
       });
+      // The same window as payments: both are moments, not service dates.
+      const posSales = await tx.posOrder.findMany({
+        where: { branchId, settlement: { in: ['cash', 'card'] }, voidedAt: null, createdAt: { gte: from, lt: to } },
+        select: { subtotal: true, total: true, settlement: true, createdAt: true, outlet: { select: { chargeType: true } } },
+      });
 
+      const add = (map: Map<string, Prisma.Decimal>, key: string, amount: Prisma.Decimal) => map.set(key, (map.get(key) ?? ZERO).plus(amount));
       const byDepartment = new Map<string, Prisma.Decimal>();
-      for (const li of lineItems) {
-        byDepartment.set(li.chargeType, (byDepartment.get(li.chargeType) ?? ZERO).plus(li.amount));
-      }
       const byPaymentMethod = new Map<string, Prisma.Decimal>();
-      for (const p of payments) {
-        byPaymentMethod.set(p.method, (byPaymentMethod.get(p.method) ?? ZERO).plus(p.amount));
+      const trendMap = new Map<string, Prisma.Decimal>();
+
+      for (const li of lineItems) {
+        add(byDepartment, li.correctsLineItem?.chargeType ?? li.chargeType, li.amount);
+        if (li.serviceDate) add(trendMap, this.isoDate(li.serviceDate), li.amount);
+      }
+      for (const p of payments) add(byPaymentMethod, p.method, p.amount);
+      for (const sale of posSales) {
+        add(byDepartment, sale.outlet.chargeType, sale.subtotal);
+        add(byPaymentMethod, sale.settlement, sale.total);
+        add(trendMap, this.isoDate(sale.createdAt), sale.subtotal);
       }
       const totalRevenue = [...byDepartment.values()].reduce((s, v) => s.plus(v), ZERO);
-
-      const trendMap = new Map<string, Prisma.Decimal>();
-      for (const li of lineItems) {
-        if (!li.serviceDate) continue;
-        const key = this.isoDate(li.serviceDate);
-        trendMap.set(key, (trendMap.get(key) ?? ZERO).plus(li.amount));
-      }
       const trend = [...trendMap.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([period, amount]) => ({ period, amount: amount.toFixed(2) }));
 
       return {

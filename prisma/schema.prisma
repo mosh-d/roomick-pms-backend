@@ -365,6 +365,8 @@ model Tenant {
   eventSpaces              EventSpace[]
   eventBookings            EventBooking[]
   availabilityRestrictions AvailabilityRestriction[]
+  menuItems                MenuItem[]
+  posOrders                PosOrder[]
 
   @@index([isDemo, demoExpiresAt])
   @@map("tenants")
@@ -560,22 +562,22 @@ model Brand {
 }
 
 model Branch {
-  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  tenantId        String   @db.Uuid
-  brandId         String   @db.Uuid
-  name            String   @db.VarChar(200)
-  address         Json // {street, city, state, country, zip}
-  timezone        String   @db.VarChar(50) // IANA tz — night audit depends on it
-  currency        String   @db.Char(3) // ISO 4217
-  checkInTime     DateTime @default(dbgenerated("'14:00:00'::time")) @db.Time(0)
-  checkOutTime    DateTime @default(dbgenerated("'11:00:00'::time")) @db.Time(0)
-  category        String?  @db.VarChar(30) // hotel | resort | motel | boutique | hostel
-  policies        Json? // overrides brand defaultPolicies; merged at read time. Holds idCaptureMandatory, early/late surcharge policy, AR flag rules.
-  noShowPolicy    Json? // {cutoffTime, defaultPenalty, flatFeeAmount, autoMark, notifyMinutesBefore}
+  id                 String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId           String   @db.Uuid
+  brandId            String   @db.Uuid
+  name               String   @db.VarChar(200)
+  address            Json // {street, city, state, country, zip}
+  timezone           String   @db.VarChar(50) // IANA tz — night audit depends on it
+  currency           String   @db.Char(3) // ISO 4217
+  checkInTime        DateTime @default(dbgenerated("'14:00:00'::time")) @db.Time(0)
+  checkOutTime       DateTime @default(dbgenerated("'11:00:00'::time")) @db.Time(0)
+  category           String?  @db.VarChar(30) // hotel | resort | motel | boutique | hostel
+  policies           Json? // overrides brand defaultPolicies; merged at read time. Holds idCaptureMandatory, early/late surcharge policy, AR flag rules.
+  noShowPolicy       Json? // {cutoffTime, defaultPenalty, flatFeeAmount, autoMark, notifyMinutesBefore}
   // {freeCancellationHours, lateCancellationPenalty, flatFeeAmount, allowOnlineCancellation}.
   // NULL = the standard default (free until 24h before check-in, first night after) — see reservations/policies.ts.
   cancellationPolicy Json?
-  regCardTemplate Json? // {logoUrl, houseRules, requiredFields, showRate, language}
+  regCardTemplate    Json? // {logoUrl, houseRules, requiredFields, showRate, language}
 
   // --- Direct Booking Engine (Month 7) -------------------------------------
   // The public, guest-facing identity of this property. `Tenant.subdomain` is
@@ -625,6 +627,8 @@ model Branch {
   groupBlocks              GroupBlock[]
   eventSpaces              EventSpace[]
   availabilityRestrictions AvailabilityRestriction[]
+  menuItems                MenuItem[]
+  posOrders                PosOrder[]
 
   @@index([tenantId, brandId])
   @@index([tenantId, deletedAt])
@@ -1036,6 +1040,7 @@ model Reservation {
   housekeepingTasksTriggered HousekeepingTask[]
   registrationCards          RegistrationCard[]
   communicationLogs          CommunicationLog[]
+  posOrders                  PosOrder[]
 
   @@unique([tenantId, confirmationNumber])
   @@index([branchId, checkInDate, status])
@@ -1197,6 +1202,7 @@ model Folio {
   transfersIn  FolioTransfer[] @relation("TransferTarget")
   payments     Payment[]
   refunds      Refund[]
+  posOrders    PosOrder[]
 
   @@index([reservationId])
   @@index([branchId, status])
@@ -1240,6 +1246,7 @@ model LineItem {
   taxLines         LineItem[] @relation("TaxOfCharge")
   correctsLineItem LineItem?  @relation("CorrectionOf", fields: [correctsLineItemId], references: [id], onDelete: Restrict)
   correctedBy      LineItem?  @relation("CorrectionOf")
+  posOrder         PosOrder?
 
   @@index([parentLineItemId])
   @@index([folioId, postedAt])
@@ -1402,8 +1409,9 @@ model Shift {
   agent        User    @relation(fields: [agentId], references: [id], onDelete: Restrict)
   activeOutlet Outlet? @relation(fields: [activeOutletId], references: [id], onDelete: SetNull)
 
-  issues   ShiftIssue[]
-  payments Payment[]
+  issues    ShiftIssue[]
+  payments  Payment[]
+  posOrders PosOrder[]
 
   @@index([branchId, closedAt])
   @@index([branchId, openedAt(sort: Desc)])
@@ -1551,6 +1559,8 @@ model Outlet {
   lineItems      LineItem[]
   activeInShifts Shift[]
   userOutlets    UserOutlet[]
+  menuItems      MenuItem[]
+  posOrders      PosOrder[]
 
   @@index([branchId, isActive])
   @@index([branchId, category])
@@ -1576,6 +1586,86 @@ model UserOutlet {
   @@index([userId, branchId])
   @@index([outletId])
   @@map("user_outlets")
+}
+
+// ---------------------------------------------------------------------------
+// Point of Sale (growth plan Month 10)
+// ---------------------------------------------------------------------------
+
+// One thing an outlet sells. Soft-deleted rather than removed, so past
+// orders' snapshots still read sensibly.
+model MenuItem {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId    String    @db.Uuid
+  branchId    String    @db.Uuid
+  outletId    String    @db.Uuid
+  name        String    @db.VarChar(150)
+  category    String    @db.VarChar(60) // the terminal's category tabs: "Starters", "Mains", "Drinks"
+  price       Decimal   @db.Decimal(12, 2) // before tax — tax follows the branch's rules for the outlet's charge type
+  isAvailable Boolean   @default(true) // false = 86'd: greyed out on the terminal, can't be ordered
+  // [{ name, selection: 'single' | 'multi', required, options: [{ label, price }] }] — an option's price adds to the item's
+  modifiers   Json?
+  sortOrder   Int?
+  createdAt   DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt   DateTime  @updatedAt @db.Timestamptz(6)
+  deletedAt   DateTime? @db.Timestamptz(6)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  branch Branch @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  outlet Outlet @relation(fields: [outletId], references: [id], onDelete: Cascade)
+
+  @@index([outletId, category])
+  @@map("menu_items")
+}
+
+enum PosSettlement {
+  room // charged to an in-house guest's folio
+  cash
+  card
+
+  @@map("pos_settlement_enum")
+}
+
+// A sale at an outlet — the outlet's own sales ledger, however it was
+// settled. A room charge ALSO becomes one line on the guest's folio
+// (`lineItemId`), posted through FoliosService like any other charge; a cash
+// sale counts toward the cashier's shift drawer (`shiftId`).
+model PosOrder {
+  id            String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId      String        @db.Uuid
+  branchId      String        @db.Uuid
+  outletId      String        @db.Uuid
+  orderNo       Int // sequential per outlet — "Order #42" on the receipt
+  settlement    PosSettlement
+  tableNumber   String?       @db.VarChar(20)
+  // Snapshot at the moment of sale: [{ menuItemId, name, qty, unitPrice, modifiers: [{ group, label, price }], lineTotal }]
+  items         Json
+  subtotal      Decimal       @db.Decimal(12, 2)
+  taxTotal      Decimal       @db.Decimal(12, 2)
+  total         Decimal       @db.Decimal(12, 2)
+  currency      String        @db.Char(3)
+  reservationId String?       @db.Uuid // room: the in-house stay it was charged to
+  folioId       String?       @db.Uuid
+  lineItemId    String?       @unique @db.Uuid // room: the folio charge this order became
+  shiftId       String?       @db.Uuid // cash: the drawer it went into
+  createdBy     String?       @db.Uuid
+  createdAt     DateTime      @default(now()) @db.Timestamptz(6)
+  voidedAt      DateTime?     @db.Timestamptz(6)
+  voidedBy      String?       @db.Uuid
+  voidReason    String?       @db.VarChar(500)
+
+  tenant      Tenant       @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  branch      Branch       @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  outlet      Outlet       @relation(fields: [outletId], references: [id], onDelete: Restrict)
+  reservation Reservation? @relation(fields: [reservationId], references: [id], onDelete: Restrict)
+  folio       Folio?       @relation(fields: [folioId], references: [id], onDelete: Restrict)
+  lineItem    LineItem?    @relation(fields: [lineItemId], references: [id], onDelete: Restrict)
+  shift       Shift?       @relation(fields: [shiftId], references: [id], onDelete: SetNull)
+
+  @@unique([outletId, orderNo])
+  @@index([branchId, createdAt])
+  @@index([shiftId])
+  @@map("pos_orders")
 }
 
 model NightAuditLog {

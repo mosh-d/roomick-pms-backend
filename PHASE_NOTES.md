@@ -1,5 +1,78 @@
 # Phase Notes
 
+## Month 10 — Point of Sale: outlets, menus, and orders that post to a guest's bill (2026-09-15)
+
+Growth plan Month 10: restaurant, bar, spa and laundry orders posting to a guest's bill. Built to pms-frontend-structure's POS section (Roomick-UI.pdf shows Point of Sale only as a sidebar entry) on the outlet model the DB doc already defined: `Outlet` (its category fixes the charge type), `UserOutlet` (staff ↔ outlet) and `LineItem.outletId`.
+
+### What a sale is
+Migration `20260915020000`: `menu_items` and `pos_orders`, both tenant-isolated with RLS.
+- A `PosOrder` is the outlet's own sales ledger, however it was settled. It holds an itemised snapshot (name, quantity, unit price with modifiers, line total), so a later price change or a deleted item never rewrites history. It also holds subtotal, tax, total, currency, and a per-outlet order number ("Order #42" on the receipt). A `SELECT … FOR UPDATE` on the outlet row serialises numbering and a unique index backs it up; five simultaneous tills got #3–#7 in the live run.
+- **Charge to room** posts the whole order as ONE line on the guest's primary folio. It goes through `FoliosService.postOutletCharge`, which calls the existing `writeChargeWithTaxes`: the outlet's charge type, `outletId` stamped on the charge and on its tax lines, and VAT from the branch's rules as its own linked line. Corrections, splits, the guest's bill view and the revenue report all handle it unchanged. The order stores `reservationId`, `folioId` and `lineItemId`; a CHECK constraint makes them present exactly when settlement is `room`.
+- **Cash and card** sales stay off the folio ledger on purpose: a folio belongs to a reservation, and a bar customer who isn't staying has none. Cash goes to the cashier's own open shift (`shiftId`), the rule `recordPayment` already follows for cash.
+- Money is `Prisma.Decimal` throughout, and `total = subtotal + taxTotal` is a DB CHECK.
+
+### The server prices everything
+`POST /pos/outlets/:id/quote` prices a basket from the outlet's own menu. Each option is checked against the item's modifier groups: a single-choice group takes one, a required group can't be skipped, and an unknown option or group is refused. Tax comes from `FoliosService.previewTaxTotal`, the same rules and rounding the folio uses. For a room charge, the order's `taxTotal` is read back from the posted line. An 86'd item (`isAvailable: false`) can't be quoted or sold.
+
+### Routes
+- Outlets: `GET/POST /branches/:id/pos/outlets`, `PATCH /pos/outlets/:id`. The PATCH can rename, reorder or deactivate an outlet, but not change its category: that fixed the charge type, and changing it would split the outlet's history across two types.
+- Menu: `GET /pos/outlets/:id/menu`, `POST /pos/outlets/:id/menu-items`, `PATCH /pos/menu-items/:id`, `PATCH …/:id/availability`, `DELETE /pos/menu-items/:id` (soft delete).
+- Selling: `POST /pos/outlets/:id/quote`, `GET /branches/:id/pos/room-lookup?room=`, `POST /pos/orders`, `GET /pos/orders/:id` and `POST /pos/orders/:id/void`. `GET /pos/outlets/:id/orders?date=` returns one branch-local business day, with takings by settlement and voids excluded.
+
+### Who can do what
+Owner, Manager and Front Desk can ring up at every outlet. **POS staff can only ring up at the outlets they're assigned to** (via the Users module's existing `PUT /users/:id/outlets`), and only those outlets are listed for them. Managers set up outlets and menus and void sales; anyone working a till can 86 an item.
+
+`RolesGuard` accepts a role held at any branch when the URL has no `:branchId`. So every route addressed by outlet, item or order re-checks the role at that record's own branch, in the service.
+
+### Voids
+Voids are for managers only, and need a reason. The void is claimed first (`updateMany … where voidedAt IS NULL`), so if two managers void at once, the second stops before touching the bill.
+- **Room charges** come off through `FoliosService.correctLineItemInTx`, the existing correction made callable inside a caller's transaction. The charge and its VAT are both reversed, and the corrections still carry `outletId`. A line someone already corrected from the folio isn't reversed twice. A settled bill refuses the correction, as it refuses any posting.
+- **Cash sales** can only be voided while their shift is open. Once the drawer has been counted, its figures stand.
+
+### Shifts
+`closeShift` now expects the opening float plus cash payments plus POS cash sales (voids excluded), and audits `posCashTotal`. `getShift` returns the POS cash sales.
+
+### Fixed on the way: the revenue report
+`getRevenue` dropped every `correction` row but kept the charge it reversed, so a corrected charge still counted as revenue. A voided POS room charge would have too.
+- A correction now counts against the department of the line it reverses (`correctsLineItemId`).
+- A correction with no link (older corrections, and the no-show waiver) stays its own `correction` row, so the total still nets it out.
+- The room revenue behind occupancy, ADR and RevPAR had the same gap, and now includes corrections of room nights.
+- Walk-in POS sales are added from `pos_orders`: pre-tax under the outlet's charge type, and as paid under cash or card. They use the report's own UTC-midnight bounds, the same as payments.
+
+### Not built
+- Menu item images (there's no file storage for them yet).
+- Kitchen or bar order tickets, and table management.
+- One order split across settlements.
+- POS refunds beyond a void.
+- A POS sales report by outlet. Today's takings per outlet are on the terminal.
+
+### Verified
+`npx tsc --noEmit`, `npm run lint`, `npm test`: 722 tests, all green. The 29 new tests cover:
+- basket pricing: modifiers, exact decimals, required, single and unknown choices, 86'd items, other outlets' items;
+- modifier-group validation and the outlet → charge type mapping;
+- room charges: one line, links, tax read back, refusing a checked-out guest or a settled bill;
+- cash to the open shift, and card joining no drawer;
+- outlet assignment for POS staff, and role checks at the record's branch;
+- void ordering, no double reversal, second void, and closed-shift cash;
+- shift close counting POS cash;
+- revenue netting corrections by department, and adding walk-in POS sales.
+
+Live against real Postgres and the owner's running server, 37/37:
+- Outlet types, and duplicate outlet names refused.
+- The ₦13,975 quote (₦13,000 + ₦975 VAT) with modifier pricing; a missing required choice, an 86'd item and another outlet's item refused.
+- Room lookup, and an empty room.
+- The room charge as one `fnb` line stamped with the bar, its own ₦975 VAT line, and the bill up by exactly the order total.
+- Cash into the open shift, and per-outlet numbering at the spa.
+- Five simultaneous sales numbered #3–#7.
+- An invited POS-staff user seeing no outlets and refused (403), then after assignment seeing only the bar, ringing up #8, and refused at the spa, on voids and on menu edits.
+- The day summary.
+- The room-charge void restoring the bill through linked corrections, and a second void refused.
+- The shift listing 5 POS cash sales and closing at zero variance (₦63,437.50), then a closed-shift void refused.
+- Revenue: F&B ₦15,000 with the voided charge netted out, spa ₦20,000, room ₦30,000, card ₦21,500, cash ₦16,125.
+- A settled bill flagged in the lookup and refusing a room charge.
+
+`prisma generate` again couldn't replace the query-engine DLL while the owner's backend held it. The client code regenerated, and the engine binary is the same version.
+
 ## Month 9 (fifth slice) — guest messages and the unified inbox (2026-09-15)
 
 The last Month 9 item in the growth plan: "a staff member can see and reply to a guest's inbound message from any connected channel in one inbox, threaded with that guest's prior automated log entries." Built on the one channel that works without a provider account — guests writing from "Manage your booking" — following the plan's own instruction to build the data model, inbox and send path now and make each provider a credentials swap later.

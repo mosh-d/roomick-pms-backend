@@ -50,7 +50,9 @@ export class ShiftsService {
    * session recorded (`FoliosService.recordPayment` stamps `shiftId` on cash
    * payments as they're taken — see the comment there). Refunds already net
    * out: `Payment.amount` is negative for a refund, so the sum is the actual
-   * expected drawer balance, not just gross intake.
+   * expected drawer balance, not just gross intake. Cash sales rung up at a
+   * Point of Sale outlet land in the same drawer (`PosOrder.shiftId`, stamped
+   * the same way), so they count too — voided ones don't.
    */
   async closeShift(tenantId: string, shiftId: string, dto: CloseShiftDto, actorId: string): Promise<Shift> {
     return this.prisma.withTenant(tenantId, async (tx) => {
@@ -67,7 +69,12 @@ export class ShiftsService {
         _sum: { amount: true },
         where: { shiftId, method: 'cash', isVoid: false },
       });
-      const cashMovement = cashAgg._sum.amount ?? new Prisma.Decimal(0);
+      const posCashAgg = await tx.posOrder.aggregate({
+        _sum: { total: true },
+        where: { shiftId, settlement: 'cash', voidedAt: null },
+      });
+      const posCashTotal = posCashAgg._sum.total ?? new Prisma.Decimal(0);
+      const cashMovement = (cashAgg._sum.amount ?? new Prisma.Decimal(0)).add(posCashTotal);
       const openingFloat = shift.openingFloat ?? new Prisma.Decimal(0);
       const systemCashTotal = openingFloat.add(cashMovement);
       const closingCashCounted = new Prisma.Decimal(dto.closingCashCounted);
@@ -110,6 +117,7 @@ export class ShiftsService {
 
       await this.audit(tx, tenantId, shift.branchId, actorId, 'shift.closed', shift.id, {
         systemCashTotal: systemCashTotal.toFixed(2),
+        posCashTotal: posCashTotal.toFixed(2),
         closingCashCounted: dto.closingCashCounted,
         variance: variance.toFixed(2),
       });
@@ -125,6 +133,11 @@ export class ShiftsService {
           agent: { select: { id: true, name: true } },
           issues: { orderBy: { createdAt: 'asc' } },
           payments: { where: { isVoid: false }, orderBy: { recordedAt: 'asc' } },
+          posOrders: {
+            where: { settlement: 'cash', voidedAt: null },
+            orderBy: { createdAt: 'asc' },
+            select: { id: true, orderNo: true, total: true, createdAt: true, outlet: { select: { name: true } } },
+          },
         },
       });
       if (!shift) {

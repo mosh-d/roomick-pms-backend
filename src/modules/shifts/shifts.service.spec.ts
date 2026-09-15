@@ -42,6 +42,7 @@ function makeTx() {
       update: jest.fn().mockImplementation(({ data }: { data: Record<string, unknown> }) => Promise.resolve({ id: 'issue-1', ...data })),
     },
     payment: { aggregate: jest.fn().mockResolvedValue({ _sum: { amount: null } }) },
+    posOrder: { aggregate: jest.fn().mockResolvedValue({ _sum: { total: null } }) },
     auditLog: { create: jest.fn().mockResolvedValue({}) },
   };
 }
@@ -110,6 +111,19 @@ describe('ShiftsService', () => {
 
       const data = tx.shift.update.mock.calls[0][0].data;
       expect(data.systemCashTotal.toFixed(2)).toBe('65000.00');
+      expect(data.variance.toFixed(2)).toBe('0.00');
+    });
+
+    it('expects the Point of Sale cash rung up this shift in the drawer too, voided sales excluded', async () => {
+      tx.shift.findFirst.mockResolvedValue(shift({ openingFloat: new Prisma.Decimal('50000') }));
+      tx.payment.aggregate.mockResolvedValue({ _sum: { amount: new Prisma.Decimal('20000') } });
+      tx.posOrder.aggregate.mockResolvedValue({ _sum: { total: new Prisma.Decimal('5375') } });
+
+      await service.closeShift(TENANT_ID, SHIFT_ID, { closingCashCounted: 75375 }, AGENT_ID);
+
+      expect(tx.posOrder.aggregate).toHaveBeenCalledWith({ _sum: { total: true }, where: { shiftId: SHIFT_ID, settlement: 'cash', voidedAt: null } });
+      const data = tx.shift.update.mock.calls[0][0].data;
+      expect(data.systemCashTotal.toFixed(2)).toBe('75375.00');
       expect(data.variance.toFixed(2)).toBe('0.00');
     });
 

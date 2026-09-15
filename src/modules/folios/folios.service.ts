@@ -161,7 +161,37 @@ export class FoliosService {
     });
   }
 
-  /** The tax `writeChargeWithTaxes` would add to a charge — for quoting one (a cancellation charge) before it's posted. Same rules, same rounding, nothing written. */
+  /**
+   * A Point of Sale "charge to room": the whole order as one line, stamped
+   * with the outlet and the outlet's charge type, taxed by the branch's rules
+   * like any other charge. The caller has already checked the folio is open.
+   */
+  async postOutletCharge(
+    tx: TenantTx,
+    input: {
+      folio: Folio;
+      outletId: string;
+      chargeType: ChargeType;
+      amount: Prisma.Decimal;
+      description: string;
+      serviceDate: Date;
+      actorId: string;
+    },
+  ): Promise<LineItem | null> {
+    return this.writeChargeWithTaxes(tx, {
+      tenantId: input.folio.tenantId,
+      branchId: input.folio.branchId,
+      folioId: input.folio.id,
+      description: input.description,
+      amount: input.amount,
+      chargeType: input.chargeType,
+      serviceDate: input.serviceDate,
+      outletId: input.outletId,
+      actorId: input.actorId,
+    });
+  }
+
+  /** The tax `writeChargeWithTaxes` would add to a charge — for quoting one (a cancellation charge, a POS basket) before it's posted. Same rules, same rounding, nothing written. */
   async previewTaxTotal(tx: TenantTx, branchId: string, chargeType: ChargeType, amount: Prisma.Decimal): Promise<Prisma.Decimal> {
     const taxes = await this.taxesService.computeTaxesForCharge(tx, branchId, chargeType, amount);
     return taxes.reduce((sum, t) => sum.plus(t.taxAmount), ZERO);
@@ -302,78 +332,83 @@ export class FoliosService {
    * those older charges still reverses only the charge.
    */
   async correctLineItem(tenantId: string, lineItemId: string, dto: CorrectLineItemDto, actorId: string): Promise<LineItem> {
-    return this.prisma.withTenant(tenantId, async (tx) => {
-      const original = await tx.lineItem.findFirst({ where: { id: lineItemId, deletedAt: null } });
-      if (!original) {
-        throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Line item not found' });
-      }
-      const folio = await this.findFolioOrThrow(tx, original.folioId);
-      this.assertFolioOpen(folio);
+    return this.prisma.withTenant(tenantId, (tx) => this.correctLineItemInTx(tx, tenantId, lineItemId, dto.reason, actorId));
+  }
 
-      const alreadyCorrected = await tx.lineItem.findFirst({ where: { correctsLineItemId: original.id }, select: { id: true } });
-      if (alreadyCorrected) throw this.alreadyCorrected();
+  /** `correctLineItem` inside a caller's transaction — voiding a Point of Sale room charge takes it off the bill through here. */
+  async correctLineItemInTx(tx: TenantTx, tenantId: string, lineItemId: string, reason: string, actorId: string): Promise<LineItem> {
+    const original = await tx.lineItem.findFirst({ where: { id: lineItemId, deletedAt: null } });
+    if (!original) {
+      throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Line item not found' });
+    }
+    const folio = await this.findFolioOrThrow(tx, original.folioId);
+    this.assertFolioOpen(folio);
 
-      const isTaxLine = original.chargeType === 'tax';
-      // Only taxes still standing — one that staff already corrected on its
-      // own must not be reversed a second time here.
-      const taxesToReverse = isTaxLine
-        ? []
-        : (
-            await tx.lineItem.findMany({
-              where: { parentLineItemId: original.id, folioId: original.folioId, chargeType: 'tax', isVoid: false, deletedAt: null },
-              include: { correctedBy: { select: { id: true } } },
-            })
-          ).filter((tax) => !tax.correctedBy);
-      const reversedTaxTotal = taxesToReverse.reduce((sum, tax) => sum.plus(tax.amount), ZERO);
+    const alreadyCorrected = await tx.lineItem.findFirst({ where: { correctsLineItemId: original.id }, select: { id: true } });
+    if (alreadyCorrected) throw this.alreadyCorrected();
 
-      try {
-        const correction = await tx.lineItem.create({
+    const isTaxLine = original.chargeType === 'tax';
+    // Only taxes still standing — one that staff already corrected on its
+    // own must not be reversed a second time here.
+    const taxesToReverse = isTaxLine
+      ? []
+      : (
+          await tx.lineItem.findMany({
+            where: { parentLineItemId: original.id, folioId: original.folioId, chargeType: 'tax', isVoid: false, deletedAt: null },
+            include: { correctedBy: { select: { id: true } } },
+          })
+        ).filter((tax) => !tax.correctedBy);
+    const reversedTaxTotal = taxesToReverse.reduce((sum, tax) => sum.plus(tax.amount), ZERO);
+
+    try {
+      const correction = await tx.lineItem.create({
+        data: {
+          tenantId,
+          folioId: original.folioId,
+          description: `Correction — ${original.description} (${reason})`.slice(0, 300),
+          amount: original.amount.negated(),
+          // Display denormalisation, same as on any charge: the tax this
+          // correction takes back, shown beside it on the staff folio.
+          taxAmount: reversedTaxTotal.negated(),
+          chargeType: isTaxLine ? 'tax' : 'correction',
+          taxRuleIds: isTaxLine ? original.taxRuleIds : [],
+          serviceDate: original.serviceDate,
+          outletId: original.outletId,
+          correctsLineItemId: original.id,
+          postedBy: actorId,
+        },
+      });
+
+      for (const tax of taxesToReverse) {
+        await tx.lineItem.create({
           data: {
             tenantId,
-            folioId: original.folioId,
-            description: `Correction — ${original.description} (${dto.reason})`.slice(0, 300),
-            amount: original.amount.negated(),
-            // Display denormalisation, same as on any charge: the tax this
-            // correction takes back, shown beside it on the staff folio.
-            taxAmount: reversedTaxTotal.negated(),
-            chargeType: isTaxLine ? 'tax' : 'correction',
-            taxRuleIds: isTaxLine ? original.taxRuleIds : [],
-            serviceDate: original.serviceDate,
-            correctsLineItemId: original.id,
+            folioId: tax.folioId,
+            description: `Correction — ${tax.description}`.slice(0, 300),
+            amount: tax.amount.negated(),
+            chargeType: 'tax',
+            taxRuleIds: tax.taxRuleIds,
+            serviceDate: tax.serviceDate,
+            outletId: tax.outletId,
+            parentLineItemId: correction.id,
+            correctsLineItemId: tax.id,
             postedBy: actorId,
           },
         });
-
-        for (const tax of taxesToReverse) {
-          await tx.lineItem.create({
-            data: {
-              tenantId,
-              folioId: tax.folioId,
-              description: `Correction — ${tax.description}`.slice(0, 300),
-              amount: tax.amount.negated(),
-              chargeType: 'tax',
-              taxRuleIds: tax.taxRuleIds,
-              serviceDate: tax.serviceDate,
-              parentLineItemId: correction.id,
-              correctsLineItemId: tax.id,
-              postedBy: actorId,
-            },
-          });
-        }
-
-        await this.audit(tx, tenantId, folio.branchId, actorId, 'line_item.corrected', correction.id, {
-          originalLineItemId: lineItemId,
-          reason: dto.reason,
-          reversedTaxLineIds: taxesToReverse.map((tax) => tax.id),
-        });
-        return correction;
-      } catch (err) {
-        // Two staff correcting the same line at once: the unique index lets
-        // only one through. The loser gets the same answer as the check above.
-        if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') throw this.alreadyCorrected();
-        throw err;
       }
-    });
+
+      await this.audit(tx, tenantId, folio.branchId, actorId, 'line_item.corrected', correction.id, {
+        originalLineItemId: lineItemId,
+        reason,
+        reversedTaxLineIds: taxesToReverse.map((tax) => tax.id),
+      });
+      return correction;
+    } catch (err) {
+      // Two staff correcting the same line at once: the unique index lets
+      // only one through. The loser gets the same answer as the check above.
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') throw this.alreadyCorrected();
+      throw err;
+    }
   }
 
   private alreadyCorrected(): ConflictException {
@@ -726,6 +761,8 @@ export class FoliosService {
       amount: Prisma.Decimal;
       chargeType: ChargeType;
       serviceDate: Date;
+      /** The POS outlet that sold it; absent for everything posted at the desk or by the system. */
+      outletId?: string;
       /** `null` = system-posted (the scheduled night audit) or a guest acting for themselves — `postedBy`'s own convention. */
       actorId: string | null;
     },
@@ -744,6 +781,7 @@ export class FoliosService {
         taxAmount: taxTotal,
         chargeType: input.chargeType,
         serviceDate: input.serviceDate,
+        outletId: input.outletId,
         postedBy: input.actorId,
       },
     });
@@ -758,6 +796,7 @@ export class FoliosService {
           chargeType: 'tax',
           taxRuleIds: [tax.ruleId],
           serviceDate: input.serviceDate,
+          outletId: input.outletId,
           parentLineItemId: parent.id,
           postedBy: input.actorId,
         },

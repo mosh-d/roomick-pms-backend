@@ -29,6 +29,7 @@ import { RevenueManagementModule } from './modules/revenue-management/revenue-ma
 import { LoyaltyModule } from './modules/loyalty/loyalty.module';
 import { MaintenanceModule } from './modules/maintenance/maintenance.module';
 import { NightAuditModule } from './modules/night-audit/night-audit.module';
+import { PosModule } from './modules/pos/pos.module';
 import { PropertyModule } from './modules/property/property.module';
 import { PublicBookingModule } from './modules/public-booking/public-booking.module';
 import { RateResolverModule } from './modules/rate-resolver/rate-resolver.module';
@@ -97,6 +98,7 @@ import { PrismaModule } from './prisma/prisma.module';
     SalesEventsModule,
     RevenueManagementModule,
     PublicBookingModule,
+    PosModule,
   ],
   providers: [
     JwtStrategy,

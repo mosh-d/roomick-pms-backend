@@ -16,6 +16,7 @@ function makeTx() {
     reservation: { findMany: jest.fn().mockResolvedValue([]) },
     lineItem: { findMany: jest.fn().mockResolvedValue([]) },
     payment: { findMany: jest.fn().mockResolvedValue([]) },
+    posOrder: { findMany: jest.fn().mockResolvedValue([]) },
   };
 }
 
@@ -124,7 +125,7 @@ describe('ReportsService', () => {
   });
 
   describe('getRevenue', () => {
-    it('groups by chargeType, excluding tax and correction rows', async () => {
+    it('groups by chargeType, excluding tax rows', async () => {
       tx.lineItem.findMany.mockResolvedValue([
         { amount: new Prisma.Decimal('300.00'), chargeType: 'room', serviceDate: new Date('2026-09-01') },
         { amount: new Prisma.Decimal('50.00'), chargeType: 'fnb', serviceDate: new Date('2026-09-01') },
@@ -132,8 +133,42 @@ describe('ReportsService', () => {
       const result = await service.getRevenue(TENANT_ID, BRANCH_ID, { from: '2026-09-01', to: '2026-09-02' });
       expect(result.byDepartment).toEqual(expect.arrayContaining([{ chargeType: 'room', amount: '300.00' }, { chargeType: 'fnb', amount: '50.00' }]));
       expect(result.summary.totalRevenue).toBe('350.00');
-      // The query itself must never even ask for tax/correction rows.
-      expect(tx.lineItem.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ chargeType: { notIn: ['tax', 'correction'] } }) }));
+      // The query itself must never even ask for tax rows.
+      expect(tx.lineItem.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ chargeType: { not: 'tax' } }) }));
+    });
+
+    it("nets a correction against the department of the line it reverses; an unlinked one stays its own row", async () => {
+      tx.lineItem.findMany.mockResolvedValue([
+        { amount: new Prisma.Decimal('5000.00'), chargeType: 'fnb', serviceDate: new Date('2026-09-01'), correctsLineItem: null },
+        { amount: new Prisma.Decimal('-5000.00'), chargeType: 'correction', serviceDate: new Date('2026-09-01'), correctsLineItem: { chargeType: 'fnb' } },
+        { amount: new Prisma.Decimal('3000.00'), chargeType: 'room', serviceDate: new Date('2026-09-01'), correctsLineItem: null },
+        { amount: new Prisma.Decimal('-2000.00'), chargeType: 'correction', serviceDate: new Date('2026-09-01'), correctsLineItem: null },
+      ]);
+      const result = await service.getRevenue(TENANT_ID, BRANCH_ID, { from: '2026-09-01', to: '2026-09-02' });
+      expect(result.byDepartment).toEqual(
+        expect.arrayContaining([
+          { chargeType: 'fnb', amount: '0.00' },
+          { chargeType: 'room', amount: '3000.00' },
+          { chargeType: 'correction', amount: '-2000.00' },
+        ]),
+      );
+      expect(result.summary.totalRevenue).toBe('1000.00');
+    });
+
+    it('adds walk-in Point of Sale sales — pre-tax by outlet charge type, as paid by payment method', async () => {
+      tx.posOrder.findMany.mockResolvedValue([
+        { subtotal: new Prisma.Decimal('5000'), total: new Prisma.Decimal('5375'), settlement: 'cash', createdAt: new Date('2026-09-01T12:00:00Z'), outlet: { chargeType: 'fnb' } },
+        { subtotal: new Prisma.Decimal('10000'), total: new Prisma.Decimal('10750'), settlement: 'card', createdAt: new Date('2026-09-01T13:00:00Z'), outlet: { chargeType: 'spa' } },
+      ]);
+      const result = await service.getRevenue(TENANT_ID, BRANCH_ID, { from: '2026-09-01', to: '2026-09-02' });
+      expect(result.byDepartment).toEqual(expect.arrayContaining([{ chargeType: 'fnb', amount: '5000.00' }, { chargeType: 'spa', amount: '10000.00' }]));
+      expect(result.byPaymentMethod).toEqual(expect.arrayContaining([{ method: 'cash', amount: '5375.00' }, { method: 'card', amount: '10750.00' }]));
+      expect(result.summary.totalRevenue).toBe('15000.00');
+      expect(result.trend).toEqual([{ period: '2026-09-01', amount: '15000.00' }]);
+      // Room-charged sales are already folio lines — only walk-in sales are read, and never voided ones.
+      expect(tx.posOrder.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: expect.objectContaining({ settlement: { in: ['cash', 'card'] }, voidedAt: null }) }),
+      );
     });
 
     it('nets refunds (negative payment amounts) into the same payment-method total', async () => {
