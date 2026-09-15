@@ -254,6 +254,14 @@ enum CommsChannel {
   @@map("comms_channel_enum")
 }
 
+// outbound = the property to the guest (automated or staff); inbound = the guest to the property (Month 9 inbox)
+enum CommsDirection {
+  inbound
+  outbound
+
+  @@map("comms_direction_enum")
+}
+
 enum DeliveryStatus {
   queued
   sent
@@ -1605,10 +1613,14 @@ model CommunicationLog {
   reservationId     String?        @db.Uuid // NULL = marketing / no specific reservation
   guestId           String         @db.Uuid
   channel           CommsChannel
-  subject           String?        @db.VarChar(500) // email only
+  subject           String?        @db.VarChar(500) // email subject, or a guest request's type ("Late check-out request")
   body              String
-  trigger           String         @db.VarChar(50) // booking_confirmation | pre_arrival | checkin_receipt | invoice | post_stay | no_show_notice | cancellation | manual
-  deliveryStatus    DeliveryStatus @default(queued) // MVP: rows stay 'queued' — sending adapter is stubbed
+  trigger           String         @db.VarChar(50) // booking_confirmation | pre_arrival | checkin_receipt | invoice | post_stay | no_show_notice | cancellation | manual | guest_message | guest_request
+  direction         CommsDirection @default(outbound)
+  readAt            DateTime?      @db.Timestamptz(6) // inbound only: when staff first read it. NULL = unread
+  // Email rows progress via CommsDispatcherService; an in_app_chat reply is 'sent' when written (the guest portal is its
+  // transport); inbound rows are 'delivered' (received). sms/push stay 'queued' — no transport yet.
+  deliveryStatus    DeliveryStatus @default(queued)
   externalMessageId String?        @db.VarChar(200)
   sentBy            String?        @db.Uuid // NULL = automated system send
   sentAt            DateTime       @default(now()) @db.Timestamptz(6)
@@ -1623,6 +1635,7 @@ model CommunicationLog {
   @@index([reservationId, sentAt(sort: Desc)])
   @@index([guestId, sentAt(sort: Desc)])
   @@index([branchId, deliveryStatus, sentAt])
+  @@index([branchId, direction, readAt])
   @@map("communication_log")
 }
 

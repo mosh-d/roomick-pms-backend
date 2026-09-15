@@ -1,6 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
-import { IsBoolean, IsEmail, IsISO8601, IsInt, IsOptional, IsString, IsUUID, Matches, MaxLength, Max, Min } from 'class-validator';
+import { IsBoolean, IsEmail, IsIn, IsISO8601, IsInt, IsOptional, IsString, IsUUID, Matches, MaxLength, Max, Min, MinLength } from 'class-validator';
 
 export class PublicAvailabilityQueryDto {
   @ApiProperty({ example: '2026-10-01' })
@@ -213,6 +213,30 @@ export class CancelBookingDto {
   @IsString()
   @MaxLength(500)
   reason?: string;
+}
+
+/** A guest messaging the property about their booking. Same credentials as the lookup. */
+export class GuestMessageDto {
+  @ApiProperty({ example: 'RES-2026-00001' })
+  @IsString()
+  @MaxLength(40)
+  confirmationNumber!: string;
+
+  @ApiProperty({ example: 'ada@example.com' })
+  @IsEmail()
+  @MaxLength(320)
+  email!: string;
+
+  @ApiProperty({ example: 'Could we have two extra towels, please?' })
+  @IsString()
+  @MinLength(1)
+  @MaxLength(2000)
+  body!: string;
+
+  @ApiPropertyOptional({ enum: ['late_checkout', 'housekeeping'], description: 'Tags the message as a request; omit for an ordinary message' })
+  @IsOptional()
+  @IsIn(['late_checkout', 'housekeeping'])
+  requestType?: 'late_checkout' | 'housekeeping';
 }
 
 export class PublishBookingEngineDto {

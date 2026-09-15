@@ -1,7 +1,9 @@
 import { Test } from '@nestjs/testing';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
+import { CommsLogService } from '../comms-log/comms-log.service';
 import { FoliosService } from '../folios/folios.service';
+import { HousekeepingService } from '../housekeeping/housekeeping.service';
 import { RateResolverService } from '../rate-resolver/rate-resolver.service';
 import { ReservationsService } from '../reservations/reservations.service';
 import { PublicBookingService } from './public-booking.service';
@@ -31,6 +33,8 @@ describe('PublicBookingService', () => {
   };
   let rateResolverService: { calculateQuote: jest.Mock };
   let foliosService: { getFolio: jest.Mock };
+  let commsLogService: { logGuestMessageInTx: jest.Mock; guestThreadInTx: jest.Mock };
+  let housekeepingService: { createTaskInTx: jest.Mock };
   let tx: {
     branch: { findFirst: jest.Mock; findFirstOrThrow: jest.Mock; update: jest.Mock };
     roomType: { findMany: jest.Mock; findFirst: jest.Mock };
@@ -83,6 +87,8 @@ describe('PublicBookingService', () => {
     // Only getFolio — deliberately no ensurePrimaryFolio on this mock, so any
     // accidental call from the public read path would fail loudly.
     foliosService = { getFolio: jest.fn() };
+    commsLogService = { logGuestMessageInTx: jest.fn().mockResolvedValue({ id: 'comm-in' }), guestThreadInTx: jest.fn().mockResolvedValue([]) };
+    housekeepingService = { createTaskInTx: jest.fn().mockResolvedValue({ id: 'task-1' }) };
 
     const moduleRef = await Test.createTestingModule({
       providers: [
@@ -91,6 +97,8 @@ describe('PublicBookingService', () => {
         { provide: ReservationsService, useValue: reservationsService },
         { provide: RateResolverService, useValue: rateResolverService },
         { provide: FoliosService, useValue: foliosService },
+        { provide: CommsLogService, useValue: commsLogService },
+        { provide: HousekeepingService, useValue: housekeepingService },
       ],
     }).compile();
     service = moduleRef.get(PublicBookingService);
@@ -442,6 +450,82 @@ describe('PublicBookingService', () => {
       expect(result.confirmationNumber).toBe('RES-2026-00001');
       expect(result.houseRules).toBe('No smoking.');
       expect(result.preArrivalCompletedAt).toBeInstanceOf(Date);
+    });
+  });
+
+  describe('guest messages', () => {
+    const creds = { confirmationNumber: 'RES-2026-00001', email: 'ada@example.com' };
+    const row = (overrides: Record<string, unknown> = {}) => ({
+      id: 'c1', direction: 'inbound', channel: 'in_app_chat', trigger: 'guest_message', subject: null,
+      body: 'Is breakfast included?', sentAt: new Date('2026-10-10T10:00:00.000Z'), sentBy: null, readAt: null,
+      ...overrides,
+    });
+
+    beforeEach(() => {
+      tx.branch.findFirstOrThrow.mockResolvedValue({
+        name: 'Grand Hotel', category: 'hotel', currency: 'NGN', timezone: 'Africa/Lagos',
+        checkInTime: new Date('1970-01-01T14:00:00.000Z'), checkOutTime: new Date('1970-01-01T11:00:00.000Z'),
+        address: {}, cancellationPolicy: null, brand: { name: 'Grand Group' },
+      });
+      tx.reservation.findFirst.mockResolvedValue({
+        id: 'res-1', confirmationNumber: 'RES-2026-00001', guestId: 'guest-1', status: 'checked_in', roomId: 'room-1', branch: { timezone: 'Africa/Lagos' },
+      });
+      commsLogService.guestThreadInTx.mockResolvedValue([
+        row(),
+        row({ id: 'c2', direction: 'outbound', trigger: 'manual', body: 'Yes — 7 to 10am.', sentBy: 'staff-user-1' }),
+      ]);
+    });
+
+    it('shows the conversation behind the same credential check — who said what, and nothing internal', async () => {
+      const thread = await service.getGuestMessages(SLUG, creds);
+      const where = (tx.reservation.findFirst.mock.calls[0][0] as { where: { guest: unknown } }).where;
+      expect(where.guest).toEqual({ email: { equals: 'ada@example.com', mode: 'insensitive' } });
+      expect(thread.messages.map((m) => m.from)).toEqual(['you', 'property']);
+      expect(Object.keys(thread.messages[1]).sort()).toEqual(['body', 'from', 'requestLabel', 'sentAt']);
+      expect(JSON.stringify(thread)).not.toContain('staff-user-1');
+    });
+
+    it('404s with the generic booking message when credentials do not match', async () => {
+      tx.reservation.findFirst.mockResolvedValue(null);
+      await expect(service.getGuestMessages(SLUG, creds)).rejects.toMatchObject({ status: 404 });
+      await expect(service.sendGuestMessage(SLUG, { ...creds, body: 'Hello' })).rejects.toMatchObject({ status: 404 });
+      expect(commsLogService.logGuestMessageInTx).not.toHaveBeenCalled();
+    });
+
+    it('records the message as an inbound comms-log row, trimmed', async () => {
+      await service.sendGuestMessage(SLUG, { ...creds, body: '  Is breakfast included?  ' });
+      expect(commsLogService.logGuestMessageInTx).toHaveBeenCalledWith(tx, TENANT_ID, BRANCH_ID, {
+        reservationId: 'res-1', guestId: 'guest-1', body: 'Is breakfast included?', requestType: undefined,
+      });
+    });
+
+    it('rejects a blank message before touching anything', async () => {
+      await expect(service.sendGuestMessage(SLUG, { ...creds, body: '   ' })).rejects.toMatchObject({ status: 400 });
+      expect(tx.reservation.findFirst).not.toHaveBeenCalled();
+    });
+
+    it("a checked-in guest's housekeeping request goes straight onto the task board, raised with no staff actor", async () => {
+      const sent = await service.sendGuestMessage(SLUG, { ...creds, body: 'Two extra towels, please', requestType: 'housekeeping' });
+      expect(housekeepingService.createTaskInTx).toHaveBeenCalledWith(tx, TENANT_ID, BRANCH_ID, expect.objectContaining({
+        roomId: 'room-1', triggerEvent: 'guest_request', triggeredByReservationId: 'res-1', actorId: null,
+        notes: 'Guest request (RES-2026-00001): Two extra towels, please',
+      }));
+      expect(sent.housekeepingTaskCreated).toBe(true);
+    });
+
+    it('…but not before check-in, when there is no room to send housekeeping to', async () => {
+      tx.reservation.findFirst.mockResolvedValue({
+        id: 'res-1', confirmationNumber: 'RES-2026-00001', guestId: 'guest-1', status: 'confirmed', roomId: null, branch: { timezone: 'Africa/Lagos' },
+      });
+      const sent = await service.sendGuestMessage(SLUG, { ...creds, body: 'Towels on arrival?', requestType: 'housekeeping' });
+      expect(housekeepingService.createTaskInTx).not.toHaveBeenCalled();
+      expect(sent.housekeepingTaskCreated).toBe(false);
+    });
+
+    it('a late check-out request waits in the inbox for a person — it has a price, so no task is raised', async () => {
+      await service.sendGuestMessage(SLUG, { ...creds, body: 'Could we stay until 2pm?', requestType: 'late_checkout' });
+      expect(commsLogService.logGuestMessageInTx).toHaveBeenCalledWith(tx, TENANT_ID, BRANCH_ID, expect.objectContaining({ requestType: 'late_checkout' }));
+      expect(housekeepingService.createTaskInTx).not.toHaveBeenCalled();
     });
   });
 

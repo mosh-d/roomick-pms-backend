@@ -70,7 +70,8 @@ export class HousekeepingService {
       triggerEvent: string;
       triggeredByReservationId?: string;
       taskDate: Date;
-      actorId: string;
+      /** `null` when a guest raised it from the booking portal — `AuditLog.userId`'s own "no staff actor" convention. */
+      actorId: string | null;
     },
   ): Promise<HousekeepingTask> {
     const task = await tx.housekeepingTask.create({
@@ -234,7 +235,7 @@ export class HousekeepingService {
     return task;
   }
 
-  private async audit(tx: TenantTx, tenantId: string, userId: string, action: string, entityId: string, after: Prisma.InputJsonValue): Promise<void> {
+  private async audit(tx: TenantTx, tenantId: string, userId: string | null, action: string, entityId: string, after: Prisma.InputJsonValue): Promise<void> {
     await tx.auditLog.create({ data: { tenantId, userId, action, entityType: 'housekeeping_task', entityId, after } });
   }
 }

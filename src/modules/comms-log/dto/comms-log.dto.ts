@@ -22,3 +22,31 @@ export class SendCommunicationDto {
   @MaxLength(5000)
   body!: string;
 }
+
+/** Staff replies from the inbox. `in_app_chat` shows on the guest's "Manage your booking" page — today the one channel that actually reaches a guest. */
+const REPLY_CHANNELS: CommsChannel[] = ['in_app_chat', 'email', 'sms'];
+
+export class InboxReplyDto {
+  @ApiProperty({ enum: REPLY_CHANNELS })
+  @IsIn(REPLY_CHANNELS)
+  channel!: CommsChannel;
+
+  @ApiPropertyOptional({ description: 'Email only' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  subject?: string;
+
+  @ApiProperty({ example: 'Of course — late check-out until 1pm is fine, at no charge.' })
+  @IsString()
+  @MinLength(1)
+  @MaxLength(5000)
+  body!: string;
+}
+
+export class InboxQueryDto {
+  @ApiPropertyOptional({ enum: ['all', 'unread'] })
+  @IsOptional()
+  @IsIn(['all', 'unread'])
+  filter?: 'all' | 'unread';
+}

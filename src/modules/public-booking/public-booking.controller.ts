@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, ParseUUIDPipe, Post, Put, Query } from '@nestjs/common';
+import { Body, Controller, Delete, ExecutionContext, Get, HttpCode, HttpStatus, Param, ParseUUIDPipe, Post, Put, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { CurrentTenant } from '../../common/decorators';
@@ -6,6 +6,7 @@ import { Public } from '../../common/decorators/public.decorator';
 import { Roles, SystemRole } from '../../common/decorators/roles.decorator';
 import {
   CancelBookingDto,
+  GuestMessageDto,
   LookupBookingDto,
   PreArrivalCheckInDto,
   PublicAvailabilityQueryDto,
@@ -14,6 +15,26 @@ import {
   PublishBookingEngineDto,
 } from './dto/public-booking.dto';
 import { PublicBookingService, PublicBookingConfirmation, PublicPropertyInfo, PublicRoomType } from './public-booking.service';
+
+/**
+ * The storage key for the guest-credential budget: the same for every route
+ * that uses it, so they share ONE count per IP. (The throttler's default key
+ * includes the controller and handler names, giving each route its own.)
+ */
+export function guestCredentialsThrottleKey(_context: ExecutionContext, tracker: string, throttlerName: string): string {
+  return `guest-credentials:${throttlerName}:${tracker}`;
+}
+
+/**
+ * ONE budget per IP across every route that takes a confirmation number and
+ * an email. Each of those routes answers a right pair differently from a
+ * wrong one, so each is a guessing oracle — and with separate per-route
+ * buckets, every route added (bill, cancellation, messages…) handed an
+ * attacker another 10 guesses an hour. Sharing the key caps the total
+ * instead. Comfortable for a real guest: a whole session — look up, view the
+ * bill, message the desk, cancel — is well under 20.
+ */
+const GUEST_CREDENTIALS_THROTTLE = { default: { limit: 20, ttl: 3_600_000, generateKey: guestCredentialsThrottleKey } };
 
 /**
  * The Direct Booking Engine's guest-facing API (Month 7).
@@ -77,11 +98,12 @@ export class PublicBookingController {
   // number plus an email address: query strings land in server access logs,
   // browser history and `Referer` headers, and these shouldn't.
   //
-  // The tightest limit on this controller. Confirmation numbers are
-  // sequential, so this is the one route where brute force is actually
-  // plausible — 10/hour per IP makes walking the sequence useless while
-  // leaving a real guest who mistypes their email several attempts.
-  @Throttle({ default: { limit: 10, ttl: 3_600_000 } })
+  // Confirmation numbers are sequential, so brute force is plausible here and
+  // on every other route that checks the same credentials — they all draw on
+  // one shared per-IP budget (GUEST_CREDENTIALS_THROTTLE above), which makes
+  // guessing useless while leaving a real guest who mistypes their email
+  // several attempts.
+  @Throttle(GUEST_CREDENTIALS_THROTTLE)
   @ApiOperation({ summary: 'Guest self-service — look up your own booking with its confirmation number and the email address on it' })
   lookupBooking(@Param('slug') slug: string, @Body() dto: LookupBookingDto): ReturnType<PublicBookingService['lookupBooking']> {
     return this.publicBookingService.lookupBooking(slug, dto);
@@ -89,9 +111,8 @@ export class PublicBookingController {
 
   @Post(':slug/bookings/pre-arrival')
   @HttpCode(HttpStatus.OK)
-  // Same credentials as the lookup, so the same brute-force surface and the
-  // same limit.
-  @Throttle({ default: { limit: 10, ttl: 3_600_000 } })
+  // Same credentials as the lookup — the same shared budget.
+  @Throttle(GUEST_CREDENTIALS_THROTTLE)
   @ApiOperation({ summary: 'Guest pre-arrival check-in — corrects contact details and accepts house rules before arrival, so the desk only has to confirm and assign a room' })
   preArrivalCheckIn(@Param('slug') slug: string, @Body() dto: PreArrivalCheckInDto): ReturnType<PublicBookingService['preArrivalCheckIn']> {
     return this.publicBookingService.preArrivalCheckIn(slug, dto);
@@ -99,9 +120,9 @@ export class PublicBookingController {
 
   @Post(':slug/bookings/folio')
   @HttpCode(HttpStatus.OK)
-  // Same credentials as the lookup, so the same brute-force surface and the
-  // same limit. Read-only: nothing here can post, pay or change a charge.
-  @Throttle({ default: { limit: 10, ttl: 3_600_000 } })
+  // Same credentials as the lookup — the same shared budget. Read-only:
+  // nothing here can post, pay or change a charge.
+  @Throttle(GUEST_CREDENTIALS_THROTTLE)
   @ApiOperation({ summary: "Guest self-service — a read-only view of your own bill: charges posted so far, payments and balance. Primary folio only." })
   getGuestFolio(@Param('slug') slug: string, @Body() dto: LookupBookingDto): ReturnType<PublicBookingService['getGuestFolio']> {
     return this.publicBookingService.getGuestFolio(slug, dto);
@@ -109,9 +130,8 @@ export class PublicBookingController {
 
   @Post(':slug/bookings/cancellation-quote')
   @HttpCode(HttpStatus.OK)
-  // Same credentials as the lookup, so the same brute-force surface and the
-  // same limit. Read-only.
-  @Throttle({ default: { limit: 10, ttl: 3_600_000 } })
+  // Same credentials as the lookup — the same shared budget. Read-only.
+  @Throttle(GUEST_CREDENTIALS_THROTTLE)
   @ApiOperation({ summary: "Guest self-service — what cancelling this booking now would cost under the property's cancellation policy" })
   getCancellationQuote(@Param('slug') slug: string, @Body() dto: LookupBookingDto): ReturnType<PublicBookingService['getCancellationQuote']> {
     return this.publicBookingService.getCancellationQuote(slug, dto);
@@ -119,11 +139,30 @@ export class PublicBookingController {
 
   @Post(':slug/bookings/cancel')
   @HttpCode(HttpStatus.OK)
-  // A write behind the same credentials — the same 10/hour.
-  @Throttle({ default: { limit: 10, ttl: 3_600_000 } })
+  // A write behind the same credentials — the same shared budget.
+  @Throttle(GUEST_CREDENTIALS_THROTTLE)
   @ApiOperation({ summary: 'Guest self-cancellation — the same cancellation path staff use; the guest confirms the exact charge they were shown' })
   cancelBooking(@Param('slug') slug: string, @Body() dto: CancelBookingDto): ReturnType<PublicBookingService['cancelBooking']> {
     return this.publicBookingService.cancelBooking(slug, dto);
+  }
+
+  @Post(':slug/bookings/messages')
+  @HttpCode(HttpStatus.OK)
+  // Same credentials as the lookup — the same shared budget. Read-only.
+  @Throttle(GUEST_CREDENTIALS_THROTTLE)
+  @ApiOperation({ summary: 'Guest self-service — your conversation with the property about this booking' })
+  getGuestMessages(@Param('slug') slug: string, @Body() dto: LookupBookingDto): ReturnType<PublicBookingService['getGuestMessages']> {
+    return this.publicBookingService.getGuestMessages(slug, dto);
+  }
+
+  @Post(':slug/bookings/messages/send')
+  @HttpCode(HttpStatus.OK)
+  // A write behind the same credentials — the same shared budget, which also
+  // caps how fast one IP can fill a property's inbox.
+  @Throttle(GUEST_CREDENTIALS_THROTTLE)
+  @ApiOperation({ summary: 'Guest self-service — message the property, optionally as a late check-out or housekeeping request' })
+  sendGuestMessage(@Param('slug') slug: string, @Body() dto: GuestMessageDto): ReturnType<PublicBookingService['sendGuestMessage']> {
+    return this.publicBookingService.sendGuestMessage(slug, dto);
   }
 
   @Post(':slug/reservations')

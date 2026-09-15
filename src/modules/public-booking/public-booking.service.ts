@@ -1,9 +1,11 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
-import { Reservation } from '@prisma/client';
+import { CommunicationLog, Reservation } from '@prisma/client';
 import { ErrorCode } from '../../common/errors/error-codes';
-import { toBranchDate } from '../../common/utils/branch-date';
+import { todayInTimezone, toBranchDate } from '../../common/utils/branch-date';
 import { PrismaService } from '../../prisma/prisma.service';
+import { CommsLogService } from '../comms-log/comms-log.service';
 import { FoliosService } from '../folios/folios.service';
+import { HousekeepingService } from '../housekeeping/housekeeping.service';
 import { RateResolverService } from '../rate-resolver/rate-resolver.service';
 import { ReservationsService } from '../reservations/reservations.service';
 import {
@@ -15,6 +17,7 @@ import {
 } from '../reservations/policies';
 import {
   CancelBookingDto,
+  GuestMessageDto,
   LookupBookingDto,
   PreArrivalCheckInDto,
   PublicAvailabilityQueryDto,
@@ -171,6 +174,35 @@ export interface PublicCancellationResult {
   currency: string;
 }
 
+/** One message as a guest sees it — who it's from and what it says; no staff ids, channels or delivery internals. */
+export interface PublicMessage {
+  from: 'you' | 'property';
+  body: string;
+  /** "Late check-out request" etc. for a request the guest tagged; null otherwise. */
+  requestLabel: string | null;
+  sentAt: Date;
+}
+
+export interface PublicMessageThread {
+  confirmationNumber: string;
+  propertyName: string;
+  messages: PublicMessage[];
+}
+
+export interface PublicMessageSent extends PublicMessageThread {
+  /** True when a checked-in guest's housekeeping request went straight onto the housekeeping task board. */
+  housekeepingTaskCreated: boolean;
+}
+
+function toPublicMessage(row: CommunicationLog): PublicMessage {
+  return {
+    from: row.direction === 'inbound' ? 'you' : 'property',
+    body: row.body,
+    requestLabel: row.direction === 'inbound' ? row.subject : null,
+    sentAt: row.sentAt,
+  };
+}
+
 /**
  * The Direct Booking Engine's public, unauthenticated surface (Month 7).
  *
@@ -193,6 +225,8 @@ export class PublicBookingService {
     private readonly reservationsService: ReservationsService,
     private readonly rateResolverService: RateResolverService,
     private readonly foliosService: FoliosService,
+    private readonly commsLogService: CommsLogService,
+    private readonly housekeepingService: HousekeepingService,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -777,6 +811,79 @@ export class PublicBookingService {
       return `It's past check-in time on your arrival day, so this booking can't be cancelled online any more — please contact ${propertyName} directly.`;
     }
     return null;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Guest self-service — messaging the property (Month 9 unified inbox)
+  // ---------------------------------------------------------------------------
+
+  /** The guest's conversation about this booking. Read-only — nothing here marks anything seen. */
+  async getGuestMessages(slug: string, dto: LookupBookingDto): Promise<PublicMessageThread> {
+    const { tenantId, branchId } = await this.resolveBookableBranch(slug);
+    const property = await this.getProperty(slug);
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const reservation = await tx.reservation.findFirst({
+        where: this.bookingCredentialsWhere(branchId, dto),
+        select: { id: true, confirmationNumber: true },
+      });
+      if (!reservation) throw this.bookingNotFound();
+      const rows = await this.commsLogService.guestThreadInTx(tx, reservation.id);
+      return { confirmationNumber: reservation.confirmationNumber, propertyName: property.name, messages: rows.map(toPublicMessage) };
+    });
+  }
+
+  /**
+   * A guest writes to the property — the first real inbound channel of the
+   * unified inbox, and the one that works without any provider account. The
+   * message is an ordinary comms-log row (`direction: 'inbound'`), so it
+   * threads with everything else the property has sent this guest.
+   *
+   * A housekeeping request from a guest who's actually in a room also goes
+   * straight onto the housekeeping task board — the plan's "lands as a
+   * HousekeepingTask", not a message someone has to remember to forward.
+   * Anything else (a late check-out has a price; a question needs a person)
+   * waits in the inbox for staff.
+   */
+  async sendGuestMessage(slug: string, dto: GuestMessageDto): Promise<PublicMessageSent> {
+    const body = dto.body.trim();
+    if (!body) {
+      throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: 'Write a message before sending' });
+    }
+    const { tenantId, branchId } = await this.resolveBookableBranch(slug);
+    const property = await this.getProperty(slug);
+
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const reservation = await tx.reservation.findFirst({
+        where: this.bookingCredentialsWhere(branchId, dto),
+        select: { id: true, confirmationNumber: true, guestId: true, status: true, roomId: true, branch: { select: { timezone: true } } },
+      });
+      if (!reservation) throw this.bookingNotFound();
+
+      await this.commsLogService.logGuestMessageInTx(tx, tenantId, branchId, {
+        reservationId: reservation.id,
+        guestId: reservation.guestId,
+        body,
+        requestType: dto.requestType,
+      });
+
+      let housekeepingTaskCreated = false;
+      if (dto.requestType === 'housekeeping' && reservation.status === 'checked_in' && reservation.roomId) {
+        await this.housekeepingService.createTaskInTx(tx, tenantId, branchId, {
+          roomId: reservation.roomId,
+          priority: 2,
+          notes: `Guest request (${reservation.confirmationNumber}): ${body}`.slice(0, 1000),
+          triggerEvent: 'guest_request',
+          triggeredByReservationId: reservation.id,
+          taskDate: toBranchDate(todayInTimezone(reservation.branch.timezone)),
+          // A guest acted, not a staff member — the same NULL a public booking's `createdBy` uses.
+          actorId: null,
+        });
+        housekeepingTaskCreated = true;
+      }
+
+      const rows = await this.commsLogService.guestThreadInTx(tx, reservation.id);
+      return { confirmationNumber: reservation.confirmationNumber, propertyName: property.name, messages: rows.map(toPublicMessage), housekeepingTaskCreated };
+    });
   }
 
   // ---------------------------------------------------------------------------

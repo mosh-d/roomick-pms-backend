@@ -32,7 +32,9 @@ describe('CommsDispatcherService', () => {
   describe('queue selection', () => {
     it('only picks up queued EMAIL rows — other channels have no transport and must not be touched', async () => {
       await service.dispatchForTenant(TENANT_ID);
-      expect(tx.communicationLog.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { deliveryStatus: 'queued', channel: 'email' } }));
+      expect(tx.communicationLog.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { deliveryStatus: 'queued', channel: 'email', direction: 'outbound' } }),
+      );
     });
 
     it('processes the oldest first and caps the batch', async () => {

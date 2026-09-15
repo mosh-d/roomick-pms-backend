@@ -84,7 +84,9 @@ export class CommsDispatcherService {
     // across the whole batch.
     const queued = await this.prisma.withTenant(tenantId, (tx) =>
       tx.communicationLog.findMany({
-        where: { deliveryStatus: 'queued', channel: DISPATCHABLE_CHANNEL },
+        // Outbound only: an inbound email (once a provider's inbound webhook exists) is a message the guest sent US —
+        // "dispatching" it would email the guest their own words back.
+        where: { deliveryStatus: 'queued', channel: DISPATCHABLE_CHANNEL, direction: 'outbound' },
         orderBy: { sentAt: 'asc' },
         take: BATCH_SIZE,
         select: { id: true, subject: true, body: true, guest: { select: { email: true } } },

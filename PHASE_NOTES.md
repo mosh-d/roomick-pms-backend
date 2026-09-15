@@ -1,5 +1,38 @@
 # Phase Notes
 
+## Month 9 (fifth slice) — guest messages and the unified inbox (2026-09-15)
+
+The last Month 9 item in the growth plan: "a staff member can see and reply to a guest's inbound message from any connected channel in one inbox, threaded with that guest's prior automated log entries." Built on the one channel that works without a provider account — guests writing from "Manage your booking" — following the plan's own instruction to build the data model, inbox and send path now and make each provider a credentials swap later.
+
+### The comms log learns direction
+Migration `20260915010000`: `communication_log.direction` (`inbound | outbound`, default `outbound` — every existing row is something the property sent) and `readAt` (inbound only; NULL = unread), indexed on `(branchId, direction, readAt)`. A guest message is an ordinary comms-log row: `channel: in_app_chat` (already in the enum — the reference's "in-stay chat"), `direction: inbound`, `trigger: guest_message | guest_request`, `sentBy: NULL`, `deliveryStatus: delivered` (received). A tagged request carries its type in `subject` ("Late check-out request").
+
+### Guests
+- `POST /public/properties/:slug/bookings/messages` — the conversation about this booking: what the guest wrote and what staff wrote back (inbound rows, and manual outbound ones). Automated notices are the property's record, not the conversation, so they're left out. Projected to `{from: you | property, body, requestLabel, sentAt}` — no ids, staff users, channels or delivery states. Read-only: loading it marks nothing seen.
+- `POST …/bookings/messages/send` — `body` (trimmed, 1–2,000 characters) and an optional `requestType` (`late_checkout`, `housekeeping`). **A housekeeping request from a checked-in guest with a room also creates a `HousekeepingTask`** (`triggerEvent: guest_request`, priority 2, notes naming the booking) — the plan's "lands as a HousekeepingTask" — raised with a NULL actor: `createTaskInTx` and its audit now accept one, the same UUID trap the night audit hit. A late check-out has a price and a question needs a person, so those wait in the inbox; before check-in there's no room, so a housekeeping request is just a message.
+
+### Staff — `CommsLogService`
+- `GET /branches/:id/inbox?filter=all|unread` — one conversation per guest who has written in, whatever the channel, newest activity first: the guest, their latest booking here, a 160-character preview and the unread count. A guest who has only ever received automated notices isn't a conversation.
+- `GET /branches/:id/inbox/:guestId` — the whole thread at this branch, both directions, automated notices included, oldest first (newest 200).
+- `POST …/:guestId/read` — marks the guest's unread inbound messages read.
+- `POST …/:guestId/reply` — a staff reply on the booking the guest last wrote about, else their latest booking here. `in_app_chat` is `sent` the moment it's written, because the guest's portal page is its transport; email is `queued` for the dispatcher; SMS stays `queued` with no transport. Replying marks the thread read.
+
+### The outbox never sends inbound mail
+`CommsDispatcherService` now selects `direction: 'outbound'` only. Inbound rows today are `in_app_chat`, which it never touches, but the first provider inbound webhook for email would otherwise have emailed a guest their own words back.
+
+### One throttle budget for every guest-credential route
+Each route that takes a confirmation number and email answers a right pair differently from a wrong one, so each is a guessing oracle — and each had its own 10/hour bucket, so every route added (bill, cancellation quote, cancel, and now two message routes) gave an attacker another 10 guesses an hour: 70 across seven routes. They now share one per-IP key (`guestCredentialsThrottleKey`) at **20 an hour in total**; a real guest session — look up, check the bill, message, cancel — stays well under it. Public booking creation keeps its own 10/hour. The budget is per IP, so while testing locally every browser on the machine shares it.
+
+### Not built — needs provider accounts
+Inbound webhooks for SMS, WhatsApp and email (the plan's `POST /webhooks/messaging/:channel/inbound`): each provider shapes and signs its payload differently, and an unauthenticated endpoint accepting unsigned messages would be a spam hole, so each is built with its provider. Staff email and SMS replies are recorded and queued but don't reach the guest until a transport exists, and the reply box says so. Upsell offers (templated outbound messages) are a later increment on this same path.
+
+### Verified
+`npx tsc --noEmit`, `npm run lint`, `npm test` — 693 tests, all green (19 new: inbox grouping, sort, unread filter and preview; thread order and 404; mark-read scope; reply attachment, delivery states and 404; the inbound row's shape; the guest's conversation filter; the public routes' credential check, 404, allow-listed projection, trimming and blank refusal; a housekeeping task only for a checked-in guest with a room, none for late check-out; the shared throttle key; the dispatcher's outbound filter).
+
+Live against real Postgres and the owner's running server (21/21): a message, a late check-out request and a pre-arrival housekeeping request (no task); blank refused; the generic 404; the inbox showing 3 unread with the booking and preview; the thread with the automated confirmation first; inbound rows `delivered`, unread and sender-less; mark-read clearing the Unread filter; a portal reply `sent` by the staff member and an email reply `queued`; the guest seeing both replies but not the automated notice, with no internal fields; a checked-in guest's towel request on the housekeeping board for room 201 as `guest_request`; the shared budget (remaining 6 → 5 across a lookup then a messages call); the minute dispatcher sending the email reply and leaving inbound rows alone.
+
+`prisma generate` couldn't replace the query-engine DLL while the owner's backend held it (EPERM on Windows). The client code regenerated and the engine binary is the same version, so nothing is affected; rerun `prisma generate` with the server stopped to tidy up.
+
 ## Month 9 (fourth slice) — a cancellation policy, and guests cancelling their own bookings (2026-09-15)
 
 The owner's instruction: "use common standard policies". Until now `cancel()` flipped a reservation to `cancelled` with no policy and no charge, and the staff Cancel page said so — the reference's Cancellation Policy summary, Penalty/Refund figures and Manager Override had been deferred because nothing like a cancellation policy existed.
