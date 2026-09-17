@@ -13,6 +13,7 @@ import { RateResolverService } from '../rate-resolver/rate-resolver.service';
 import { RegistrationCardsService } from '../registration-cards/registration-cards.service';
 import { CommsLogService } from '../comms-log/comms-log.service';
 import { RestrictionsService } from '../revenue-management/restrictions.service';
+import { LoyaltyService } from '../loyalty/loyalty.service';
 import {
   CANCELLABLE_STATUSES,
   CancellationQuote,
@@ -76,6 +77,7 @@ export class ReservationsService {
     private readonly registrationCardsService: RegistrationCardsService,
     private readonly commsLogService: CommsLogService,
     private readonly restrictionsService: RestrictionsService,
+    private readonly loyaltyService: LoyaltyService,
   ) {}
 
   // -------------------------------------------------------------------------
@@ -753,6 +755,9 @@ export class ReservationsService {
         actorId,
       );
       await this.foliosService.settleIfFullyPaid(tx, folio, actorId, 'checkOut');
+      // The stay's points, once every night is on the bill — and in this
+      // transaction, so a check-out that fails earns nothing.
+      await this.loyaltyService.earnForStayInTx(tx, updated, actorId);
 
       await this.audit(tx, tenantId, reservation.branchId, actorId, 'reservation.checked_out', reservationId);
       await this.commsLogService.logAutomatedInTx(tx, tenantId, reservation.branchId, {

@@ -11,6 +11,7 @@ import { RateResolverService } from '../rate-resolver/rate-resolver.service';
 import { RegistrationCardsService } from '../registration-cards/registration-cards.service';
 import { CommsLogService } from '../comms-log/comms-log.service';
 import { RestrictionsService } from '../revenue-management/restrictions.service';
+import { LoyaltyService } from '../loyalty/loyalty.service';
 import { ReservationsService } from './reservations.service';
 
 const TENANT_ID = '11111111-1111-4111-8111-111111111111';
@@ -173,6 +174,7 @@ describe('ReservationsService', () => {
         { provide: RegistrationCardsService, useValue: registrationCardsService },
         { provide: CommsLogService, useValue: commsLogService },
         { provide: RestrictionsService, useValue: restrictionsService },
+        { provide: LoyaltyService, useValue: { earnForStayInTx: jest.fn().mockResolvedValue(0) } },
       ],
     }).compile();
     service = moduleRef.get(ReservationsService);

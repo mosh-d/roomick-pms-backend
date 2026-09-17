@@ -170,18 +170,9 @@ export class UpdateGuestDto {
   @IsString({ each: true })
   tags?: string[];
 
-  @ApiPropertyOptional({ example: 'Gold' })
-  @IsOptional()
-  @IsString()
-  @MaxLength(30)
-  loyaltyTier?: string;
-
-  @ApiPropertyOptional({ example: 1500 })
-  @IsOptional()
-  @Type(() => Number)
-  @IsInt()
-  @Min(0)
-  loyaltyPoints?: number;
+  // No loyalty fields: points move only through the loyalty ledger (earned
+  // at check-out, redeemed on a bill, adjusted with a reason), and the tier
+  // follows the points — see LoyaltyService.
 }
 
 export class AddGuestNoteDto {

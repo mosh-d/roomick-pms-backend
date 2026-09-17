@@ -266,6 +266,14 @@ export class FoliosService {
   }
 
   async recordPayment(tenantId: string, folioId: string, dto: RecordPaymentDto, actorId: string): Promise<Payment> {
+    // A points payment has to come off a points balance, and only the loyalty
+    // redemption writes both halves together.
+    if (dto.method === 'loyalty_points') {
+      throw new BadRequestException({
+        code: ErrorCode.VALIDATION_FAILED,
+        message: "Loyalty points are redeemed from the guest's balance — use Redeem Points on the bill",
+      });
+    }
     return this.prisma.withTenant(tenantId, async (tx) => {
       const folio = await this.findFolioOrThrow(tx, folioId);
       this.assertFolioOpen(folio);
@@ -301,6 +309,43 @@ export class FoliosService {
       });
       return payment;
     });
+  }
+
+  /**
+   * The payment half of a loyalty redemption — only `LoyaltyService.redeem`
+   * writes these, in the same transaction as the points coming off. Capped at
+   * what the bill still owes: points can settle a bill, never leave a credit
+   * that would go back to the guest as cash.
+   */
+  async recordLoyaltyPaymentInTx(tx: TenantTx, folioId: string, amount: Prisma.Decimal, reference: string, actorId: string): Promise<Payment> {
+    const folio = await this.findFolioOrThrow(tx, folioId);
+    this.assertFolioOpen(folio);
+    const { balanceDue } = await this.computeTotals(tx, folioId);
+    if (amount.greaterThan(balanceDue)) {
+      throw new ConflictException({
+        code: ErrorCode.CONFLICT,
+        message: `Those points are worth ${amount.toFixed(2)}, more than the ${balanceDue.greaterThan(0) ? balanceDue.toFixed(2) : '0.00'} this bill owes`,
+      });
+    }
+    const branch = await this.propertyService.assertBranch(tx, folio.branchId);
+    const payment = await tx.payment.create({
+      data: {
+        tenantId: folio.tenantId,
+        folioId,
+        method: 'loyalty_points',
+        amount,
+        currency: branch.currency,
+        reference,
+        paymentPurpose: 'payment',
+        recordedBy: actorId,
+      },
+    });
+    await this.audit(tx, folio.tenantId, folio.branchId, actorId, 'payment.recorded', payment.id, {
+      folioId,
+      amount: amount.toFixed(2),
+      method: 'loyalty_points',
+    });
+    return payment;
   }
 
   /**

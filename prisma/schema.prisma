@@ -369,6 +369,8 @@ model Tenant {
   posOrders                PosOrder[]
   competitors              Competitor[]
   competitorRates          CompetitorRate[]
+  loyaltyProgram           LoyaltyProgram?
+  loyaltyTransactions      LoyaltyTransaction[]
 
   @@index([isDemo, demoExpiresAt])
   @@map("tenants")
@@ -632,6 +634,7 @@ model Branch {
   menuItems                MenuItem[]
   posOrders                PosOrder[]
   competitors              Competitor[]
+  loyaltyTransactions      LoyaltyTransaction[]
 
   @@index([tenantId, brandId])
   @@index([tenantId, deletedAt])
@@ -765,34 +768,36 @@ model RoomBlock {
 // ---------------------------------------------------------------------------
 
 model GuestProfile {
-  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  tenantId        String    @db.Uuid
-  name            String    @db.VarChar(200)
-  email           String?   @db.VarChar(320)
-  phone           String?   @db.VarChar(20)
-  nationality     String?   @db.Char(2) // ISO 3166-1 alpha-2
-  idDocType       String?   @db.VarChar(30) // passport | national_id | drivers_license
-  idDocNumber     String? // AES-256-GCM encrypted at application layer — never plaintext
-  idDocUrl        String? // encrypted S3 bucket URL
-  idDocExpiryDate DateTime? @db.Date // drives 3-state check-in logic: first_visit | valid | expired
-  preferences     Json? // {bedType, floor, view, pillow, temp, dietaryRestrictions[]}
-  vipLevel        Int?      @default(0) @db.SmallInt // 0–5
-  tags            String[]
-  notes           String?
-  loyaltyTier     String?   @db.VarChar(30)
-  loyaltyPoints   Int?      @default(0)
-  createdAt       DateTime  @default(now()) @db.Timestamptz(6)
-  updatedAt       DateTime  @updatedAt @db.Timestamptz(6)
-  deletedAt       DateTime? @db.Timestamptz(6) // GDPR erasure sets deletedAt + nullifies PII
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId          String    @db.Uuid
+  name              String    @db.VarChar(200)
+  email             String?   @db.VarChar(320)
+  phone             String?   @db.VarChar(20)
+  nationality       String?   @db.Char(2) // ISO 3166-1 alpha-2
+  idDocType         String?   @db.VarChar(30) // passport | national_id | drivers_license
+  idDocNumber       String? // AES-256-GCM encrypted at application layer — never plaintext
+  idDocUrl          String? // encrypted S3 bucket URL
+  idDocExpiryDate   DateTime? @db.Date // drives 3-state check-in logic: first_visit | valid | expired
+  preferences       Json? // {bedType, floor, view, pillow, temp, dietaryRestrictions[]}
+  vipLevel          Int?      @default(0) @db.SmallInt // 0–5
+  tags              String[]
+  notes             String?
+  loyaltyTier       String?   @db.VarChar(30)
+  loyaltyPoints     Int?      @default(0) // the balance — a copy of the sum of the guest's loyalty_transactions, kept in the same transaction as each row
+  loyaltyEnrolledAt DateTime? @db.Timestamptz(6) // NULL = not a member of the loyalty programme
+  createdAt         DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt         DateTime  @updatedAt @db.Timestamptz(6)
+  deletedAt         DateTime? @db.Timestamptz(6) // GDPR erasure sets deletedAt + nullifies PII
 
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict)
 
-  reservations      Reservation[]
-  folios            Folio[]
-  registrationCards RegistrationCard[]
-  communicationLogs CommunicationLog[]
-  gdprRequests      GdprRequest[]
-  guestNotes        GuestNote[]
+  reservations        Reservation[]
+  folios              Folio[]
+  registrationCards   RegistrationCard[]
+  communicationLogs   CommunicationLog[]
+  gdprRequests        GdprRequest[]
+  guestNotes          GuestNote[]
+  loyaltyTransactions LoyaltyTransaction[]
 
   @@index([tenantId, email])
   @@index([tenantId, name])
@@ -1108,6 +1113,7 @@ model Reservation {
   registrationCards          RegistrationCard[]
   communicationLogs          CommunicationLog[]
   posOrders                  PosOrder[]
+  loyaltyTransaction         LoyaltyTransaction?
 
   @@unique([tenantId, confirmationNumber])
   @@index([branchId, checkInDate, status])
@@ -1371,7 +1377,8 @@ model Payment {
   recordedByUser User?  @relation("PaymentRecordedBy", fields: [recordedBy], references: [id], onDelete: SetNull)
   voidedByUser   User?  @relation("PaymentVoidedBy", fields: [voidedBy], references: [id], onDelete: SetNull)
 
-  refunds Refund[]
+  refunds            Refund[]
+  loyaltyTransaction LoyaltyTransaction?
 
   @@index([folioId, paymentPurpose])
   @@index([shiftId])
@@ -1733,6 +1740,61 @@ model PosOrder {
   @@index([branchId, createdAt])
   @@index([shiftId])
   @@map("pos_orders")
+}
+
+// ---------------------------------------------------------------------------
+// Loyalty (growth plan Month 11)
+// ---------------------------------------------------------------------------
+
+enum LoyaltyTxType {
+  earn // a stay's spend, at check-out
+  redeem // points turned into a folio payment
+  adjust // a manager's correction or goodwill, with a reason
+
+  @@map("loyalty_tx_type_enum")
+}
+
+// One programme per tenant — guests are tenant-wide, so a member earns and
+// redeems at every branch that charges in the programme's currency.
+model LoyaltyProgram {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId      String   @unique @db.Uuid
+  isActive      Boolean  @default(false)
+  currency      String   @db.Char(3)
+  pointsPerUnit Decimal  @db.Decimal(10, 4) // points per 1 unit of currency spent before tax — 0.01 = 1 point per ₦100
+  pointValue    Decimal  @db.Decimal(12, 4) // what one point is worth when redeemed, in `currency`
+  // [{ name, threshold, benefits: string[] }] — threshold = lifetime points; a member holds the highest tier reached
+  tiers         Json
+  updatedAt     DateTime @updatedAt @db.Timestamptz(6)
+  updatedBy     String?  @db.Uuid
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@map("loyalty_programs")
+}
+
+// The points ledger, append-only. A guest's balance is the sum of their rows.
+model LoyaltyTransaction {
+  id                String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId          String        @db.Uuid
+  guestId           String        @db.Uuid
+  branchId          String?       @db.Uuid
+  type              LoyaltyTxType
+  points            Int // signed: a redemption is negative
+  description       String        @db.VarChar(300)
+  earnReservationId String?       @unique @db.Uuid // earn rows: one per stay
+  paymentId         String?       @unique @db.Uuid // redeem rows: the folio payment they became
+  createdBy         String?       @db.Uuid // NULL = earned automatically at check-out
+  createdAt         DateTime      @default(now()) @db.Timestamptz(6)
+
+  tenant      Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  guest       GuestProfile @relation(fields: [guestId], references: [id], onDelete: Cascade)
+  branch      Branch?      @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  reservation Reservation? @relation(fields: [earnReservationId], references: [id], onDelete: Restrict)
+  payment     Payment?     @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+
+  @@index([guestId, createdAt])
+  @@map("loyalty_transactions")
 }
 
 model NightAuditLog {

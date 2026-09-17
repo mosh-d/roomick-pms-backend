@@ -213,6 +213,11 @@ describe('FoliosService', () => {
       expect(tx.shift.findFirst).not.toHaveBeenCalled();
       expect(tx.payment.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ shiftId: undefined }) }));
     });
+
+    it("refuses a plain loyalty-points payment — points come off a balance only through a redemption", async () => {
+      await expect(service.recordPayment(TENANT_ID, FOLIO_ID, { amount: 5000, method: 'loyalty_points' } as never, ACTOR_ID)).rejects.toThrow(/Redeem Points/);
+      expect(tx.payment.create).not.toHaveBeenCalled();
+    });
   });
 
   describe('balance — computed, never stored', () => {

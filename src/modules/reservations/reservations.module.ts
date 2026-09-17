@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { LoyaltyModule } from '../loyalty/loyalty.module';
 import { PropertyModule } from '../property/property.module';
 import { GuestsModule } from '../guests/guests.module';
 import { FoliosModule } from '../folios/folios.module';
@@ -11,7 +12,7 @@ import { ReservationsController } from './reservations.controller';
 import { ReservationsService } from './reservations.service';
 
 @Module({
-  imports: [PropertyModule, GuestsModule, FoliosModule, HousekeepingModule, RateResolverModule, RegistrationCardsModule, CommsLogModule, RevenueManagementModule],
+  imports: [PropertyModule, GuestsModule, FoliosModule, HousekeepingModule, RateResolverModule, RegistrationCardsModule, CommsLogModule, RevenueManagementModule, LoyaltyModule],
   controllers: [ReservationsController],
   providers: [ReservationsService],
   exports: [ReservationsService],

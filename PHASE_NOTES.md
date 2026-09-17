@@ -1,5 +1,78 @@
 # Phase Notes
 
+## Month 11 (first slice) — the loyalty programme: points earned at check-out, tiers, and redeeming on the bill (2026-09-15)
+
+Month 11's loyalty deliverable: "Guests earn and redeem loyalty points automatically from real folio spend; tier upgrades trigger without manual intervention."
+
+Before this, loyalty was display-only. `GuestProfile.loyaltyTier` (free text) and `loyaltyPoints` were typed in by hand. The payment form also offered "Loyalty Points" as a method that took any amount and never touched anyone's points. Migration `20260916020000`.
+
+### The programme
+- **`LoyaltyProgram`**, one per tenant (guests are tenant-wide). It holds:
+  - on/off;
+  - a currency, which must be one a branch charges in; points are earned and redeemed only at those branches;
+  - points per unit of spend before tax, and what a point is worth when redeemed;
+  - tiers, each a name, a threshold in lifetime points, and benefits.
+- **Routes:** `GET/PUT /loyalty/program` (Owner/Manager). Until it's saved, the GET offers suggested figures, clearly flagged: the reference's tiers plus a base "Member" tier at 0.
+- **Re-tiering:** saving moves every member to the tier their lifetime points reach under the new thresholds.
+- **Benefits** come from a fixed list: late check-out, early check-in, room upgrade, welcome drink, free breakfast, lounge access. They're shown for staff to honour, not applied automatically.
+
+### The ledger
+- **`LoyaltyTransaction` is append-only**, with three kinds of row. A CHECK keeps each row's shape.
+  - **earn:** once per stay, enforced by a unique `earnReservationId`;
+  - **redeem:** tied to the payment it became, by a unique `paymentId`;
+  - **adjust:** a manager's change, with a reason.
+- **The balance** is `GuestProfile.loyaltyPoints`, moved in the same transaction as every row. The guest row is locked first, so two redemptions can't spend the same points.
+- **Membership** is marked by `GuestProfile.loyaltyEnrolledAt`.
+- **Carried-over points.** Points already typed onto profiles were carried over as opening-balance rows, and anyone with a tier or points became a member. `guest_profiles` has forced RLS and the database role doesn't bypass it, so the migration sets each tenant in turn. Checked afterwards across all 185 tenants: 3 opening rows, 7 members, and no guest whose balance differs from their ledger.
+
+### Earning at check-out
+`ReservationsService.checkOut` calls `LoyaltyService.earnForStayInTx` in its own transaction, after the final nights are posted:
+- **What earns:** every non-tax line across the stay's folios — room, extras, charges from an outlet — with corrections netted. That's multiplied by the rate and rounded down. It also enrols the guest if they weren't a member.
+- **Tiers:** a member holds the highest tier their lifetime points reach. Lifetime points never fall, so spending points never costs a tier.
+- **The upgrade email:** an upgrade logs an automated email ("Welcome to Gold", listing the benefits). It's queued like every other automated message until an email provider is connected.
+- **When nothing is earned:** the programme is off, or the branch charges in another currency.
+
+### Redeeming
+- `POST /folios/:id/loyalty-redemptions {points}` (Owner/Manager/Front Desk at the bill's branch). The bill's own guest redeems.
+- Points × point value, rounded down to the cent, become a `loyalty_points` payment through `FoliosService.recordLoyaltyPaymentInTx`, with the redeem row written in the same transaction.
+- The payment is capped at what the bill still owes, so points never become a credit refunded as cash.
+- `recordPayment` now refuses the `loyalty_points` method.
+
+### Members
+- `GET /guests/:id/loyalty` returns the balance, lifetime points, tier, next tier, what the points are worth, and the history.
+- `POST /guests/:id/loyalty/enroll` enrols a guest by hand.
+- `POST /guests/:id/loyalty/adjustments` (Owner/Manager) adds or removes points with a reason, never below zero.
+- The guest update DTO no longer accepts `loyaltyTier` or `loyaltyPoints`.
+
+### Not built
+- Points expiry, and tier downgrades over time: tiers follow only lifetime points and threshold changes.
+- Earning on walk-in POS sales (there's no guest to link them to).
+- Showing guests their points on "Manage your booking".
+- Applying benefits automatically.
+
+Marketing campaigns are the next slice.
+
+### Verified
+`npx tsc --noEmit`, `npm run lint`, `npm test`: 764 tests, 14 more than before. They cover:
+- **the rules:** tier by lifetime points in any entry order, the next tier, points rounded down, redemption value rounded down;
+- **earning:** once per stay, before tax, balance moved, upgrade with its email, and nothing when off, in another currency, already earned, or corrected to zero;
+- **redeeming:** payment and points together, over-balance, another branch, programme off, points too few to be worth a cent;
+- **adjustments:** the reason recorded, never below zero;
+- **the programme:** validation and re-tiering;
+- a plain loyalty payment refused.
+
+Live against real Postgres and the owner's running server, 17/17:
+- The suggested programme, a currency no branch uses refused, then saved.
+- A stay earning 300 points on its ₦30,000 night: VAT not counted, a corrected minibar earning nothing, the guest enrolled in Member, 200 short of Silver.
+- A manager's +250 reaching Silver; an adjustment below zero refused.
+- A ₦95,000 stay reaching Gold, with "Welcome to Gold" and the benefits in the comms log.
+- A plain loyalty payment refused; over-balance refused.
+- 500 points as a ₦500 payment; points worth more than the ₦250 still owed refused; 250 points settling the bill, with lifetime points and Gold kept.
+- Raising Gold to 2,000 moving the member to Silver.
+- Switched off: nothing earned at check-out, and redeeming and enrolling refused. Switched back on: a hand enrolment.
+
+The browser run passed 15/15 (the frontend's Phase 76).
+
 ## Month 8 (the rest) — comp set, group blocks that hold rooms, and Banquet Event Orders (2026-09-15)
 
 Three Month 8 deliverables were still open:

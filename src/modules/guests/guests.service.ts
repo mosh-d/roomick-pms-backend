@@ -147,8 +147,6 @@ export class GuestsService {
           preferences: dto.preferences as unknown as Prisma.InputJsonValue | undefined,
           vipLevel: dto.vipLevel,
           tags: dto.tags,
-          loyaltyTier: dto.loyaltyTier,
-          loyaltyPoints: dto.loyaltyPoints,
         },
       });
       await tx.auditLog.create({ data: { tenantId, userId: actorId, action: 'guest.updated', entityType: 'guest_profile', entityId: guestId, after: dto as unknown as Prisma.InputJsonValue } });
