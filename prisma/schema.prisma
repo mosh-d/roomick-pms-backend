@@ -371,6 +371,10 @@ model Tenant {
   competitorRates          CompetitorRate[]
   loyaltyProgram           LoyaltyProgram?
   loyaltyTransactions      LoyaltyTransaction[]
+  guestSegments            GuestSegment[]
+  messageTemplates         MessageTemplate[]
+  marketingCampaigns       MarketingCampaign[]
+  campaignRecipients       CampaignRecipient[]
 
   @@index([isDemo, demoExpiresAt])
   @@map("tenants")
@@ -483,6 +487,28 @@ model BookingSlugIndex {
 
   @@index([branchId])
   @@map("booking_slug_index")
+}
+
+/**
+ * Pre-auth lookup for the three links inside a marketing email - the open
+ * pixel, the click redirect and the unsubscribe page. Same category and the
+ * same reasoning as `BookingSlugIndex` above: those requests arrive from a
+ * mail client with no session and no tenant header, and `campaign_recipients`
+ * has FORCE ROW LEVEL SECURITY, so its row cannot be found without knowing
+ * the tenant first.
+ * It holds the opaque token and the two ids it points at and nothing else -
+ * no address, no name, no campaign content. `MarketingService` re-loads the
+ * real recipient inside withTenant() before recording anything, exactly as
+ * PublicBookingService re-loads the branch behind a slug.
+ */
+model MarketingTokenIndex {
+  token       String   @id @db.VarChar(64)
+  tenantId    String   @db.Uuid
+  recipientId String   @db.Uuid
+  createdAt   DateTime @default(now()) @db.Timestamptz(6)
+
+  @@index([recipientId])
+  @@map("marketing_token_index")
 }
 
 model Role {
@@ -635,6 +661,7 @@ model Branch {
   posOrders                PosOrder[]
   competitors              Competitor[]
   loyaltyTransactions      LoyaltyTransaction[]
+  marketingCampaigns       MarketingCampaign[]
 
   @@index([tenantId, brandId])
   @@index([tenantId, deletedAt])
@@ -768,26 +795,32 @@ model RoomBlock {
 // ---------------------------------------------------------------------------
 
 model GuestProfile {
-  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  tenantId          String    @db.Uuid
-  name              String    @db.VarChar(200)
-  email             String?   @db.VarChar(320)
-  phone             String?   @db.VarChar(20)
-  nationality       String?   @db.Char(2) // ISO 3166-1 alpha-2
-  idDocType         String?   @db.VarChar(30) // passport | national_id | drivers_license
-  idDocNumber       String? // AES-256-GCM encrypted at application layer — never plaintext
-  idDocUrl          String? // encrypted S3 bucket URL
-  idDocExpiryDate   DateTime? @db.Date // drives 3-state check-in logic: first_visit | valid | expired
-  preferences       Json? // {bedType, floor, view, pillow, temp, dietaryRestrictions[]}
-  vipLevel          Int?      @default(0) @db.SmallInt // 0–5
-  tags              String[]
-  notes             String?
-  loyaltyTier       String?   @db.VarChar(30)
-  loyaltyPoints     Int?      @default(0) // the balance — a copy of the sum of the guest's loyalty_transactions, kept in the same transaction as each row
-  loyaltyEnrolledAt DateTime? @db.Timestamptz(6) // NULL = not a member of the loyalty programme
-  createdAt         DateTime  @default(now()) @db.Timestamptz(6)
-  updatedAt         DateTime  @updatedAt @db.Timestamptz(6)
-  deletedAt         DateTime? @db.Timestamptz(6) // GDPR erasure sets deletedAt + nullifies PII
+  id                      String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId                String    @db.Uuid
+  name                    String    @db.VarChar(200)
+  email                   String?   @db.VarChar(320)
+  phone                   String?   @db.VarChar(20)
+  nationality             String?   @db.Char(2) // ISO 3166-1 alpha-2
+  idDocType               String?   @db.VarChar(30) // passport | national_id | drivers_license
+  idDocNumber             String? // AES-256-GCM encrypted at application layer — never plaintext
+  idDocUrl                String? // encrypted S3 bucket URL
+  idDocExpiryDate         DateTime? @db.Date // drives 3-state check-in logic: first_visit | valid | expired
+  preferences             Json? // {bedType, floor, view, pillow, temp, dietaryRestrictions[]}
+  vipLevel                Int?      @default(0) @db.SmallInt // 0–5
+  tags                    String[]
+  notes                   String?
+  loyaltyTier             String?   @db.VarChar(30)
+  loyaltyPoints           Int?      @default(0) // the balance — a copy of the sum of the guest's loyalty_transactions, kept in the same transaction as each row
+  loyaltyEnrolledAt       DateTime? @db.Timestamptz(6) // NULL = not a member of the loyalty programme
+  // Marketing consent. No campaign ever reaches a guest without an explicit opt-in, and
+  // `marketingUnsubscribedAt` is kept after an opt-out as the record of when they withdrew it.
+  marketingOptIn          Boolean   @default(false)
+  marketingOptInAt        DateTime? @db.Timestamptz(6)
+  marketingOptInSource    String?   @db.VarChar(30) // booking_engine | guest_portal | front_desk
+  marketingUnsubscribedAt DateTime? @db.Timestamptz(6)
+  createdAt               DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt               DateTime  @updatedAt @db.Timestamptz(6)
+  deletedAt               DateTime? @db.Timestamptz(6) // GDPR erasure sets deletedAt + nullifies PII
 
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict)
 
@@ -798,6 +831,7 @@ model GuestProfile {
   gdprRequests        GdprRequest[]
   guestNotes          GuestNote[]
   loyaltyTransactions LoyaltyTransaction[]
+  campaignRecipients  CampaignRecipient[]
 
   @@index([tenantId, email])
   @@index([tenantId, name])
@@ -1797,6 +1831,135 @@ model LoyaltyTransaction {
   @@map("loyalty_transactions")
 }
 
+// ---------------------------------------------------------------------------
+// Marketing (Month 11) - campaigns reuse the Comms Log outbound path below:
+// a campaign send and a booking confirmation are the same delivery mechanism
+// at different volumes, not two systems.
+// ---------------------------------------------------------------------------
+
+enum CampaignStatus {
+  draft
+  scheduled
+  sending // recipients are still being written - resumable, see MarketingService.sendCampaign
+  sent
+  cancelled
+  failed
+
+  @@map("campaign_status_enum")
+}
+
+/**
+ * A saved audience definition. `criteria` is re-queried against live
+ * guest/reservation/payment data every time the segment is previewed or sent
+ * to, so there is no materialised member list to go stale - and no
+ * guest-data warehouse, which the growth plan's own note for this month says
+ * is unnecessary at this scale.
+ * Soft-deleted rather than deleted, so a campaign that already went out
+ * keeps the audience it was aimed at.
+ */
+model GuestSegment {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId    String    @db.Uuid
+  name        String    @db.VarChar(120)
+  description String?   @db.VarChar(300)
+  // { vipLevelMin?, loyaltyTiers?: string[], tags?: string[], nationalities?: string[], branchIds?: string[],
+  //   minStays?, minTotalSpend?, lastStayWithinDays?, notStayedForDays? } - see segment-rules.ts
+  criteria    Json
+  createdBy   String?   @db.Uuid
+  createdAt   DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt   DateTime  @updatedAt @db.Timestamptz(6)
+  deletedAt   DateTime? @db.Timestamptz(6)
+
+  tenant    Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  campaigns MarketingCampaign[]
+
+  @@unique([tenantId, name])
+  @@map("guest_segments")
+}
+
+/**
+ * Subject and body with `{{merge_field}}` placeholders - campaign-render.ts owns the ones that resolve.
+ */
+model MessageTemplate {
+  id        String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String       @db.Uuid
+  name      String       @db.VarChar(120)
+  channel   CommsChannel @default(email)
+  subject   String?      @db.VarChar(500)
+  body      String
+  createdBy String?      @db.Uuid
+  createdAt DateTime     @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime     @updatedAt @db.Timestamptz(6)
+  deletedAt DateTime?    @db.Timestamptz(6)
+
+  tenant           Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  campaigns        MarketingCampaign[] @relation("CampaignTemplate")
+  variantCampaigns MarketingCampaign[] @relation("CampaignVariantTemplate")
+
+  @@unique([tenantId, name])
+  @@map("message_templates")
+}
+
+model MarketingCampaign {
+  id                String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId          String         @db.Uuid
+  branchId          String         @db.Uuid // the sending property: every CommunicationLog row belongs to one
+  name              String         @db.VarChar(160)
+  channel           CommsChannel
+  segmentId         String         @db.Uuid
+  templateId        String         @db.Uuid
+  subject           String?        @db.VarChar(500) // overrides the template's own subject for this send
+  status            CampaignStatus @default(draft)
+  scheduledAt       DateTime?      @db.Timestamptz(6)
+  sentAt            DateTime?      @db.Timestamptz(6)
+  variantTemplateId String?        @db.Uuid // A/B test: variant B's template. NULL = no test
+  splitRatio        Decimal?       @db.Decimal(3, 2) // share of recipients who get variant A
+  recipientCount    Int            @default(0)
+  failureReason     String?        @db.VarChar(500)
+  createdBy         String?        @db.Uuid
+  createdAt         DateTime       @default(now()) @db.Timestamptz(6)
+  updatedAt         DateTime       @updatedAt @db.Timestamptz(6)
+
+  tenant          Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  branch          Branch              @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  segment         GuestSegment        @relation(fields: [segmentId], references: [id], onDelete: Restrict)
+  template        MessageTemplate     @relation("CampaignTemplate", fields: [templateId], references: [id], onDelete: Restrict)
+  variantTemplate MessageTemplate?    @relation("CampaignVariantTemplate", fields: [variantTemplateId], references: [id], onDelete: Restrict)
+  recipients      CampaignRecipient[]
+
+  @@index([tenantId, branchId, status])
+  @@index([status, scheduledAt]) // the scheduled-send sweep's own query
+  @@map("marketing_campaigns")
+}
+
+/**
+ * One row per guest a campaign actually went out to, and the only place open
+ * and click are recorded. `communicationLogId` is the message itself, so the
+ * guest's own comms history and the campaign's performance are one event seen
+ * from two sides rather than two copies of it.
+ */
+model CampaignRecipient {
+  id                 String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId           String    @db.Uuid
+  campaignId         String    @db.Uuid
+  guestId            String    @db.Uuid
+  variant            String    @db.Char(1) // A | B
+  communicationLogId String?   @unique @db.Uuid
+  sentAt             DateTime  @default(now()) @db.Timestamptz(6)
+  openedAt           DateTime? @db.Timestamptz(6) // first open only - a pixel can be fetched many times
+  clickedAt          DateTime? @db.Timestamptz(6)
+  unsubscribedAt     DateTime? @db.Timestamptz(6)
+
+  tenant           Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  campaign         MarketingCampaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  guest            GuestProfile      @relation(fields: [guestId], references: [id], onDelete: Cascade)
+  communicationLog CommunicationLog? @relation(fields: [communicationLogId], references: [id], onDelete: SetNull)
+
+  @@unique([campaignId, guestId]) // one send per guest per campaign - what makes a resumed send idempotent
+  @@index([tenantId, campaignId])
+  @@map("campaign_recipients")
+}
+
 model NightAuditLog {
   id                BigInt           @id @default(autoincrement())
   tenantId          String           @db.Uuid
@@ -1834,6 +1997,9 @@ model CommunicationLog {
   channel           CommsChannel
   subject           String?        @db.VarChar(500) // email subject, or a guest request's type ("Late check-out request")
   body              String
+  // The HTML a mail client receives, when there is one (marketing campaigns render both).
+  // `body` above stays the plain-text version and is what the inbox and the guest history show.
+  bodyHtml          String?
   trigger           String         @db.VarChar(50) // booking_confirmation | pre_arrival | checkin_receipt | invoice | post_stay | no_show_notice | cancellation | manual | guest_message | guest_request
   direction         CommsDirection @default(outbound)
   readAt            DateTime?      @db.Timestamptz(6) // inbound only: when staff first read it. NULL = unread
@@ -1850,6 +2016,8 @@ model CommunicationLog {
   reservation Reservation? @relation(fields: [reservationId], references: [id], onDelete: SetNull)
   guest       GuestProfile @relation(fields: [guestId], references: [id], onDelete: Restrict)
   sentByUser  User?        @relation(fields: [sentBy], references: [id], onDelete: SetNull)
+
+  campaignRecipient CampaignRecipient?
 
   @@index([reservationId, sentAt(sort: Desc)])
   @@index([guestId, sentAt(sort: Desc)])

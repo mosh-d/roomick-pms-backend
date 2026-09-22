@@ -11,6 +11,18 @@ export const GUEST_REQUEST_LABELS = {
 } as const;
 export type GuestRequestType = keyof typeof GUEST_REQUEST_LABELS;
 
+/**
+ * What every marketing campaign message is logged as. It lives here, with the
+ * log, because the log is what gives triggers their meaning.
+ *
+ * Campaign messages stay in a guest's own history (the profile's comms log
+ * shows everything the property has sent them) but are kept out of the staff
+ * inbox: a guest who wrote to the desk last week would otherwise have their
+ * conversation topped by a newsletter, both in the list preview and in the
+ * thread a receptionist is trying to reply in.
+ */
+export const MARKETING_CAMPAIGN_TRIGGER = 'marketing_campaign';
+
 const INBOX_LIMIT = 100;
 const THREAD_LIMIT = 200;
 const GUEST_THREAD_LIMIT = 100;
@@ -142,7 +154,10 @@ export class CommsLogService {
       const conversations: InboxConversation[] = [];
       for (const { guestId } of writers) {
         const guest = await tx.guestProfile.findFirst({ where: { id: guestId }, select: { id: true, name: true, email: true, phone: true } });
-        const last = await tx.communicationLog.findFirst({ where: { branchId, guestId }, orderBy: { sentAt: 'desc' } });
+        const last = await tx.communicationLog.findFirst({
+          where: { branchId, guestId, trigger: { not: MARKETING_CAMPAIGN_TRIGGER } },
+          orderBy: { sentAt: 'desc' },
+        });
         if (!guest || !last) continue;
         const unreadCount = await tx.communicationLog.count({ where: { branchId, guestId, direction: 'inbound', readAt: null } });
         const reservation = await tx.reservation.findFirst({
@@ -181,7 +196,11 @@ export class CommsLogService {
         take: 20,
       });
       // Newest THREAD_LIMIT, then back into reading order.
-      const messages = await tx.communicationLog.findMany({ where: { branchId, guestId }, orderBy: { sentAt: 'desc' }, take: THREAD_LIMIT });
+      const messages = await tx.communicationLog.findMany({
+        where: { branchId, guestId, trigger: { not: MARKETING_CAMPAIGN_TRIGGER } },
+        orderBy: { sentAt: 'desc' },
+        take: THREAD_LIMIT,
+      });
       return { guest, reservations, messages: messages.reverse() };
     });
   }

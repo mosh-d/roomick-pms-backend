@@ -35,6 +35,10 @@ const GUEST_PROFILE_SELECT = {
   tags: true,
   loyaltyTier: true,
   loyaltyPoints: true,
+  marketingOptIn: true,
+  marketingOptInAt: true,
+  marketingOptInSource: true,
+  marketingUnsubscribedAt: true,
 } as const;
 
 export interface GuestStaySummary {
@@ -60,6 +64,11 @@ export type GuestProfile = GuestSummary & {
   tags: string[];
   loyaltyTier: string | null;
   loyaltyPoints: number | null;
+  /** Marketing consent. Changed only through `PUT /guests/:id/marketing-consent`, the booking engine, online check-in, or an unsubscribe link. */
+  marketingOptIn: boolean;
+  marketingOptInAt: Date | null;
+  marketingOptInSource: string | null;
+  marketingUnsubscribedAt: Date | null;
   /** Every reservation ever made by this guest, newest check-in first. */
   stayHistory: GuestStaySummary[];
   /** Sum of every non-void payment across every folio this guest has ever had — a plain string, already rounded to 2dp. */

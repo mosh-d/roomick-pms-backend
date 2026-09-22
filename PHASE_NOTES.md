@@ -1,5 +1,108 @@
 # Phase Notes
 
+## Month 11 (second slice) — email campaigns: consent, audiences, templates, A/B tests, scheduling, and open/click tracking (2026-09-22)
+
+Month 11's marketing deliverable: "A marketing campaign sends through the real (or stubbed, pending provider credentials) messaging path and reports open/click performance." Migrations `20260917010000` (the marketing tables and guest consent) and `20260917010100` (`communication_log.bodyHtml`).
+
+### Consent comes first
+Before this, `GuestProfile` had no record of whether a guest had agreed to marketing at all. Sending campaigns without one would have emailed every guest with an address.
+- **New columns on `guest_profiles`:** `marketingOptIn` (default false), `marketingOptInAt`, `marketingOptInSource` (`booking_engine`, `guest_portal` or `front_desk`) and `marketingUnsubscribedAt`. A CHECK means an opted-in guest always has a date.
+- **Where consent comes from:**
+  - an unticked-by-default box on the public booking page and in online check-in (`marketingOptIn` on both public DTOs);
+  - the front desk, through `PUT /guests/:id/marketing-consent`;
+  - the unsubscribe link in every campaign, which withdraws it.
+- **Only ever ON from a form.** An unticked box is not a withdrawal: a guest who opted in last year and books again without ticking stays opted in. Leaving is what the unsubscribe link is for.
+- **Consent given again after an opt-out is new consent,** so it gets today's date. Withdrawing keeps `marketingOptInAt`, as the record of when consent had been given.
+- **It's single opt-in.** Anyone can tick the box with someone else's address. A confirmation email (double opt-in) is the fix, and it needs a real email provider first.
+
+### Audiences (`GuestSegment`)
+- **Saved as rules, queried live** every time they're previewed or sent to, so there's no member list to go stale. This is the growth plan's own "no new guest-data warehouse".
+- **The rules** (all optional, AND-ed together; `segment-rules.ts`): VIP level at least, loyalty tiers, tags (any of), nationalities, has stayed at chosen branches, minimum completed stays, minimum lifetime spend, stayed within N days, hasn't stayed in N days.
+- **Lifetime spend** means every non-void payment across the guest's folios. That's the same figure the guest profile shows, so the two can't disagree.
+- **"Hasn't stayed in N days" includes guests who never stayed.** An enquiry or a cancelled booking is a real win-back target.
+- **The database does the filtering** for the guest-level and recency rules. Only stay count and spend need a second pass, because Prisma can't filter on a count or a sum.
+- **Refused, not dropped:** an unknown rule, a negative number, and two recency rules no guest could meet together. Silently dropping a rule would widen the audience.
+- **Consent is a floor, not a rule.** `MARKETING_CONSENT_FLOOR` (opted in, has an email, not erased) is added by the sender, never stored in the criteria, so no saved segment can leave it out.
+- **Preview gives two numbers:** how many guests match, and how many of those can be emailed. "480 match, 45 can be emailed" says consent is the bottleneck, which "45" alone doesn't.
+- **Size limits:** a segment whose pool is over 20,000 isn't evaluated, and a single send is capped at 5,000 recipients. Both refuse with a reason.
+- **Retiring** is a soft delete, refused while an unsent campaign still uses the segment.
+
+### Templates (`MessageTemplate`)
+- **Written as plain text** with `{{merge_field}}` placeholders: `guest_name`, `guest_first_name`, `hotel_name`, `loyalty_tier`, `loyalty_points` and `unsubscribe_url`.
+- **Unknown placeholders are refused at save time.** Otherwise a visible `{{first_name}}` would reach a guest.
+- **The HTML part is generated** from the text (escaped, paragraphed, links turned into anchors). Nobody hand-writes markup, and a guest's name can't inject any.
+- **`POST /marketing/templates/preview`** renders both parts with example values.
+- **Editing a template that already went out is allowed.** Every sent message carries its own rendered copy, so an edit changes only the next send.
+
+### Campaigns (`MarketingCampaign`, `CampaignRecipient`)
+- **Per branch,** because every `CommunicationLog` row belongs to one. Record-addressed routes re-check the role at the campaign's own branch with `assertRoleAtBranch`, including the read, which lists guests by name and address. Owner and Manager only.
+- **The reference's request body,** with two names changed: `channel` rather than `type` (this codebase's `CommsChannel`), and `abTest.variantTemplateId` rather than `variantB`.
+- **Email only.** An SMS or push campaign is refused at creation with the reason. There's no transport for either, and such a campaign would sit queued forever while its status said "sent".
+- **A/B tests** take a second template and a share for variant A (5–95%). The split is exact rather than a coin toss per guest: a 50/50 test on 10 guests gives 5 and 5.
+- **Statuses:** draft, scheduled, sending, sent, cancelled, failed. A draft, scheduled or failed campaign can be edited; editing a failed one returns it to draft or scheduled. A sent campaign can't be edited, cancelled or re-sent.
+
+### Sending reuses the comms outbox
+There's no second delivery system. `sendCampaign` writes one ordinary `CommunicationLog` row per recipient (trigger `marketing_campaign`, no reservation, `queued`), and `CommsDispatcherService` delivers it on its existing one-minute tick, exactly like a booking confirmation.
+- **The claim:** the campaign moves to `sending` with a conditional update first. Two clicks, or a click racing the scheduler, can't both send.
+- **Resumable, not one big transaction.** Recipients are written 100 per transaction. The unique `(campaignId, guestId)` index means a re-run skips everyone who already has a row. The scheduler resumes a send left in `sending` for over 10 minutes.
+- **A failed send always lands on `failed`** with the reason stored (for example, "Nobody to send to…"). It is never put back in the scheduler's queue, where it would fail again every minute.
+- **Test sends** go straight to the transport, to a staff address, marked `[TEST]`. They write no log row and no recipient, and their tracking token is never indexed, so a test can't count as an open or leave a message in a guest's history.
+- **`GET /marketing/delivery`** reports the transport. With the development `log` transport a campaign reaches `sent` and nothing leaves the server, and the builder says so.
+
+### HTML email, and the plumbing it needed
+A tracking pixel is an `<img>`, and a plain-text email has nowhere to put one.
+- **`communication_log.bodyHtml`** is new. `body` stays the plain-text version, and the inbox and guest history show that. `bodyHtml` is what a mail client renders. It's null for every transactional message.
+- **`MailMessage.html`** is optional. The dispatcher passes it through, and a transport that can't send multipart should ignore it.
+- **The staff inbox leaves campaigns out** of both the conversation preview and the thread (`MARKETING_CAMPAIGN_TRIGGER`). Otherwise a guest who wrote to the desk last week would have the conversation topped by a newsletter. The guest's own comms history still shows everything.
+
+### Tracking and unsubscribing (public, no session)
+- **The token lookup.** Every recipient gets a random 48-hex token. `marketing_token_index` maps it to the tenant and recipient. Like `booking_slug_index`, it deliberately has no RLS: a mail client's request has no tenant, and `campaign_recipients` has forced RLS. It holds the pointer and nothing else, and it's written in the same transaction as the recipient.
+- **`GET /public/marketing/open/:token.gif`** — records the first open and marks the message `opened`. The image is served whether or not the token exists, so there's nothing to probe. It's never cached, and it sends `Cross-Origin-Resource-Policy: cross-origin`, because Helmet's same-origin default would block it in browser-based mail.
+- **`GET /public/marketing/click/:token?u=&s=`** — every link in a campaign is rewritten through this. The destination is HMAC-signed per token, with a key derived from `ENCRYPTION_KEY` for this one purpose. An edited or transplanted destination gets a 400 rather than a redirect, so this is not an open redirect. A click also counts as an open, since most clients block images.
+- **`GET /public/marketing/unsubscribe/:token`** shows a confirmation page; **`POST`** unsubscribes. The link is never itself a click-through. A GET that unsubscribed would opt out every guest whose mail scanner or link preview fetched it.
+- **Throttles:** 120/min on the pixel, 60/min on clicks, 30/min on unsubscribe, per IP.
+
+### Performance (`GET /marketing/campaigns/:id`)
+- Recipients; delivered, failed and still waiting (from the log rows' `deliveryStatus`); opened, clicked and unsubscribed, with rates; and the same per A/B variant.
+- **"Booked within 30 days":** reservations those guests made at this branch in the 30 days after the send. The page labels it as a sign of interest, not proof the email caused them.
+- **The open rate is a floor.** Clients that block images never report an open.
+
+### Scheduling
+- **`CampaignSchedulerService`** runs every minute. It lists tenants (campaigns are RLS-scoped), then sends each due `scheduled` campaign through the same `sendCampaign` a click uses.
+- **Send times:** one already more than a minute in the past is refused. One minute of slack keeps "09:00, submitted at 09:00:00" working.
+
+### New configuration
+**`PUBLIC_API_BASE_URL`** (optional; defaults to `http://localhost:<PORT>`). Pixel, click and unsubscribe links are absolute and baked into a message that outlives the request that sent it. It must be the real public API origin before a campaign goes to real addresses.
+
+### Verified
+- **Checks:** `tsc` and `npm run lint` are clean. **827 tests** in 45 suites pass. The new ones cover segment rules, rendering, signing, the A/B split, and the marketing service's consent floor, claiming, resuming, role checks, tracking and consent dates. There are also consent tests in public booking, and the inbox/thread exclusion in comms log.
+- **Live API, 44/44,** against real Postgres, with my own dev servers (the owner's weren't running):
+  - consent from the booking page, from the desk, and never assumed;
+  - a preview of 3 matching and 2 emailable;
+  - unknown and contradictory rules refused;
+  - bad placeholders refused; SMS refused; a same-template A/B refused;
+  - a test send that leaves no trace;
+  - a send reaching exactly the 2 opted-in guests, split 1/1, and refused a second time;
+  - the real dispatcher delivering both messages on its tick;
+  - the pixel (a real GIF, uncached, cross-origin; a made-up token gets the same image);
+  - a tampered click link refused and the real one redirecting;
+  - 1 open counted from 2 fetches, and 1 click;
+  - the unsubscribe page changing nothing until confirmed, then withdrawing consent while keeping the opt-in date;
+  - the next campaign skipping that guest;
+  - an empty audience failing with its reason, then fixed and cancelled;
+  - a past send time refused;
+  - a scheduled campaign sent by the scheduler on its own;
+  - no inbox conversations created by the blasts.
+- **Browser:** 24/24 — see the frontend notes.
+
+### Not built yet
+- SMS and push campaigns (no transport).
+- Double opt-in (needs a real email provider).
+- Provider webhooks for delivered and bounced.
+- Per-link click breakdowns.
+- A drag-and-drop template designer.
+- Booking attribution beyond the 30-day correlation.
+
 ## Month 11 (first slice) — the loyalty programme: points earned at check-out, tiers, and redeeming on the bill (2026-09-15)
 
 Month 11's loyalty deliverable: "Guests earn and redeem loyalty points automatically from real folio spend; tier upgrades trigger without manual intervention."

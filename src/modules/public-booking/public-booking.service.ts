@@ -2,7 +2,7 @@ import { BadRequestException, ConflictException, Injectable, NotFoundException }
 import { CommunicationLog, Reservation } from '@prisma/client';
 import { ErrorCode } from '../../common/errors/error-codes';
 import { todayInTimezone, toBranchDate } from '../../common/utils/branch-date';
-import { PrismaService } from '../../prisma/prisma.service';
+import { PrismaService, TenantTx } from '../../prisma/prisma.service';
 import { CommsLogService } from '../comms-log/comms-log.service';
 import { FoliosService } from '../folios/folios.service';
 import { HousekeepingService } from '../housekeeping/housekeeping.service';
@@ -482,7 +482,28 @@ export class PublicBookingService {
       null,
     );
 
+    // After the booking has committed, in its own small write: consent is
+    // about the guest, not the stay, and a booking must never fail because
+    // of a marketing preference.
+    if (dto.marketingOptIn) {
+      await this.prisma.withTenant(tenantId, (tx) => this.recordMarketingOptIn(tx, reservation.guestId, 'booking_engine'));
+    }
+
     return this.toConfirmation(tenantId, reservation);
+  }
+
+  /**
+   * Only ever turns consent ON, and only for a guest who hasn't already
+   * given it — so the date on file stays the date they first agreed. An
+   * unticked box is not a withdrawal: a guest who opted in last year and books
+   * again without ticking it stays opted in, and leaving is what the
+   * unsubscribe link in every campaign is for.
+   */
+  private async recordMarketingOptIn(tx: TenantTx, guestId: string, source: 'booking_engine' | 'guest_portal'): Promise<void> {
+    await tx.guestProfile.updateMany({
+      where: { id: guestId, marketingOptIn: false, deletedAt: null },
+      data: { marketingOptIn: true, marketingOptInAt: new Date(), marketingOptInSource: source },
+    });
   }
 
   /**
@@ -670,6 +691,9 @@ export class PublicBookingService {
       if (dto.nationality?.trim()) guestUpdates.nationality = dto.nationality.trim().toUpperCase();
       if (Object.keys(guestUpdates).length > 0) {
         await tx.guestProfile.update({ where: { id: reservation.guestId }, data: guestUpdates });
+      }
+      if (dto.marketingOptIn) {
+        await this.recordMarketingOptIn(tx, reservation.guestId, 'guest_portal');
       }
 
       const now = new Date();

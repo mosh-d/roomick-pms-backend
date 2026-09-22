@@ -1,7 +1,7 @@
 import { NotFoundException } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { PrismaService } from '../../prisma/prisma.service';
-import { CommsLogService } from './comms-log.service';
+import { CommsLogService, MARKETING_CAMPAIGN_TRIGGER } from './comms-log.service';
 
 const TENANT_ID = '11111111-1111-4111-8111-111111111111';
 const BRANCH_ID = '33333333-3333-4333-8333-333333333333';
@@ -104,6 +104,8 @@ describe('CommsLogService', () => {
       expect(inbox.map((c) => c.guest.id)).toEqual(['g-new', 'g-old']);
       expect(inbox[0].unreadCount).toBe(2);
       expect(inbox[0].lastMessage.preview).toHaveLength(161);
+      // A newsletter sent after the guest wrote in must not become their conversation's preview.
+      expect(tx.communicationLog.findFirst.mock.calls[0][0].where).toEqual({ branchId: BRANCH_ID, guestId: expect.any(String), trigger: { not: MARKETING_CAMPAIGN_TRIGGER } });
     });
 
     it('the unread filter only looks at inbound messages nobody has read', async () => {
@@ -116,10 +118,14 @@ describe('CommsLogService', () => {
       await expect(service.getThread(TENANT_ID, BRANCH_ID, GUEST_ID)).rejects.toThrow(NotFoundException);
     });
 
-    it('returns a thread oldest-first, automated notices included', async () => {
+    it('returns a thread oldest-first, automated notices included but marketing campaigns left out', async () => {
       tx.communicationLog.findMany.mockResolvedValueOnce([{ id: 'newer' }, { id: 'older' }]);
       const thread = await service.getThread(TENANT_ID, BRANCH_ID, GUEST_ID);
-      expect(tx.communicationLog.findMany.mock.calls[0][0].where).toEqual({ branchId: BRANCH_ID, guestId: GUEST_ID });
+      expect(tx.communicationLog.findMany.mock.calls[0][0].where).toEqual({
+        branchId: BRANCH_ID,
+        guestId: GUEST_ID,
+        trigger: { not: MARKETING_CAMPAIGN_TRIGGER },
+      });
       expect(thread.messages.map((m) => (m as { id: string }).id)).toEqual(['older', 'newer']);
     });
 

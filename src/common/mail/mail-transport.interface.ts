@@ -11,7 +11,15 @@
 export interface MailMessage {
   to: string;
   subject: string;
+  /** Plain text. Always present — it is the fallback for a client that won't render HTML. */
   body: string;
+  /**
+   * The HTML alternative, when the message has one (marketing campaigns
+   * render both; every transactional message is text only). A transport that
+   * can't send multipart should send `body` and ignore this rather than
+   * deliver markup as text.
+   */
+  html?: string;
 }
 
 export interface MailSendResult {

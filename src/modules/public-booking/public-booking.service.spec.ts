@@ -39,7 +39,7 @@ describe('PublicBookingService', () => {
     branch: { findFirst: jest.Mock; findFirstOrThrow: jest.Mock; update: jest.Mock };
     roomType: { findMany: jest.Mock; findFirst: jest.Mock };
     reservation: { findFirstOrThrow: jest.Mock; findFirst: jest.Mock; update: jest.Mock };
-    guestProfile: { update: jest.Mock };
+    guestProfile: { update: jest.Mock; updateMany: jest.Mock };
     auditLog: { create: jest.Mock };
     folio: { findFirst: jest.Mock; count: jest.Mock };
   };
@@ -55,7 +55,7 @@ describe('PublicBookingService', () => {
       },
       roomType: { findMany: jest.fn().mockResolvedValue([]), findFirst: jest.fn().mockResolvedValue({ id: ROOM_TYPE_ID, name: 'Standard' }) },
       reservation: { findFirstOrThrow: jest.fn(), findFirst: jest.fn().mockResolvedValue(null), update: jest.fn().mockResolvedValue({}) },
-      guestProfile: { update: jest.fn().mockResolvedValue({}) },
+      guestProfile: { update: jest.fn().mockResolvedValue({}), updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
       auditLog: { create: jest.fn().mockResolvedValue({}) },
       folio: { findFirst: jest.fn().mockResolvedValue(null), count: jest.fn().mockResolvedValue(0) },
     };
@@ -227,6 +227,19 @@ describe('PublicBookingService', () => {
         roomType: { name: 'Standard' },
         guest: { name: 'Ada Okafor' },
         branch: { currency: 'NGN' },
+      });
+    });
+
+    it('records marketing consent only when the guest ticked the box, and never withdraws it', async () => {
+      reservationsService.createReservation.mockResolvedValue({ id: 'res-1', guestId: 'guest-1' });
+      await service.createReservation(SLUG, validDto);
+      expect(tx.guestProfile.updateMany).not.toHaveBeenCalled();
+
+      await service.createReservation(SLUG, { ...validDto, marketingOptIn: true });
+      expect(tx.guestProfile.updateMany).toHaveBeenCalledWith({
+        // Only a guest who hasn't already opted in, so the date on file stays the first one.
+        where: { id: 'guest-1', marketingOptIn: false, deletedAt: null },
+        data: { marketingOptIn: true, marketingOptInAt: expect.any(Date), marketingOptInSource: 'booking_engine' },
       });
     });
 
@@ -411,6 +424,13 @@ describe('PublicBookingService', () => {
         tx.reservation.findFirst.mockResolvedValue({ id: 'res-1', guestId: 'guest-1', status });
         await expect(service.preArrivalCheckIn(SLUG, preArrival)).rejects.toMatchObject({ status: 409 });
       }
+    });
+
+    it('records marketing consent from online check-in as coming from the guest portal', async () => {
+      await service.preArrivalCheckIn(SLUG, { ...preArrival, marketingOptIn: true });
+      expect(tx.guestProfile.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: expect.objectContaining({ id: 'guest-1' }), data: expect.objectContaining({ marketingOptInSource: 'guest_portal' }) }),
+      );
     });
 
     it('records completion and house-rules acceptance on the reservation', async () => {

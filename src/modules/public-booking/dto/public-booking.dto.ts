@@ -113,6 +113,14 @@ export class PublicCreateReservationDto {
   @IsString()
   @MaxLength(30)
   promoCode?: string;
+
+  @ApiPropertyOptional({
+    description:
+      "The guest ticked \"send me offers\". Only ever turns consent ON — an unticked box is not a withdrawal (that's what the unsubscribe link in every campaign is for).",
+  })
+  @IsOptional()
+  @IsBoolean()
+  marketingOptIn?: boolean;
 }
 
 /**
@@ -185,6 +193,14 @@ export class PreArrivalCheckInDto {
   @ApiProperty({ description: "Must be true — the guest confirming they've read the property's house rules" })
   @IsBoolean()
   acceptHouseRules!: boolean;
+
+  @ApiPropertyOptional({
+    description:
+      "The guest ticked \"send me offers\". Only ever turns consent ON — an unticked box is not a withdrawal (that's what the unsubscribe link in every campaign is for).",
+  })
+  @IsOptional()
+  @IsBoolean()
+  marketingOptIn?: boolean;
 }
 
 /**

@@ -21,4 +21,8 @@ export const envValidationSchema = Joi.object({
   BACKUP_STORAGE_DIR: Joi.string().allow('').optional(),
   // Optional — defaults to <os temp dir>/roomick-documents (see LocalFilesystemDocumentStorage).
   DOCUMENT_STORAGE_DIR: Joi.string().allow('').optional(),
+  // Where a guest's mail client reaches this API: the open pixel, click redirect and
+  // unsubscribe link in a marketing email are absolute URLs, and they are baked into a
+  // message that outlives any request. Defaults to http://localhost:<PORT> for local dev.
+  PUBLIC_API_BASE_URL: Joi.string().uri().allow('').optional(),
 });

@@ -23,7 +23,8 @@ export class LogMailTransport implements MailTransport {
   private readonly logger = new Logger('MailTransport:log');
 
   send(message: MailMessage): Promise<MailSendResult> {
-    this.logger.log(`[no provider configured — logged only] to=${message.to} subject=${JSON.stringify(message.subject)}`);
+    const parts = message.html ? 'text+html' : 'text';
+    this.logger.log(`[no provider configured — logged only] to=${message.to} parts=${parts} subject=${JSON.stringify(message.subject)}`);
     this.logger.debug(message.body);
     // A synthetic id keeps `externalMessageId` non-null and uniformly shaped
     // across transports; the `log:` prefix makes it obvious it isn't a real

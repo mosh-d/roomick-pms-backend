@@ -89,7 +89,7 @@ export class CommsDispatcherService {
         where: { deliveryStatus: 'queued', channel: DISPATCHABLE_CHANNEL, direction: 'outbound' },
         orderBy: { sentAt: 'asc' },
         take: BATCH_SIZE,
-        select: { id: true, subject: true, body: true, guest: { select: { email: true } } },
+        select: { id: true, subject: true, body: true, bodyHtml: true, guest: { select: { email: true } } },
       }),
     );
 
@@ -114,6 +114,8 @@ export class CommsDispatcherService {
           to: recipient,
           subject: row.subject ?? 'Message from your hotel',
           body: row.body,
+          // Only a marketing campaign renders an HTML twin; everything else is text only.
+          ...(row.bodyHtml ? { html: row.bodyHtml } : {}),
         });
         await this.prisma.withTenant(tenantId, (tx) =>
           tx.communicationLog.update({

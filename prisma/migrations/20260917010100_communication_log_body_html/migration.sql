@@ -1,0 +1,11 @@
+-- Month 11, marketing campaigns: an HTML twin for a logged message.
+--
+-- `body` stays the plain-text version and remains the one thing the guest's
+-- own comms history and the staff inbox display. `bodyHtml` is the rendered
+-- HTML a mail client receives when there is one — which is what makes open
+-- tracking possible at all, since a tracking pixel is an <img> and a
+-- plain-text email has nowhere to put one.
+--
+-- NULL for every message written before this and for every transactional one:
+-- those are plain text and nothing about them changes.
+ALTER TABLE "communication_log" ADD COLUMN "bodyHtml" TEXT;
