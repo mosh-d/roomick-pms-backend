@@ -31,6 +31,7 @@ import { MaintenanceModule } from './modules/maintenance/maintenance.module';
 import { NightAuditModule } from './modules/night-audit/night-audit.module';
 import { PosModule } from './modules/pos/pos.module';
 import { MarketingModule } from './modules/marketing/marketing.module';
+import { MarketplaceModule } from './modules/marketplace/marketplace.module';
 import { PropertyModule } from './modules/property/property.module';
 import { PublicBookingModule } from './modules/public-booking/public-booking.module';
 import { RateResolverModule } from './modules/rate-resolver/rate-resolver.module';
@@ -101,6 +102,7 @@ import { PrismaModule } from './prisma/prisma.module';
     PublicBookingModule,
     PosModule,
     MarketingModule,
+    MarketplaceModule,
   ],
   providers: [
     JwtStrategy,

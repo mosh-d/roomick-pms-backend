@@ -180,6 +180,19 @@ describe('ReportsService', () => {
       expect(result.byPaymentMethod).toEqual([{ method: 'cash', amount: '400.00' }]);
     });
 
+    it("counts payments and walk-in sales by the property's own day, not the UTC one", async () => {
+      propertyService.assertBranch.mockResolvedValue({ id: BRANCH_ID, currency: 'NGN', timezone: 'Africa/Lagos' });
+      // 00:30 in Lagos on the 2nd is still the 1st in UTC.
+      tx.posOrder.findMany.mockResolvedValue([
+        { subtotal: new Prisma.Decimal('1000'), total: new Prisma.Decimal('1075'), settlement: 'cash', createdAt: new Date('2026-09-01T23:30:00Z'), outlet: { chargeType: 'fnb' } },
+      ]);
+      const result = await service.getRevenue(TENANT_ID, BRANCH_ID, { from: '2026-09-02', to: '2026-09-03' });
+      const lagosDay = { gte: new Date('2026-09-01T23:00:00Z'), lt: new Date('2026-09-02T23:00:00Z') };
+      expect(tx.payment.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ recordedAt: lagosDay }) }));
+      expect(tx.posOrder.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ createdAt: lagosDay }) }));
+      expect(result.trend).toEqual([{ period: '2026-09-02', amount: '1000.00' }]);
+    });
+
     it('produces a day-level trend keyed by serviceDate', async () => {
       tx.lineItem.findMany.mockResolvedValue([
         { amount: new Prisma.Decimal('100.00'), chargeType: 'room', serviceDate: new Date('2026-09-01') },

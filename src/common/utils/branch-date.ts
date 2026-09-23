@@ -47,3 +47,22 @@ export function branchCutoffInstant(dateOnly: Date, time: string, timezone: stri
 export function hasPassedBranchCutoff(dateOnly: Date, time: string, timezone: string, now: Date = new Date()): boolean {
   return now.getTime() >= branchCutoffInstant(dateOnly, time, timezone).getTime();
 }
+
+/**
+ * The branch-local calendar date (`YYYY-MM-DD`) a real instant falls on.
+ * `instant.toISOString().slice(0, 10)` is the UTC date instead, which files
+ * a Lagos payment taken at 00:30 under the previous day.
+ */
+export function localDateOf(instant: Date, timezone: string): string {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: timezone }).format(instant);
+}
+
+/**
+ * The instant a branch-local calendar day starts — midnight in `timezone`,
+ * as a real UTC moment. The bound to use when a `YYYY-MM-DD` range filters a
+ * timestamp column (payments, orders), where `toBranchDate` would give UTC
+ * midnight and shift the day by the branch's offset.
+ */
+export function branchDayStart(dateStr: string, timezone: string): Date {
+  return branchCutoffInstant(toBranchDate(dateStr), '00:00:00', timezone);
+}

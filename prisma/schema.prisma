@@ -375,6 +375,7 @@ model Tenant {
   messageTemplates         MessageTemplate[]
   marketingCampaigns       MarketingCampaign[]
   campaignRecipients       CampaignRecipient[]
+  integrationConnections   IntegrationConnection[]
 
   @@index([isDemo, demoExpiresAt])
   @@map("tenants")
@@ -911,6 +912,47 @@ model Webhook {
 
   @@index([tenantId])
   @@map("webhooks")
+}
+
+enum IntegrationStatus {
+  enabled
+  disabled
+
+  @@map("integration_status_enum")
+}
+
+/**
+ * The Integrations Marketplace's per-tenant state (Month 11). One row per
+ * connector a tenant has ever switched on; the catalogue itself — names,
+ * categories, what each connector does — lives in code
+ * (`marketplace-catalog.ts`), because a listing is only real if code exists
+ * behind it.
+ * `config` is validated by the connector's own parser on every write AND
+ * every read, so a hand-edited row can't make an export or a scheduled job
+ * do something nobody configured. Disabling keeps the configuration, so
+ * switching back on doesn't mean re-entering an account map.
+ * Nothing here is secret; a connector that needs credentials stores them
+ * encrypted, and none of the current ones does.
+ */
+model IntegrationConnection {
+  id             String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId       String            @db.Uuid
+  provider       String            @db.VarChar(50) // catalogue key: quickbooks_online | xero | review_requests
+  status         IntegrationStatus @default(enabled)
+  config         Json
+  enabledAt      DateTime          @default(now()) @db.Timestamptz(6) // the latest time it was switched on
+  enabledBy      String?           @db.Uuid
+  disabledAt     DateTime?         @db.Timestamptz(6)
+  lastRunAt      DateTime?         @db.Timestamptz(6)
+  lastRunSummary String?           @db.VarChar(500)
+  updatedAt      DateTime          @updatedAt @db.Timestamptz(6)
+  updatedBy      String?           @db.Uuid
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, provider])
+  @@index([provider, status]) // the review-request sweep's own lookup
+  @@map("integration_connections")
 }
 
 /**

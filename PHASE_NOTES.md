@@ -1,5 +1,65 @@
 # Phase Notes
 
+## Month 11 (third slice) — the Integrations Marketplace: a catalogue, and three integrations a hotelier can switch on alone (2026-09-22)
+
+Month 11's marketplace deliverable: "A hotelier can browse the marketplace by category and enable a real integration without a developer's involvement." Migration `20260922010000`.
+
+The growth plan's own scope note for this month is "the BROWSING/ENABLE experience, not 400 real connectors", so the catalogue is small and every entry marked available really works end to end. The rest say what they're waiting on instead of offering a button that does nothing.
+
+### The shape of it
+- **`integration_connections`** — one row per connector a tenant has switched on: status, settings, when it was switched on, and what its last run did. A CHECK ties `disabled` to having a `disabledAt`, and another keeps `config` an object.
+- **The catalogue is code** (`marketplace-catalog.ts`), not a table. A listing can't exist without the code behind it, so adding one is a code change by definition.
+- **One lifecycle for everything:** `GET /integrations/marketplace` (by category, with each one's state), `GET/PUT/DELETE /integrations/marketplace/:provider`. `PUT` both switches on and re-configures; `DELETE` switches off and **keeps the settings**, so switching back on doesn't mean re-entering an account map.
+- **Switching back on restarts `enabledAt`.** The review sweep counts from it, so guests who left while it was off are never asked retroactively.
+- **Settings are parsed on every write AND every read** by the connector's own parser — the same discipline as segment criteria. A hand-edited row can't make a scheduled job or an export do something nobody configured.
+- **Who may switch what on:** owners and managers; accountants too, but only for the accounting exports, since that's their work. Sending guests email stays with owners and managers. Browsing is open to all three.
+- Anything `coming_later` is refused with its reason if a request tries to switch it on.
+
+### QuickBooks Online and Xero — daily takings as journals
+Deliberately an **export, not a live connection**: map accounts once, download a file for a date range, import it with the product's own journal importer. No OAuth app to register, no tokens to store, nothing for a developer to do — which is exactly what lets a hotelier switch it on themselves. A live API sync is the upgrade, behind the same journal.
+
+- **The journal, per day:** charges Dr the guest ledger and Cr each department's revenue plus the tax account; payments Dr the method's account and Cr the guest ledger; walk-in POS sales Dr the method's account and Cr revenue and tax — never touching the guest ledger, because they were never on a bill.
+- **Lines are netted per account per day** (a day's charges and payments both touch the guest ledger). Netting can't unbalance anything, and the totals are checked before a journal is returned — an unbalanced one throws rather than handing an accountant a file that won't post.
+- **The figures follow the Revenue report's own rules**, so the two reconcile: charges and tax by the business date (`serviceDate`), a correction against the department of the charge it reverses, walk-in sales from `pos_orders`.
+- **One guest-ledger account, deposits included.** A deposit is a payment that sits in the guest ledger as a credit until the stay's charges land against it. A separate deposits account would need a later entry moving each deposit out, and nothing in the PMS marks that moment — so it would only ever grow.
+- **Formats:** QuickBooks gets `JournalNo, JournalDate, AccountName, Debits, Credits, Description`, lines sharing a journal number, debits and credits as separate positive columns. Xero gets its manual-journal template columns (`*Narration, *Date, Description, *AccountCode, *TaxRate, *Amount, Tracking…`), debits positive and credits negative, narration and date repeated on every row so the file survives being sorted. Date format is configurable (DD/MM, MM/DD, ISO).
+- **An account reference that starts with `=`, `+` or `@` is refused** — the file is meant to be opened, and escaping the value would stop it matching the real account on import.
+- **Journal numbers** are the property's initials plus the date (`LPH-20260922`), so two properties posting into one company file don't collide and QuickBooks' duplicate-number warning catches a day imported twice.
+- **Up to 31 days per export.** Routes: `GET /branches/:branchId/integrations/accounting/:provider/preview` (journals and totals, to check before downloading) and `…/export` (the CSV).
+- **Known and stated on the page:** a correction or a back-dated charge belongs to the day of the charge, so it changes that day's journal. Export days once they're settled, and export a corrected day again to replace it.
+- **Not verified against real products.** The columns and conventions come from Intuit's and Xero's own import documentation, but nobody has imported one of these files into a real QuickBooks or Xero company — there's no account to try it with.
+
+### Review requests
+After check-out, a thank-you email with a link to the property's review page.
+- Settings: hours after check-out (1–168), a review page per property (https only), subject and message with `{{guest_first_name}}`, `{{hotel_name}}` and `{{review_url}}`. A message without the link is refused — it would ask for a review and give no way to leave one.
+- **One per stay**, enforced by looking for an existing `review_request` row on the reservation, so a sweep that runs twice never asks twice.
+- **Only stays that ended after it was switched on**, and never more than a fortnight ago. Without both bounds, switching it on would email every guest the property has ever had.
+- **A guest who unsubscribed from marketing isn't asked** — conservative, since a review request isn't an offer, but someone who said "stop emailing me" shouldn't get a favour request either.
+- Delivery is the ordinary comms outbox again: the sweep writes `CommunicationLog` rows and `CommsDispatcherService` sends them. `ReviewRequestsService` runs every 10 minutes, listing tenants first because connections are RLS-scoped.
+
+### Also fixed: a real date bug in the Revenue report
+The report windowed payments and walk-in POS sales on **UTC** midnight, so a Lagos payment taken at 00:30 was counted under the previous day, and the POS trend was keyed by the UTC date. Now both use the branch's own day, through two new helpers — `branchDayStart` and `localDateOf` in `common/utils/branch-date.ts`. The accounting export groups by the same local day, which is what makes the two agree.
+
+### Verified
+- **Checks:** `tsc` and `npm run lint` clean; **870 tests** in 48 suites pass. New specs cover the config parsers, journal balancing and netting, both file formats, the marketplace lifecycle and its role rules, the export's range limits and local-day bucketing, and the review sweep's window and query. The reports spec gained a regression test for the local-day fix.
+- **Live API, 27/27** against real Postgres (my own dev servers again — the owner's weren't running):
+  - the catalogue with its categories; something coming later refused; an unknown key 404;
+  - the export refused until switched on; a blank account and a formula-leading account refused;
+  - today's journal balancing at 74,175.00 both ways, with rooms 60,000, F&B 9,000 (folio and walk-in), tax 5,175, cash 20,000, card 14,300 and 39,875 still owed on the bills;
+  - **the journal reconciling with the Revenue report** for the same range;
+  - the QuickBooks CSV's header, journal numbers and date format; a 40-day range refused;
+  - switching off blocking the export while keeping the account map;
+  - Xero's columns, with debits and credits summing to zero;
+  - review requests: http links and a message without the link refused, the preview, and then **the real 10-minute sweep** asking one guest (attached to her stay, with the link, addressed by first name) and skipping the guest who had unsubscribed;
+  - the listing showing what the last run did.
+- **Browser:** 20/20 — see the frontend notes.
+
+### Not built yet
+- A live API sync with QuickBooks or Xero (needs an OAuth app per product).
+- Webhook delivery, which is what the Zapier/Make listing waits on: subscriptions exist under Integrations & APIs but no event is delivered. Doing it properly needs an outbox, signing, retries and an SSRF guard on the target URL.
+- Channel manager (needs an aggregator account), Stripe payments (needs keys), smart locks (needs a vendor).
+- Per-tax-rule tax accounts; a tracking category per property in Xero.
+
 ## Month 11 (second slice) — email campaigns: consent, audiences, templates, A/B tests, scheduling, and open/click tracking (2026-09-22)
 
 Month 11's marketing deliverable: "A marketing campaign sends through the real (or stubbed, pending provider credentials) messaging path and reports open/click performance." Migrations `20260917010000` (the marketing tables and guest consent) and `20260917010100` (`communication_log.bodyHtml`).

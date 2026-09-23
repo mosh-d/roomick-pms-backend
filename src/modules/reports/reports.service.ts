@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
-import { toBranchDate } from '../../common/utils/branch-date';
+import { branchDayStart, localDateOf, toBranchDate } from '../../common/utils/branch-date';
 import { PrismaService, TenantTx } from '../../prisma/prisma.service';
 import { PropertyService } from '../property/property.service';
 import { ReportGroupBy, ReportQueryDto } from './dto/report-query.dto';
@@ -300,13 +300,18 @@ export class ReportsService {
         },
         select: { amount: true, chargeType: true, serviceDate: true, correctsLineItem: { select: { chargeType: true } } },
       });
+      // Payments and walk-in sales are moments, not service dates, so the
+      // range is the branch's own days: midnight to midnight in its timezone.
+      // UTC midnight here filed a Lagos payment taken at 00:30 under the day
+      // before (and the accounting export groups by the same local day).
+      const momentsFrom = branchDayStart(dto.from, branch.timezone);
+      const momentsTo = branchDayStart(dto.to, branch.timezone);
       const payments = await tx.payment.findMany({
-        where: { folio: { branchId }, isVoid: false, deletedAt: null, recordedAt: { gte: from, lt: to } },
+        where: { folio: { branchId }, isVoid: false, deletedAt: null, recordedAt: { gte: momentsFrom, lt: momentsTo } },
         select: { amount: true, method: true },
       });
-      // The same window as payments: both are moments, not service dates.
       const posSales = await tx.posOrder.findMany({
-        where: { branchId, settlement: { in: ['cash', 'card'] }, voidedAt: null, createdAt: { gte: from, lt: to } },
+        where: { branchId, settlement: { in: ['cash', 'card'] }, voidedAt: null, createdAt: { gte: momentsFrom, lt: momentsTo } },
         select: { subtotal: true, total: true, settlement: true, createdAt: true, outlet: { select: { chargeType: true } } },
       });
 
@@ -323,7 +328,7 @@ export class ReportsService {
       for (const sale of posSales) {
         add(byDepartment, sale.outlet.chargeType, sale.subtotal);
         add(byPaymentMethod, sale.settlement, sale.total);
-        add(trendMap, this.isoDate(sale.createdAt), sale.subtotal);
+        add(trendMap, localDateOf(sale.createdAt, branch.timezone), sale.subtotal);
       }
       const totalRevenue = [...byDepartment.values()].reduce((s, v) => s.plus(v), ZERO);
       const trend = [...trendMap.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([period, amount]) => ({ period, amount: amount.toFixed(2) }));
