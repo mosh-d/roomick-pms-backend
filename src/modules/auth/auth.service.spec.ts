@@ -6,7 +6,8 @@ import * as bcrypt from 'bcrypt';
 import { PermissionsService } from '../../common/permissions/permissions.service';
 import { RoutePermissionMapService } from '../../common/permissions/route-permission-map.service';
 import { PrismaService } from '../../prisma/prisma.service';
-import { AuthService, SYSTEM_ROLE_NAMES } from './auth.service';
+import { AuthService, LoginResult, SYSTEM_ROLE_NAMES } from './auth.service';
+import { MfaService } from './mfa.service';
 
 jest.mock('bcrypt', () => ({
   hash: jest.fn().mockResolvedValue('hashed-password'),
@@ -68,6 +69,7 @@ describe('AuthService', () => {
   };
   let jwt: { signAsync: jest.Mock; verifyAsync: jest.Mock };
   let permissions: { invalidate: jest.Mock; rolesFor: jest.Mock };
+  let mfa: { checkSecondFactor: jest.Mock; failureFor: jest.Mock };
 
   beforeEach(async () => {
     tx = makeTx();
@@ -93,6 +95,7 @@ describe('AuthService', () => {
       verifyAsync: jest.fn(),
     };
     permissions = { invalidate: jest.fn(), rolesFor: jest.fn().mockResolvedValue(new Map()) };
+    mfa = { checkSecondFactor: jest.fn(), failureFor: jest.fn().mockImplementation(() => new UnauthorizedException({ code: 'MFA_INVALID_CODE' })) };
 
     const moduleRef = await Test.createTestingModule({
       providers: [
@@ -100,11 +103,12 @@ describe('AuthService', () => {
         { provide: PrismaService, useValue: prisma },
         { provide: JwtService, useValue: jwt },
         { provide: PermissionsService, useValue: permissions },
+        { provide: MfaService, useValue: mfa },
         { provide: RoutePermissionMapService, useValue: { systemRolePresets: () => ({ front_desk: { reservations: ['create', 'read', 'update'] } }) } },
         {
           provide: ConfigService,
           useValue: {
-            getOrThrow: jest.fn().mockReturnValue('x'.repeat(48)),
+            getOrThrow: jest.fn((key: string) => (key === 'JWT_REFRESH_SECRET' ? 'refresh-secret' : 'x'.repeat(48))),
             get: jest.fn().mockReturnValue(undefined),
           },
         },
@@ -228,7 +232,7 @@ describe('AuthService', () => {
       tx.user.findFirst.mockResolvedValue(verifiedUser);
       (bcrypt.compare as jest.Mock).mockResolvedValue(true);
 
-      const result = await service.login(dto);
+      const result = (await service.login(dto)) as LoginResult;
 
       expect(result.accessToken).toBe('signed.jwt.token');
       expect(result.refreshToken).toBe('signed.jwt.token');
@@ -460,6 +464,49 @@ describe('AuthService', () => {
       expect(catalogue.modules.some((module) => module.key === 'reservations')).toBe(true);
       expect(catalogue.systemRolePresets.front_desk).toEqual({ reservations: ['create', 'read', 'update'] });
       expect(catalogue.undelegatable.length).toBeGreaterThan(0);
+    });
+  });
+
+  describe('two-step sign-in', () => {
+    const dto = { email: 'owner@example.com', password: 'Str0ngPass!1' };
+
+    it('stops a correct password at a challenge — no tokens — when MFA is on', async () => {
+      prisma.userEmailIndex.findUnique.mockResolvedValue({ email: dto.email, tenantId: TENANT_ID });
+      tx.user.findFirst.mockResolvedValue({ id: USER_ID, tenantId: TENANT_ID, email: dto.email, emailVerified: true, passwordHash: 'h', mfaEnabledAt: new Date() });
+      (bcrypt.compare as jest.Mock).mockResolvedValue(true);
+      jwt.signAsync.mockResolvedValue('challenge.jwt');
+
+      const result = await service.login(dto);
+
+      expect(result).toEqual({ mfaRequired: true, challengeToken: 'challenge.jwt', expiresInSeconds: 300 });
+      expect(jwt.signAsync).toHaveBeenCalledTimes(1);
+      const [payload, options] = jwt.signAsync.mock.calls[0] as [Record<string, unknown>, { secret: string }];
+      expect(payload).toEqual({ sub: USER_ID, tenantId: TENANT_ID, tokenType: 'mfa_challenge' });
+      // Signed with the refresh secret, so it can never verify as an access token.
+      expect(options.secret).toBe('refresh-secret');
+      expect(tx.user.update).not.toHaveBeenCalled();
+    });
+
+    it('refuses a ticket of any other type', async () => {
+      jwt.verifyAsync.mockResolvedValue({ sub: USER_ID, tenantId: TENANT_ID, tokenType: 'refresh' });
+      await expect(service.verifyMfaLogin('t', '123456')).rejects.toBeInstanceOf(UnauthorizedException);
+      expect(mfa.checkSecondFactor).not.toHaveBeenCalled();
+    });
+
+    it('turns a wrong code into the MFA error, issuing nothing', async () => {
+      jwt.verifyAsync.mockResolvedValue({ sub: USER_ID, tenantId: TENANT_ID, tokenType: 'mfa_challenge' });
+      mfa.checkSecondFactor.mockResolvedValue({ ok: false, lockedUntil: null, attemptsLeft: 4 });
+      await expect(service.verifyMfaLogin('t', '000000')).rejects.toBeInstanceOf(UnauthorizedException);
+      expect(jwt.signAsync).not.toHaveBeenCalled();
+    });
+
+    it('issues the session after a right code, and says how it was passed', async () => {
+      jwt.verifyAsync.mockResolvedValue({ sub: USER_ID, tenantId: TENANT_ID, tokenType: 'mfa_challenge' });
+      mfa.checkSecondFactor.mockResolvedValue({ ok: true, method: 'recovery', recoveryCodesLeft: 3 });
+      tx.user.findFirst.mockResolvedValue({ id: USER_ID, tenantId: TENANT_ID, email: 'a@b.c', name: 'A', emailVerified: true, mfaEnabledAt: new Date() });
+      const result = await service.verifyMfaLogin('t', 'abcde-fghjk');
+      expect(result).toMatchObject({ accessToken: 'signed.jwt.token', secondFactor: 'recovery', recoveryCodesLeft: 3 });
+      expect(tx.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: 'auth.login' }) }));
     });
   });
 });

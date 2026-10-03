@@ -394,6 +394,15 @@ model User {
   updatedAt     DateTime  @updatedAt @db.Timestamptz(6)
   deletedAt     DateTime? @db.Timestamptz(6)
 
+  // Two-step sign-in (TOTP, Month 12). `mfaSecret` is AES-256-GCM encrypted and
+  // exists before `mfaEnabledAt` while setup waits for its first code.
+  mfaSecret         String?
+  mfaEnabledAt      DateTime? @db.Timestamptz(6)
+  mfaLastUsedStep   Int? // the last 30-second step a code was accepted for, so no code works twice
+  mfaFailedAttempts Int       @default(0)
+  mfaLockedUntil    DateTime? @db.Timestamptz(6)
+  mfaRecoveryCodes  String[]  @default([]) // SHA-256 of each unused recovery code
+
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict)
 
   branchRoles                UserBranchRole[]    @relation("UserBranchRoleUser")

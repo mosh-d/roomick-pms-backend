@@ -20,7 +20,9 @@ import { CurrentTenant, CurrentUser, Public } from '../../common/decorators';
 import { Roles, SystemRole } from '../../common/decorators/roles.decorator';
 import { ErrorCode } from '../../common/errors/error-codes';
 import { JwtPayload } from '../../common/types/request-context';
-import { AuthService, LoginResult } from './auth.service';
+import { AuthService, LoginResult, MfaChallenge, MfaLoginResult } from './auth.service';
+import { MfaService, MfaStatus } from './mfa.service';
+import { MfaCodeDto, MfaDisableDto, MfaVerifyDto } from './dto/mfa.dto';
 import { AcceptInviteDto } from './dto/accept-invite.dto';
 import { LoginDto } from './dto/login.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
@@ -31,7 +33,10 @@ import { VerifyEmailDto } from './dto/verify-email.dto';
 @ApiTags('auth')
 @Controller('auth')
 export class AuthController {
-  constructor(private readonly authService: AuthService) {}
+  constructor(
+    private readonly authService: AuthService,
+    private readonly mfaService: MfaService,
+  ) {}
 
   @Public()
   // Strictest limit in this controller: register() isn't a plain INSERT —
@@ -68,7 +73,7 @@ export class AuthController {
   @Post('login')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Login with email + password' })
-  login(@Body() dto: LoginDto): Promise<LoginResult> {
+  login(@Body() dto: LoginDto): Promise<LoginResult | MfaChallenge> {
     return this.authService.login(dto);
   }
 
@@ -124,6 +129,68 @@ export class AuthController {
       });
     }
     return this.authService.listRoles(tenantId);
+  }
+
+  // --- Two-step sign-in (MFA) ------------------------------------------------
+
+  @Public()
+  @Post('mfa/verify')
+  @HttpCode(HttpStatus.OK)
+  // Per IP, on top of the per-account lock after five wrong codes.
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @ApiOperation({ summary: 'Second step of a sign-in: the ticket from /auth/login plus an authenticator or recovery code' })
+  verifyMfa(@Body() dto: MfaVerifyDto): Promise<MfaLoginResult> {
+    return this.authService.verifyMfaLogin(dto.challengeToken, dto.code);
+  }
+
+  @Get('mfa')
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Whether my own two-step sign-in is on, and how many recovery codes are left' })
+  mfaStatus(@CurrentTenant() tenantId: string, @CurrentUser() user: JwtPayload): Promise<MfaStatus> {
+    return this.mfaService.status(tenantId, user.sub);
+  }
+
+  @Post('mfa/setup')
+  @HttpCode(HttpStatus.OK)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Start setting up two-step sign-in: a new secret and the link an authenticator app scans' })
+  beginMfaSetup(@CurrentTenant() tenantId: string, @CurrentUser() user: JwtPayload): ReturnType<MfaService['beginSetup']> {
+    return this.mfaService.beginSetup(tenantId, user.sub);
+  }
+
+  @Post('mfa/enable')
+  @HttpCode(HttpStatus.OK)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Finish setup with the first code the app shows — returns recovery codes, shown only this once' })
+  enableMfa(@CurrentTenant() tenantId: string, @CurrentUser() user: JwtPayload, @Body() dto: MfaCodeDto): ReturnType<MfaService['enable']> {
+    return this.mfaService.enable(tenantId, user.sub, dto.code);
+  }
+
+  @Post('mfa/disable')
+  @HttpCode(HttpStatus.OK)
+  @ApiBearerAuth()
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @ApiOperation({ summary: 'Turn my two-step sign-in off — needs the password and a current code' })
+  disableMfa(@CurrentTenant() tenantId: string, @CurrentUser() user: JwtPayload, @Body() dto: MfaDisableDto): Promise<MfaStatus> {
+    return this.mfaService.disable(tenantId, user.sub, dto.password, dto.code);
+  }
+
+  @Post('mfa/recovery-codes')
+  @HttpCode(HttpStatus.OK)
+  @ApiBearerAuth()
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @ApiOperation({ summary: 'Replace all my recovery codes with new ones — needs a current code' })
+  regenerateRecoveryCodes(@CurrentTenant() tenantId: string, @CurrentUser() user: JwtPayload, @Body() dto: MfaCodeDto): ReturnType<MfaService['regenerateRecoveryCodes']> {
+    return this.mfaService.regenerateRecoveryCodes(tenantId, user.sub, dto.code);
+  }
+
+  @Post('mfa/reset/:userId')
+  @HttpCode(HttpStatus.OK)
+  @ApiBearerAuth()
+  @Roles(SystemRole.Owner)
+  @ApiOperation({ summary: 'Switch a colleague’s two-step sign-in off when their phone and recovery codes are lost (owner only, never your own)' })
+  resetMfa(@CurrentTenant() tenantId: string, @CurrentUser() user: JwtPayload, @Param('userId', ParseUUIDPipe) userId: string): Promise<{ reset: true }> {
+    return this.mfaService.resetForUser(tenantId, user, userId);
   }
 
   @Get('permissions/catalogue')

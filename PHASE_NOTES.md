@@ -1,5 +1,49 @@
 # Phase Notes
 
+## Month 12 (second slice) — two-step sign-in with an authenticator app (2026-10-03)
+
+The timeline's own words: "MFA ... a TOTP/authenticator-app second factor on login, small enough to fold into this month's own build." Migration `20261003010000`.
+
+### How sign-in works now
+- **Off (the default):** unchanged — a correct password gets a session.
+- **On:** a correct password gets `{ mfaRequired: true, challengeToken, expiresInSeconds: 300 }` and no tokens. `POST /auth/mfa/verify` with the ticket and a code completes the sign-in and says how it was passed (`secondFactor: totp | recovery`, plus `recoveryCodesLeft`).
+- **The ticket can't be misused.** It's signed with the *refresh* secret and carries its own type, so it fails the access-token check (wrong key) and `/auth/refresh` (wrong type). Both verified live.
+- **Codes** are standard TOTP (RFC 6238: SHA-1, six digits, 30 seconds), accepted one step either side for clock drift. `totp.ts` implements it in forty lines rather than a package, and its spec checks it against the RFCs' own published values.
+
+### Protections
+- **No replay.** The step of the last accepted code is stored, and a code for that step or earlier is refused — and acceptance is a conditional update, so two requests racing with the same code can't both get in.
+- **Lockout.** Five wrong codes in a row pause the second step for 15 minutes (429, `MFA_LOCKED`) — even a right code is refused meanwhile. The failure count is committed in its own transaction before the request throws; counting inside the failing transaction would roll the count back. On top of that, `/auth/mfa/verify` is throttled to 10 a minute per IP. Trade-off, stated: someone who knows the password can trigger the pause for its owner.
+- **The secret** is AES-256-GCM encrypted with the same key as guest ID documents, and shown only once, at setup.
+- **Recovery codes:** ten single-use codes (`xxxxx-xxxxx`, no look-alike characters), stored as SHA-256 hashes — they're random, not chosen passwords, so a fast hash is fine — and spent with an atomic `array_remove`. Typing is forgiving: case, spaces and the dash don't matter.
+
+### Managing it (`/auth/mfa…`, each person for themselves)
+- `GET` status; `POST setup` (a new secret and the `otpauth://` link) then `POST enable` with the first code. **Setup only takes effect once that first code arrives**, so closing the page halfway locks nobody out. Enabling returns the recovery codes — the only time they're ever shown.
+- `POST disable` needs the **password and a code** — an open session on a shared front-desk computer isn't enough to strip the second factor.
+- `POST recovery-codes` replaces all of them, given a current code.
+- **`POST /auth/mfa/reset/:userId` — owners only, never themselves:** for a colleague whose phone and recovery codes are both gone. An owner in that position uses a recovery code; allowing self-reset would make an open owner session a way round the owner's own second factor.
+- Everything is audited: enabled, challenged, failed, locked, recovery code used, codes regenerated, disabled, reset.
+- The staff list now carries `mfaEnabled`.
+
+### Not done (deliberately, for now)
+- **Requiring** it — say, for every owner and manager. This slice lets people turn it on; making it compulsory needs a "must set up before continuing" state for a session, which is its own piece of work.
+- SMS or email codes: both are weaker than an app, and neither has a delivery provider yet.
+- Remembering a trusted device for 30 days.
+- A refresh token issued before two-step sign-in was switched on stays valid until it expires. Signing out other sessions is the general fix; there's no session list to do it from yet.
+
+### Verified
+- **Checks:** `tsc` and `npm run lint` clean; **925 tests** in 52 suites. New: `totp.spec.ts` (RFC 4226 and RFC 6238 vectors, the ±1 window, replay, recovery-code format and hashing), `mfa.service.spec.ts` (setup, enable, replay, the race, recovery codes, counting, the lock, disable, reset rules) and the challenge/verify path in the auth spec.
+- **Live API, 25/25**, against real Postgres, computing real codes from the secret:
+  - off by default; setup pending until the first code; a half-finished setup doesn't change sign-in;
+  - a wrong first code refused; the right one returns ten recovery codes;
+  - the password then gets only a challenge, and the challenge works as neither an access nor a refresh token;
+  - a wrong code says "4 more tries"; the right one signs in; the same code can't be used twice;
+  - a recovery code, typed in capitals with a space, signs in once and leaves nine;
+  - new codes need a current code and kill the old ones;
+  - a front-desk colleague locked after five wrong codes — a right code refused too — then reset by the owner and signing in with a password; a front-desk user can't reset anyone and the owner can't reset themselves;
+  - turning it off refused with a wrong password, then off with password and code;
+  - every step in the audit log.
+- **Browser:** 14/14 — see the frontend notes.
+
 ## Month 12 (first slice) — custom roles that are actually enforced (2026-09-24)
 
 Month 12's Security & Roles deliverable: "A custom role beyond the original 6 can be created, scoped via the permission matrix, and correctly enforced." No migration — `Role.permissions` and `isSystem` already existed.

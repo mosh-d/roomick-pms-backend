@@ -17,6 +17,8 @@ export interface StaffListEntry {
   emailVerified: boolean;
   lastLoginAt: Date | null;
   active: boolean;
+  /** Two-step sign-in is on for this person — an owner can reset it from Staff. */
+  mfaEnabled: boolean;
   roles: Array<{ branchId: string | null; role: string; roleId: string }>;
   outletIds: string[];
 }
@@ -52,6 +54,7 @@ export class UsersService {
               emailVerified: true,
               lastLoginAt: true,
               deletedAt: true,
+              mfaEnabledAt: true,
             },
           },
         },
@@ -78,6 +81,7 @@ export class UsersService {
           emailVerified: a.user.emailVerified,
           lastLoginAt: a.user.lastLoginAt,
           active: a.user.deletedAt === null,
+          mfaEnabled: a.user.mfaEnabledAt !== null,
           roles: [],
           outletIds: outletsByUser.get(a.user.id) ?? [],
         };
@@ -309,6 +313,7 @@ export class UsersService {
         emailVerified: user.emailVerified,
         lastLoginAt: user.lastLoginAt,
         active: user.deletedAt === null,
+        mfaEnabled: user.mfaEnabledAt !== null,
         roles: assignments.map((a) => ({ branchId: a.branchId, role: a.role.name, roleId: a.role.id })),
         outletIds: outlets.map((o) => o.outletId),
       },

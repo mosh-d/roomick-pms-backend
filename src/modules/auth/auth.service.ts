@@ -16,6 +16,7 @@ import { ErrorCode } from '../../common/errors/error-codes';
 import { PERMISSION_ACTIONS, PERMISSION_MODULES, PermissionModule, parsePermissions } from '../../common/permissions/permission-catalogue';
 import { PermissionsService } from '../../common/permissions/permissions.service';
 import { RoutePermissionMapService } from '../../common/permissions/route-permission-map.service';
+import { MfaService } from './mfa.service';
 import { JwtPayload } from '../../common/types/request-context';
 import { PrismaService, TenantTx } from '../../prisma/prisma.service';
 import { demoExpiryFromNow } from '../tenants/tenants.service';
@@ -54,6 +55,32 @@ export interface LoginResult extends TokenPair {
   user: AuthenticatedUser;
 }
 
+/**
+ * What a correct password gets when the account has two-step sign-in on:
+ * no session yet, just a short-lived ticket to exchange, together with an
+ * authenticator code, at `POST /auth/mfa/verify`.
+ */
+export interface MfaChallenge {
+  mfaRequired: true;
+  challengeToken: string;
+  expiresInSeconds: number;
+}
+
+/** After a successful second step — `recoveryCodesLeft` lets the app warn when a recovery code was just spent. */
+export interface MfaLoginResult extends LoginResult {
+  secondFactor: 'totp' | 'recovery';
+  recoveryCodesLeft: number;
+}
+
+interface MfaChallengePayload {
+  sub: string;
+  tenantId: string;
+  tokenType: 'mfa_challenge';
+}
+
+/** Five minutes to find the phone and type the code. */
+const MFA_CHALLENGE_SECONDS = 300;
+
 interface RefreshTokenPayload {
   sub: string;
   tenantId: string;
@@ -76,6 +103,7 @@ export class AuthService {
     private readonly config: ConfigService,
     private readonly permissionsService: PermissionsService,
     private readonly routePermissionMap: RoutePermissionMapService,
+    private readonly mfaService: MfaService,
   ) {}
 
   // -------------------------------------------------------------------------
@@ -217,7 +245,7 @@ export class AuthService {
    * checks still happen against the RLS-protected `users` row exactly as
    * before.
    */
-  async login(dto: LoginDto): Promise<LoginResult> {
+  async login(dto: LoginDto): Promise<LoginResult | MfaChallenge> {
     const indexRow = await this.prisma.userEmailIndex.findUnique({ where: { email: dto.email } });
     if (!indexRow) {
       // Still runs bcrypt against DUMMY_HASH even on a known miss — login
@@ -250,11 +278,56 @@ export class AuthService {
         });
       }
 
+      if (user.mfaEnabledAt) {
+        // The password was right, but that's only half of it: no tokens until
+        // the second step. The ticket is signed with the REFRESH secret and a
+        // type of its own, so it can never pass as an access token (wrong
+        // key) or be swapped for a session at /auth/refresh (wrong type).
+        await this.audit(tx, indexRow.tenantId, user.id, 'auth.mfa_challenged', 'user', user.id);
+        const challengeToken = await this.jwt.signAsync(
+          { sub: user.id, tenantId: user.tenantId, tokenType: 'mfa_challenge' } satisfies MfaChallengePayload,
+          { secret: this.config.getOrThrow<string>('JWT_REFRESH_SECRET'), expiresIn: MFA_CHALLENGE_SECONDS },
+        );
+        return { mfaRequired: true as const, challengeToken, expiresInSeconds: MFA_CHALLENGE_SECONDS };
+      }
+
       const roles = await this.loadRolesClaim(tx, user.id);
       await tx.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });
       await this.audit(tx, indexRow.tenantId, user.id, 'auth.login', 'user', user.id);
 
       return this.buildLoginResult(user, roles);
+    });
+  }
+
+  /**
+   * The second half of a two-step sign-in. The code is checked — and its
+   * bookkeeping committed — before anything else, so a wrong code always
+   * counts towards the lock even though this then throws.
+   */
+  async verifyMfaLogin(challengeToken: string, code: string): Promise<MfaLoginResult> {
+    let payload: MfaChallengePayload;
+    try {
+      payload = await this.jwt.verifyAsync<MfaChallengePayload>(challengeToken, { secret: this.config.getOrThrow<string>('JWT_REFRESH_SECRET') });
+    } catch {
+      throw new UnauthorizedException({ code: ErrorCode.TOKEN_INVALID, message: 'That sign-in took too long. Enter your password again.' });
+    }
+    if (payload.tokenType !== 'mfa_challenge') {
+      throw new UnauthorizedException({ code: ErrorCode.TOKEN_INVALID, message: 'That sign-in took too long. Enter your password again.' });
+    }
+
+    const result = await this.mfaService.checkSecondFactor(payload.tenantId, payload.sub, code);
+    if (!result.ok) throw this.mfaService.failureFor(result);
+
+    return this.prisma.withTenant(payload.tenantId, async (tx) => {
+      const user = await tx.user.findFirst({ where: { id: payload.sub, deletedAt: null, emailVerified: true } });
+      if (!user || !user.mfaEnabledAt) {
+        throw new UnauthorizedException({ code: ErrorCode.TOKEN_INVALID, message: 'That sign-in took too long. Enter your password again.' });
+      }
+      const roles = await this.loadRolesClaim(tx, user.id);
+      await tx.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });
+      await this.audit(tx, payload.tenantId, user.id, 'auth.login', 'user', user.id, { secondFactor: result.method });
+      const session = await this.buildLoginResult(user, roles);
+      return { ...session, secondFactor: result.method, recoveryCodesLeft: result.recoveryCodesLeft };
     });
   }
 

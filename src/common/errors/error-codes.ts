@@ -24,6 +24,11 @@ export enum ErrorCode {
   SUBDOMAIN_TAKEN = 'SUBDOMAIN_TAKEN',
   EMAIL_TAKEN = 'EMAIL_TAKEN',
   INVITE_INVALID = 'INVITE_INVALID',
+  /** Password accepted; a second step (authenticator code) is required before a session is issued. */
+  MFA_REQUIRED = 'MFA_REQUIRED',
+  MFA_INVALID_CODE = 'MFA_INVALID_CODE',
+  /** Too many wrong codes in a row — two-step sign-in is paused for this account for a short while. */
+  MFA_LOCKED = 'MFA_LOCKED',
   BRAND_MODE_ALREADY_CONFIGURED = 'BRAND_MODE_ALREADY_CONFIGURED',
 
   // property
