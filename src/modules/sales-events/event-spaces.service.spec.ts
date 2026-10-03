@@ -34,7 +34,7 @@ describe('EventSpacesService', () => {
     branch: { findFirst: jest.Mock };
     auditLog: { create: jest.Mock };
   };
-  let taxesService: { computeTaxesForCharge: jest.Mock };
+  let taxesService: { priceCharge: jest.Mock };
 
   beforeEach(async () => {
     tx = {
@@ -43,7 +43,12 @@ describe('EventSpacesService', () => {
       branch: { findFirst: jest.fn().mockResolvedValue({ name: 'Lekki Palms Hotel', timezone: 'Africa/Lagos', currency: 'NGN' }) },
       auditLog: { create: jest.fn().mockResolvedValue({}) },
     };
-    taxesService = { computeTaxesForCharge: jest.fn().mockResolvedValue([{ taxAmount: new Prisma.Decimal('76500') }]) };
+    taxesService = {
+      priceCharge: jest.fn((_tx: unknown, _branchId: string, _type: string, price: Prisma.Decimal) => {
+        const addedTax = price.mul('0.075');
+        return Promise.resolve({ price, net: price, taxes: [], taxTotal: addedTax, includedTax: new Prisma.Decimal(0), addedTax, total: price.plus(addedTax) });
+      }),
+    };
     const moduleRef = await Test.createTestingModule({
       providers: [
         EventSpacesService,
@@ -149,9 +154,9 @@ describe('EventSpacesService', () => {
         { catering: [{ description: 'Buffet dinner', quantity: 100, unitPrice: 8500 }, { description: 'Soft drinks', quantity: 200, unitPrice: 850 }] },
         actor('front_desk'),
       );
-      expect(taxesService.computeTaxesForCharge).toHaveBeenCalledWith(tx, BRANCH_ID, 'fnb', new Prisma.Decimal('1020000'));
+      expect(taxesService.priceCharge).toHaveBeenCalledWith(tx, BRANCH_ID, 'fnb', new Prisma.Decimal('1020000'));
       expect(result.cateringLines.map((l) => l.amount)).toEqual(['850000.00', '170000.00']);
-      expect(result.totals).toEqual({ subtotal: '1020000.00', taxTotal: '76500.00', total: '1096500.00' });
+      expect(result.totals).toEqual({ subtotal: '1020000.00', taxTotal: '76500.00', taxIncluded: '0.00', total: '1096500.00' });
       expect(result.currency).toBe('NGN');
     });
 

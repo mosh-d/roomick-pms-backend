@@ -1,5 +1,45 @@
 # Phase Notes
 
+## Tax rules: fixed amounts, taxes included in the price, and changing a rule safely (2026-10-03)
+
+Closes the gap the tax builder was waiting on: until now a branch could only have percentage taxes added on top, set through the API. The reference's Tax Rule Builder asks for more — **Type: Inclusive / Exclusive** and **Tax Rate: Fixed Rate / Percentage** per rule — and both are real billing behaviour, not labels. Migrations `20261003020000` and `20261003030000`.
+
+### What a rule can be now
+- **Percentage or fixed.** A fixed rule (`type: fixed`, `fixedAmount`) is charged once per charge — once a night on room charges, since each night posts as its own charge. A CHECK constraint keeps the two shapes apart (a fixed rule has no rate, a percentage rule no amount).
+- **Added on top, or included in the price** (`inclusive`). Many Nigerian hotels quote VAT-inclusive rates; before this, the only way to bill one correctly was to enter net rates by hand.
+- **Never edited in place.** `POST /tax-rules/:id/replace` retires the rule and creates its replacement in one transaction, so a bill keeps pointing at the rule it was actually charged under. Retire/reinstate stays on `PATCH /tax-rules/:id`. Two active rules with one name at a branch are refused (they'd print two identical lines on every bill).
+- Changing a rule is checked against the role at the **rule's own** branch (owner, manager or accountant) — the route names no branch, so the guard alone would accept a role held anywhere in the tenant.
+- Created, retired, reinstated and replaced are all audited.
+
+### How a price is taxed (`TaxesService.priceCharge`)
+One function, used by every place that prices something: folio postings, the Rate Resolver's quote, POS baskets and orders, catering on event bookings, cancellation quotes.
+- Included taxes come out first. With included rates R and included fixed amounts F, the pre-tax amount is (price − F) / (1 + R). Every percentage — included or added — is taken of that same amount.
+- It returns `price`, `net` (price less included tax), each tax, `includedTax`, `addedTax` and `total` (= price + added = net + all tax).
+- **On the bill, a charge posts its net and each tax its own line**, so the ledger is the same shape either way and revenue reports count revenue without the VAT in it. A ₦100,000 night with VAT included posts 93,023.26 + 6,976.74.
+- **Quotes keep their meaning**: `subtotal` is still the price as quoted, `taxTotal` still what's added on top, and the new `taxIncluded` says how much tax is already inside. Every existing "Subtotal + Tax = Total" display still adds up.
+- **POS orders are ledgers**, not quotes: an order now records what the outlet keeps (`subtotal` = net) and all its tax, which is what the revenue report and the accounting export already read.
+- A rule on "all charges" never taxes a tax line or a correction, and nothing is taxed at a price of zero (a complimentary night owes no fixed tax either). A price smaller than the fixed taxes it's meant to include is refused with a message rather than posted negative.
+
+### A real bug fixed on the way: waiving a no-show penalty left tax behind
+The waiver used to post a fresh *negative* charge of type `correction` through the tax rules. Any rule limited to penalties (a levy on cancellation and no-show charges, say) doesn't apply to corrections, so **the penalty went but its tax stayed on the guest's bill**. With fixed rules it would have got worse: a fixed tax on "all charges" would have *added* to the waiver.
+- A no-show record now keeps the penalty line it posted (`penaltyLineItemId`), and the waiver reverses that exact line **with exactly the tax posted with it** (`FoliosService.reverseChargeInTx` — the same reversal a desk correction does, minus the open-folio check, since waiving a paid penalty on a closed bill should leave the guest in credit).
+- Records from before the link find their penalty line by its description.
+- Posting a negative amount through the tax engine is now refused outright.
+
+### Verified
+- **Checks:** `tsc` and `npm run lint` clean; **950 tests** in 52 suites (24 in the taxes spec, including the included-tax arithmetic to the cent, two included rates sharing a price, an added tax on the same pre-tax amount, per-night fixed amounts, and the refusals).
+- **Live API, 24/24**, against real Postgres:
+  - an included 7.5% VAT and a ₦500 city tax on rooms; a second "vat" refused; malformed rules refused;
+  - a two-night quote: subtotal 200,000, VAT inside 13,953.49, 1,000 city tax added, total 201,000;
+  - a walk-in night posts 93,023.26 + VAT 6,976.74 ("VAT (7.5%, included) — …") + city tax 500, total 100,500;
+  - a 10,750 dinner posts 10,000 + 750 VAT and no city tax;
+  - the tax breakdown marks the VAT included and the city tax fixed;
+  - a POS quote reads 10,750 with 750 inside; the order records 10,000 + 750;
+  - retire stops the city tax on the next room charge; reinstate brings it back; replacing the VAT keeps old bills on 7.5%;
+  - a late cancellation quotes 100,000 with 6,976.74 tax inside;
+  - a no-show penalty with a penalty-only levy posts 101,000; **waiving reverses all three lines to zero**, and waiving twice reverses nothing twice;
+  - every rule change in the audit log.
+
 ## Month 12 (second slice) — two-step sign-in with an authenticator app (2026-10-03)
 
 The timeline's own words: "MFA ... a TOTP/authenticator-app second factor on login, small enough to fold into this month's own build." Migration `20261003010000`.

@@ -80,6 +80,7 @@ describe('PublicBookingService', () => {
         nightlyRate: new Prisma.Decimal('30000'),
         subtotal: new Prisma.Decimal('90000'),
         taxTotal: new Prisma.Decimal('6750'),
+        taxIncluded: new Prisma.Decimal('0'),
         totalWithTax: new Prisma.Decimal('96750'),
       }),
     };
@@ -188,7 +189,7 @@ describe('PublicBookingService', () => {
 
     it('goes through the real Rate Resolver cascade rather than any separate direct-rate source', async () => {
       const quote = await service.getQuote(SLUG, { roomTypeId: ROOM_TYPE_ID, checkInDate: '2026-10-01', checkOutDate: '2026-10-04' });
-      expect(quote).toMatchObject({ nightlyRate: '30000.00', subtotal: '90000.00', taxTotal: '6750.00', totalWithTax: '96750.00', nights: 3, currency: 'NGN' });
+      expect(quote).toMatchObject({ nightlyRate: '30000.00', subtotal: '90000.00', taxTotal: '6750.00', taxIncluded: '0.00', totalWithTax: '96750.00', nights: 3, currency: 'NGN' });
     });
 
     it('passes a promo code through to the resolver', async () => {

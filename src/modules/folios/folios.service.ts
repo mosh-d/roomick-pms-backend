@@ -1,10 +1,10 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
-import { ChargeType, Folio, LineItem, Payment, Prisma, Reservation } from '@prisma/client';
+import { AdjustmentType, ChargeType, Folio, LineItem, Payment, Prisma, Reservation } from '@prisma/client';
 import { ErrorCode } from '../../common/errors/error-codes';
 import { todayInTimezone, toBranchDate } from '../../common/utils/branch-date';
 import { PrismaService, TenantTx } from '../../prisma/prisma.service';
 import { PropertyService } from '../property/property.service';
-import { TaxesService } from '../taxes/taxes.service';
+import { describeRule, PricedCharge, TaxesService } from '../taxes/taxes.service';
 import { CorrectLineItemDto, PostChargeDto, RecordPaymentDto } from './dto/folio.dto';
 
 const ZERO = new Prisma.Decimal(0);
@@ -133,12 +133,9 @@ export class FoliosService {
   /**
    * The same cross-service, in-transaction posting primitive
    * `postRoomChargeForDate` is, generalized for a caller that isn't posting
-   * a room night — currently just no-show penalties (`ReservationsService
-   * .markNoShowInTx`) and their waiver reversal (a negative `amount`,
-   * `chargeType: 'correction'` — the append-only ledger discipline
-   * `correctLineItem` uses for a hand-posted charge, applied here too;
-   * taxes reverse proportionally for free since `writeChargeWithTaxes`
-   * computes them off whatever `amount` it's given, signed).
+   * a room night — no-show and cancellation penalties. Charges only: taking
+   * one back is `reverseChargeInTx`, which reverses exactly the tax that was
+   * posted with it.
    */
   async postAdHocCharge(
     tx: TenantTx,
@@ -191,10 +188,9 @@ export class FoliosService {
     });
   }
 
-  /** The tax `writeChargeWithTaxes` would add to a charge — for quoting one (a cancellation charge, a POS basket) before it's posted. Same rules, same rounding, nothing written. */
-  async previewTaxTotal(tx: TenantTx, branchId: string, chargeType: ChargeType, amount: Prisma.Decimal): Promise<Prisma.Decimal> {
-    const taxes = await this.taxesService.computeTaxesForCharge(tx, branchId, chargeType, amount);
-    return taxes.reduce((sum, t) => sum.plus(t.taxAmount), ZERO);
+  /** What `writeChargeWithTaxes` would post for a price — for quoting a charge (a cancellation charge, a POS basket) before it's posted. Same rules, same rounding, nothing written. */
+  async previewCharge(tx: TenantTx, branchId: string, chargeType: ChargeType, price: Prisma.Decimal): Promise<PricedCharge> {
+    return this.taxesService.priceCharge(tx, branchId, chargeType, price);
   }
 
   /** Payments recorded on a reservation's primary folio; zero when it has none yet. Read-only — never creates a folio. */
@@ -388,7 +384,26 @@ export class FoliosService {
     }
     const folio = await this.findFolioOrThrow(tx, original.folioId);
     this.assertFolioOpen(folio);
+    return this.reverseLineItem(tx, tenantId, original, folio, reason, actorId);
+  }
 
+  /**
+   * Takes back a charge the system posted, with exactly the tax posted with
+   * it — waiving a no-show penalty. Unlike a correction from the desk this
+   * works on a settled bill too: waiving a penalty that was already paid
+   * leaves the guest in credit, which is the point. `null` when the charge
+   * was already taken back.
+   */
+  async reverseChargeInTx(tx: TenantTx, tenantId: string, lineItemId: string, reason: string, actorId: string | null): Promise<LineItem | null> {
+    const original = await tx.lineItem.findFirst({ where: { id: lineItemId, deletedAt: null, isVoid: false } });
+    if (!original) return null;
+    const reversed = await tx.lineItem.findFirst({ where: { correctsLineItemId: original.id }, select: { id: true } });
+    if (reversed) return null;
+    const folio = await this.findFolioOrThrow(tx, original.folioId);
+    return this.reverseLineItem(tx, tenantId, original, folio, reason, actorId);
+  }
+
+  private async reverseLineItem(tx: TenantTx, tenantId: string, original: LineItem, folio: Folio, reason: string, actorId: string | null): Promise<LineItem> {
     const alreadyCorrected = await tx.lineItem.findFirst({ where: { correctsLineItemId: original.id }, select: { id: true } });
     if (alreadyCorrected) throw this.alreadyCorrected();
 
@@ -443,7 +458,7 @@ export class FoliosService {
       }
 
       await this.audit(tx, tenantId, folio.branchId, actorId, 'line_item.corrected', correction.id, {
-        originalLineItemId: lineItemId,
+        originalLineItemId: original.id,
         reason,
         reversedTaxLineIds: taxesToReverse.map((tax) => tax.id),
       });
@@ -690,7 +705,25 @@ export class FoliosService {
         tx.taxRule.findMany({}),
       ]);
       const ruleById = new Map(rules.map((r) => [r.id, r]));
-      const grouped = new Map<string, { ruleId: string; ruleName: string; rate: Prisma.Decimal; taxCollected: Prisma.Decimal }>();
+
+      // A fixed rule's base can't be worked back from what it collected (the
+      // amount doesn't depend on the charge), so it's the charges themselves:
+      // the parent line of each of its tax lines.
+      const parentIds = [...new Set(taxItems.map((item) => item.parentLineItemId).filter((id): id is string => id !== null))];
+      const parents = parentIds.length ? await tx.lineItem.findMany({ where: { id: { in: parentIds } }, select: { id: true, amount: true } }) : [];
+      const parentAmount = new Map(parents.map((p) => [p.id, p.amount]));
+
+      type Row = {
+        ruleId: string;
+        ruleName: string;
+        type: AdjustmentType;
+        rate: Prisma.Decimal;
+        fixedAmount: Prisma.Decimal | null;
+        inclusive: boolean;
+        taxCollected: Prisma.Decimal;
+        chargedBase: Prisma.Decimal;
+      };
+      const grouped = new Map<string, Row>();
 
       for (const item of taxItems) {
         const ruleId = item.taxRuleIds[0];
@@ -699,19 +732,29 @@ export class FoliosService {
         const entry = grouped.get(ruleId) ?? {
           ruleId,
           ruleName: rule?.name ?? 'Unknown rule',
+          type: rule?.type ?? 'percentage',
           rate: rule?.rate ?? ZERO,
+          fixedAmount: rule?.fixedAmount ?? null,
+          inclusive: rule?.inclusive ?? false,
           taxCollected: ZERO,
+          chargedBase: ZERO,
         };
         entry.taxCollected = entry.taxCollected.plus(item.amount);
+        // A correction's reversing tax line hangs off the correction line,
+        // whose amount is already negative — so a reversed charge nets out of
+        // the base on its own, with no sign juggling here.
+        const base = item.parentLineItemId ? parentAmount.get(item.parentLineItemId) : undefined;
+        if (base) entry.chargedBase = entry.chargedBase.plus(base);
         grouped.set(ruleId, entry);
       }
 
-      const rows = [...grouped.values()].map((entry) => ({
+      const rows = [...grouped.values()].map(({ chargedBase, ...entry }) => ({
         ...entry,
-        // Reverse out the base this rule actually taxed, rather than
-        // re-deriving it from line items — the rate may have changed since,
-        // and the collected amount is the fact that was recorded.
-        taxableBase: entry.rate.isZero() ? ZERO : entry.taxCollected.div(entry.rate).toDecimalPlaces(2),
+        // Percentage rules: reverse out the base this rule actually taxed,
+        // rather than re-deriving it from line items — the collected amount is
+        // the fact that was recorded. Fixed rules: the charges themselves.
+        taxableBase:
+          entry.type === 'fixed' ? chargedBase.toDecimalPlaces(2) : entry.rate.isZero() ? ZERO : entry.taxCollected.div(entry.rate).toDecimalPlaces(2),
       }));
       const totalTax = rows.reduce((sum, r) => sum.plus(r.taxCollected), ZERO);
       return { rows, totalTax };
@@ -813,17 +856,22 @@ export class FoliosService {
     },
   ): Promise<LineItem | null> {
     if (input.amount.isZero()) return null;
+    // Credits are reversals of something specific — `reverseLineItem` takes
+    // back a charge and exactly the tax posted with it. Re-running the tax
+    // rules on a negative amount would reverse at today's rules instead.
+    if (input.amount.isNegative()) throw new Error('A credit is a reversal of a posted charge — use correctLineItem / reverseChargeInTx');
 
-    const taxes = await this.taxesService.computeTaxesForCharge(tx, input.branchId, input.chargeType, input.amount);
-    const taxTotal = taxes.reduce((sum, t) => sum.plus(t.taxAmount), ZERO);
+    // `amount` is the price as entered; any tax the branch includes in its
+    // prices comes out of it, so the charge line carries the net.
+    const priced = await this.taxesService.priceCharge(tx, input.branchId, input.chargeType, input.amount);
 
     const parent = await tx.lineItem.create({
       data: {
         tenantId: input.tenantId,
         folioId: input.folioId,
         description: input.description,
-        amount: input.amount,
-        taxAmount: taxTotal,
+        amount: priced.net,
+        taxAmount: priced.taxTotal,
         chargeType: input.chargeType,
         serviceDate: input.serviceDate,
         outletId: input.outletId,
@@ -831,12 +879,12 @@ export class FoliosService {
       },
     });
 
-    for (const tax of taxes) {
+    for (const tax of priced.taxes) {
       await tx.lineItem.create({
         data: {
           tenantId: input.tenantId,
           folioId: input.folioId,
-          description: `${tax.ruleName} (${tax.rate.mul(100).toDecimalPlaces(2).toString()}%) — ${input.description}`.slice(0, 300),
+          description: `${describeRule({ name: tax.ruleName, type: tax.type, rate: tax.rate, fixedAmount: tax.fixedAmount, inclusive: tax.inclusive })} — ${input.description}`.slice(0, 300),
           amount: tax.taxAmount,
           chargeType: 'tax',
           taxRuleIds: [tax.ruleId],
@@ -851,8 +899,9 @@ export class FoliosService {
     await this.audit(tx, input.tenantId, input.branchId, input.actorId, 'line_item.posted', parent.id, {
       folioId: input.folioId,
       chargeType: input.chargeType,
-      amount: input.amount.toFixed(2),
-      taxAmount: taxTotal.toFixed(2),
+      amount: priced.net.toFixed(2),
+      taxAmount: priced.taxTotal.toFixed(2),
+      ...(priced.includedTax.isZero() ? {} : { price: input.amount.toFixed(2), taxIncluded: priced.includedTax.toFixed(2) }),
     });
     return parent;
   }

@@ -31,8 +31,13 @@ interface NightResolution {
 
 export interface StayResolution {
   nightlyRate: Prisma.Decimal;
+  /** The room price for the stay: the nightly rates added up. What `confirmedRate` stores. */
   subtotal: Prisma.Decimal;
+  /** Tax added on top of `subtotal`. */
   taxTotal: Prisma.Decimal;
+  /** Tax already inside `subtotal` — a branch quoting tax-inclusive rates. Shown, never added again. */
+  taxIncluded: Prisma.Decimal;
+  /** What the guest pays: `subtotal` + `taxTotal`. */
   totalWithTax: Prisma.Decimal;
   /** The check-in night's winning plan — display/reporting convenience only. A stay whose rate changes mid-week (seasonal/weekend tiers) has no single "the" plan; the full per-night trace is what's authoritative, both here and in RateAuditLog. */
   ratePlanId: string | null;
@@ -248,8 +253,8 @@ export class RateResolverService {
 
     const subtotal = perNight.reduce((sum, n) => sum.add(n.finalRate), new Prisma.Decimal(0));
     const nightlyRate = stayLength ? subtotal.div(stayLength).toDecimalPlaces(2) : new Prisma.Decimal(0);
-    const taxes = await this.taxesService.computeTaxesForCharge(tx, branchId, 'room', subtotal);
-    const taxTotal = taxes.reduce((sum, t) => sum.add(t.taxAmount), new Prisma.Decimal(0));
+    // One room charge per night, so a fixed tax counts once per night — what the nights will actually post.
+    const priced = await this.taxesService.priceCharge(tx, branchId, 'room', subtotal, perNight.length);
 
     const arrival = perNight[0];
     const lastCascadeStep = arrival?.cascade.at(-1) ?? null;
@@ -257,8 +262,9 @@ export class RateResolverService {
     return {
       nightlyRate,
       subtotal,
-      taxTotal,
-      totalWithTax: subtotal.add(taxTotal),
+      taxTotal: priced.addedTax,
+      taxIncluded: priced.includedTax,
+      totalWithTax: priced.total,
       ratePlanId: arrival ? (arrival.overrideRatePlanId ?? lastCascadeStep?.ratePlanId ?? null) : null,
       ruleApplied: {
         type: !arrival ? 'base' : arrival.isOverride ? 'override' : lastCascadeStep ? 'cascade' : 'base',

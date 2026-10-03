@@ -1265,21 +1265,25 @@ model RateAuditLog {
 }
 
 model NoShowRecord {
-  id            String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  tenantId      String      @db.Uuid
-  reservationId String      @db.Uuid
-  penaltyType   PenaltyType
-  penaltyAmount Decimal?    @db.Decimal(12, 2)
-  penaltyWaived Boolean     @default(false)
-  waivedBy      String?     @db.Uuid
-  refundAmount  Decimal?    @db.Decimal(12, 2)
-  markedAt      DateTime    @default(now()) @db.Timestamptz(6)
-  markedBy      String?     @db.Uuid // NULL = auto-marked by night audit
+  id                String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId          String      @db.Uuid
+  reservationId     String      @db.Uuid
+  penaltyType       PenaltyType
+  penaltyAmount     Decimal?    @db.Decimal(12, 2)
+  penaltyWaived     Boolean     @default(false)
+  waivedBy          String?     @db.Uuid
+  refundAmount      Decimal?    @db.Decimal(12, 2)
+  markedAt          DateTime    @default(now()) @db.Timestamptz(6)
+  markedBy          String?     @db.Uuid // NULL = auto-marked by night audit
+  // The penalty charge this record posted — what a waiver reverses, taxes and
+  // all. NULL when there was no penalty, and on records from before the link.
+  penaltyLineItemId String?     @db.Uuid
 
-  tenant       Tenant      @relation(fields: [tenantId], references: [id], onDelete: Restrict)
-  reservation  Reservation @relation(fields: [reservationId], references: [id], onDelete: Restrict)
-  waivedByUser User?       @relation("NoShowWaivedBy", fields: [waivedBy], references: [id], onDelete: SetNull)
-  markedByUser User?       @relation("NoShowMarkedBy", fields: [markedBy], references: [id], onDelete: SetNull)
+  tenant          Tenant      @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  reservation     Reservation @relation(fields: [reservationId], references: [id], onDelete: Restrict)
+  penaltyLineItem LineItem?   @relation("NoShowPenaltyLine", fields: [penaltyLineItemId], references: [id], onDelete: Restrict)
+  waivedByUser    User?       @relation("NoShowWaivedBy", fields: [waivedBy], references: [id], onDelete: SetNull)
+  markedByUser    User?       @relation("NoShowMarkedBy", fields: [markedBy], references: [id], onDelete: SetNull)
 
   @@index([reservationId])
   @@map("no_show_records")
@@ -1400,11 +1404,12 @@ model LineItem {
   postedByUser User?   @relation("LineItemPostedBy", fields: [postedBy], references: [id], onDelete: SetNull)
   voidedByUser User?   @relation("LineItemVoidedBy", fields: [voidedBy], references: [id], onDelete: SetNull)
 
-  parentLineItem   LineItem?  @relation("TaxOfCharge", fields: [parentLineItemId], references: [id], onDelete: Restrict)
-  taxLines         LineItem[] @relation("TaxOfCharge")
-  correctsLineItem LineItem?  @relation("CorrectionOf", fields: [correctsLineItemId], references: [id], onDelete: Restrict)
-  correctedBy      LineItem?  @relation("CorrectionOf")
+  parentLineItem   LineItem?      @relation("TaxOfCharge", fields: [parentLineItemId], references: [id], onDelete: Restrict)
+  taxLines         LineItem[]     @relation("TaxOfCharge")
+  correctsLineItem LineItem?      @relation("CorrectionOf", fields: [correctsLineItemId], references: [id], onDelete: Restrict)
+  correctedBy      LineItem?      @relation("CorrectionOf")
   posOrder         PosOrder?
+  noShowPenalties  NoShowRecord[] @relation("NoShowPenaltyLine")
 
   @@index([parentLineItemId])
   @@index([folioId, postedAt])
@@ -1498,8 +1503,10 @@ model TaxRule {
   tenantId             String         @db.Uuid
   branchId             String         @db.Uuid
   name                 String         @db.VarChar(100) // "VAT", "Service Charge", "City Tax"
-  rate                 Decimal        @db.Decimal(6, 4) // 0.075 = 7.5%
+  rate                 Decimal        @db.Decimal(6, 4) // 0.075 = 7.5%; 0 for a fixed rule
   type                 AdjustmentType @default(percentage)
+  fixedAmount          Decimal?       @db.Decimal(12, 2) // type = fixed: added once per charge — so once per night on room charges
+  inclusive            Boolean        @default(false) // true = already inside the price (VAT-inclusive rates); false = added on top
   appliesToChargeTypes ChargeType[] // empty = applies to all
   jurisdiction         String?        @db.VarChar(100)
   isActive             Boolean        @default(true)

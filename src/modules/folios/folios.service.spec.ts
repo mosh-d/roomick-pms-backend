@@ -31,6 +31,18 @@ function reservation(overrides: Partial<Record<string, unknown>> = {}) {
   };
 }
 
+type TaxStub = { ruleId: string; ruleName: string; rate: Prisma.Decimal; taxAmount: Prisma.Decimal; inclusive?: boolean };
+
+/** What `TaxesService.priceCharge` returns for `price` with these taxes computed on it. */
+function priced(price: Prisma.Decimal | string, taxes: TaxStub[] = []) {
+  const amount = new Prisma.Decimal(price);
+  const full = taxes.map((tax) => ({ type: 'percentage', fixedAmount: null, inclusive: false, ...tax }));
+  const sum = (list: typeof full) => list.reduce((total, tax) => total.plus(tax.taxAmount), new Prisma.Decimal(0));
+  const includedTax = sum(full.filter((tax) => tax.inclusive));
+  const addedTax = sum(full.filter((tax) => !tax.inclusive));
+  return { price: amount, net: amount.minus(includedTax), taxes: full, taxTotal: includedTax.plus(addedTax), includedTax, addedTax, total: amount.plus(addedTax) };
+}
+
 function makeTx() {
   return {
     folio: { findFirst: jest.fn(), findMany: jest.fn().mockResolvedValue([]), create: jest.fn().mockResolvedValue(folio()), update: jest.fn().mockResolvedValue(folio({ status: 'settled' })) },
@@ -51,11 +63,11 @@ function makeTx() {
 describe('FoliosService', () => {
   let service: FoliosService;
   let tx: ReturnType<typeof makeTx>;
-  let taxesService: { computeTaxesForCharge: jest.Mock };
+  let taxesService: { priceCharge: jest.Mock };
 
   beforeEach(async () => {
     tx = makeTx();
-    taxesService = { computeTaxesForCharge: jest.fn().mockResolvedValue([]) };
+    taxesService = { priceCharge: jest.fn((_tx: unknown, _branchId: string, _type: string, price: Prisma.Decimal) => Promise.resolve(priced(price))) };
     const moduleRef = await Test.createTestingModule({
       providers: [
         FoliosService,
@@ -168,10 +180,12 @@ describe('FoliosService', () => {
   describe('postCharge — taxes as separate line items', () => {
     it('writes the parent charge plus one tax line item per matching rule', async () => {
       tx.folio.findFirst.mockResolvedValue(folio());
-      taxesService.computeTaxesForCharge.mockResolvedValue([
-        { ruleId: 'vat', ruleName: 'VAT', rate: new Prisma.Decimal('0.075'), taxAmount: new Prisma.Decimal('750') },
-        { ruleId: 'svc', ruleName: 'Service Charge', rate: new Prisma.Decimal('0.1'), taxAmount: new Prisma.Decimal('1000') },
-      ]);
+      taxesService.priceCharge.mockResolvedValue(
+        priced('10000', [
+          { ruleId: 'vat', ruleName: 'VAT', rate: new Prisma.Decimal('0.075'), taxAmount: new Prisma.Decimal('750') },
+          { ruleId: 'svc', ruleName: 'Service Charge', rate: new Prisma.Decimal('0.1'), taxAmount: new Prisma.Decimal('1000') },
+        ]),
+      );
       await service.postCharge(TENANT_ID, FOLIO_ID, { description: 'Dinner', amount: 10000, chargeType: 'fnb' }, ACTOR_ID);
 
       expect(tx.lineItem.create).toHaveBeenCalledTimes(3); // parent + 2 tax rows
@@ -182,6 +196,22 @@ describe('FoliosService', () => {
       const taxRows = tx.lineItem.create.mock.calls.slice(1).map((c) => c[0].data);
       expect(taxRows.every((r) => r.chargeType === 'tax')).toBe(true);
       expect(taxRows.map((r) => r.taxRuleIds)).toEqual([['vat'], ['svc']]);
+    });
+
+    it('posts the net when the branch includes its tax in its prices — the charge and its tax make the price', async () => {
+      tx.folio.findFirst.mockResolvedValue(folio());
+      taxesService.priceCharge.mockResolvedValue(
+        priced('10750', [{ ruleId: 'vat', ruleName: 'VAT', rate: new Prisma.Decimal('0.075'), taxAmount: new Prisma.Decimal('750'), inclusive: true }]),
+      );
+      await service.postCharge(TENANT_ID, FOLIO_ID, { description: 'Dinner', amount: 10750, chargeType: 'fnb' }, ACTOR_ID);
+
+      const [parent, vat] = tx.lineItem.create.mock.calls.map((c) => (c as [{ data: { amount: Prisma.Decimal; description: string } }])[0].data);
+      expect(parent.amount.toFixed(2)).toBe('10000.00');
+      expect(vat.amount.toFixed(2)).toBe('750.00');
+      expect(vat.description).toBe('VAT (7.5%, included) — Dinner');
+      expect(tx.auditLog.create).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ after: expect.objectContaining({ price: '10750.00', taxIncluded: '750.00' }) }) }),
+      );
     });
 
     it('rejects posting to a settled folio', async () => {
@@ -476,17 +506,19 @@ describe('FoliosService', () => {
     const adHocReservation = { tenantId: TENANT_ID, branchId: BRANCH_ID, checkInDate: new Date('2026-09-01') };
 
     it('posts a positive amount as the given chargeType, taxed like any other charge', async () => {
-      taxesService.computeTaxesForCharge.mockResolvedValue([{ ruleId: 'vat', ruleName: 'VAT', rate: new Prisma.Decimal('0.1'), taxAmount: new Prisma.Decimal('5') }]);
+      taxesService.priceCharge.mockResolvedValue(priced('50', [{ ruleId: 'vat', ruleName: 'VAT', rate: new Prisma.Decimal('0.1'), taxAmount: new Prisma.Decimal('5') }]));
       const result = await service.postAdHocCharge(tx as never, adHocReservation as never, folio() as never, 'penalty', new Prisma.Decimal('50'), 'No-show penalty', ACTOR_ID);
       expect(result).not.toBeNull();
       expect(tx.lineItem.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ amount: expect.objectContaining({ toString: expect.any(Function) }), chargeType: 'penalty' }) }));
     });
 
     it('links every tax line to the charge it was computed on', async () => {
-      taxesService.computeTaxesForCharge.mockResolvedValue([
-        { ruleId: 'vat', ruleName: 'VAT', rate: new Prisma.Decimal('0.075'), taxAmount: new Prisma.Decimal('3.75') },
-        { ruleId: 'levy', ruleName: 'Levy', rate: new Prisma.Decimal('0.05'), taxAmount: new Prisma.Decimal('2.50') },
-      ]);
+      taxesService.priceCharge.mockResolvedValue(
+        priced('50', [
+          { ruleId: 'vat', ruleName: 'VAT', rate: new Prisma.Decimal('0.075'), taxAmount: new Prisma.Decimal('3.75') },
+          { ruleId: 'levy', ruleName: 'Levy', rate: new Prisma.Decimal('0.05'), taxAmount: new Prisma.Decimal('2.50') },
+        ]),
+      );
       await service.postAdHocCharge(tx as never, adHocReservation as never, folio() as never, 'penalty', new Prisma.Decimal('50'), 'No-show penalty', ACTOR_ID);
       const [parentData, ...taxData] = tx.lineItem.create.mock.calls.map((call) => (call as [{ data: Record<string, unknown> }])[0].data);
       expect(parentData.parentLineItemId).toBeUndefined();
@@ -494,15 +526,39 @@ describe('FoliosService', () => {
       taxData.forEach((data) => expect(data.parentLineItemId).toBe('li-1'));
     });
 
-    it('a negative amount reverses the charge as a correction — no lookup of the original row needed', async () => {
-      taxesService.computeTaxesForCharge.mockResolvedValue([{ ruleId: 'vat', ruleName: 'VAT', rate: new Prisma.Decimal('0.1'), taxAmount: new Prisma.Decimal('-5') }]);
-      await service.postAdHocCharge(tx as never, adHocReservation as never, folio() as never, 'correction', new Prisma.Decimal('-50'), 'Penalty waived', ACTOR_ID);
-      // The PARENT charge is the first `lineItem.create` call — the tax
-      // row (a separate line item) is created after it.
-      const call = (tx.lineItem.create.mock.calls[0] as [{ data: { amount: Prisma.Decimal; taxAmount: Prisma.Decimal; chargeType: string } }])[0];
-      expect(call.data.amount.toString()).toBe('-50');
-      expect(call.data.chargeType).toBe('correction');
-      expect(taxesService.computeTaxesForCharge).toHaveBeenCalledWith(tx, BRANCH_ID, 'correction', expect.objectContaining({ toString: expect.any(Function) }));
+    it('refuses a negative amount — a credit reverses a specific charge, through reverseChargeInTx', async () => {
+      await expect(
+        service.postAdHocCharge(tx as never, adHocReservation as never, folio() as never, 'correction', new Prisma.Decimal('-50'), 'Penalty waived', ACTOR_ID),
+      ).rejects.toThrow(/reversal/);
+      expect(tx.lineItem.create).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('reverseChargeInTx', () => {
+    const penalty = { id: 'li-penalty', folioId: FOLIO_ID, description: 'No-Show Penalty (first night)', amount: new Prisma.Decimal('30000'), chargeType: 'penalty', taxRuleIds: [], serviceDate: null, outletId: null };
+    const penaltyVat = { id: 'li-vat', folioId: FOLIO_ID, description: 'VAT (7.5%) — No-Show Penalty (first night)', amount: new Prisma.Decimal('2250'), chargeType: 'tax', taxRuleIds: ['vat'], serviceDate: null, outletId: null, correctedBy: null };
+
+    it('takes back the charge and exactly the tax posted with it — on a settled bill too', async () => {
+      tx.lineItem.findFirst.mockResolvedValueOnce(penalty).mockResolvedValue(null);
+      tx.lineItem.findMany.mockResolvedValue([penaltyVat]);
+      tx.folio.findFirst.mockResolvedValue(folio({ status: 'settled' }));
+
+      const reversal = await service.reverseChargeInTx(tx as never, TENANT_ID, 'li-penalty', 'penalty waived', ACTOR_ID);
+
+      expect(reversal).not.toBeNull();
+      const [charge, tax] = tx.lineItem.create.mock.calls.map((c) => (c as [{ data: Record<string, unknown> }])[0].data);
+      expect(charge).toMatchObject({ chargeType: 'correction', correctsLineItemId: 'li-penalty' });
+      expect((charge.amount as Prisma.Decimal).toFixed(2)).toBe('-30000.00');
+      expect(tax).toMatchObject({ chargeType: 'tax', correctsLineItemId: 'li-vat', taxRuleIds: ['vat'] });
+      expect((tax.amount as Prisma.Decimal).toFixed(2)).toBe('-2250.00');
+      // the tax rules aren't consulted: today's rates have nothing to do with what was charged
+      expect(taxesService.priceCharge).not.toHaveBeenCalled();
+    });
+
+    it('does nothing when the charge was already taken back', async () => {
+      tx.lineItem.findFirst.mockResolvedValueOnce(penalty).mockResolvedValueOnce({ id: 'already' });
+      expect(await service.reverseChargeInTx(tx as never, TENANT_ID, 'li-penalty', 'penalty waived', ACTOR_ID)).toBeNull();
+      expect(tx.lineItem.create).not.toHaveBeenCalled();
     });
   });
 
@@ -561,13 +617,16 @@ describe('FoliosService', () => {
     });
 
     describe('quoting helpers used by cancellation', () => {
-      it('previewTaxTotal sums what the tax rules would add, without writing anything', async () => {
-        taxesService.computeTaxesForCharge.mockResolvedValue([
-          { ruleId: 'vat', ruleName: 'VAT', rate: new Prisma.Decimal('0.075'), taxAmount: new Prisma.Decimal('2250') },
-          { ruleId: 'svc', ruleName: 'Service', rate: new Prisma.Decimal('0.05'), taxAmount: new Prisma.Decimal('1500') },
-        ]);
-        const total = await service.previewTaxTotal(tx as never, BRANCH_ID, 'penalty', new Prisma.Decimal('30000'));
-        expect(total.toFixed(2)).toBe('3750.00');
+      it('previewCharge prices a charge under the tax rules without writing anything', async () => {
+        taxesService.priceCharge.mockResolvedValue(
+          priced('30000', [
+            { ruleId: 'vat', ruleName: 'VAT', rate: new Prisma.Decimal('0.075'), taxAmount: new Prisma.Decimal('2250') },
+            { ruleId: 'svc', ruleName: 'Service', rate: new Prisma.Decimal('0.05'), taxAmount: new Prisma.Decimal('1500') },
+          ]),
+        );
+        const preview = await service.previewCharge(tx as never, BRANCH_ID, 'penalty', new Prisma.Decimal('30000'));
+        expect(preview.addedTax.toFixed(2)).toBe('3750.00');
+        expect(preview.total.toFixed(2)).toBe('33750.00');
         expect(tx.lineItem.create).not.toHaveBeenCalled();
       });
 
@@ -618,6 +677,41 @@ describe('FoliosService', () => {
       tx.lineItem.findMany.mockResolvedValue([{ amount: new Prisma.Decimal('100'), chargeType: 'room' }]);
       const rows = await service.listFolios(TENANT_ID, BRANCH_ID, 'overdue');
       expect(rows).toHaveLength(0);
+    });
+  });
+
+  describe('getTaxBreakdown', () => {
+    it('works out a fixed rule’s base from the charges it was added to, netting out a correction', async () => {
+      tx.folio.findFirst.mockResolvedValue(folio());
+      tx.taxRule.findMany.mockResolvedValue([
+        { id: 'rule-city', name: 'City Tax', type: 'fixed', rate: new Prisma.Decimal(0), fixedAmount: new Prisma.Decimal('500'), inclusive: false },
+        { id: 'rule-vat', name: 'VAT', type: 'percentage', rate: new Prisma.Decimal('0.075'), fixedAmount: null, inclusive: true },
+      ]);
+      tx.lineItem.findMany
+        // the tax lines: two nights of city tax, one reversed by a correction; VAT on both nights
+        .mockResolvedValueOnce([
+          { amount: new Prisma.Decimal('500'), taxRuleIds: ['rule-city'], parentLineItemId: 'night-1' },
+          { amount: new Prisma.Decimal('500'), taxRuleIds: ['rule-city'], parentLineItemId: 'night-2' },
+          { amount: new Prisma.Decimal('-500'), taxRuleIds: ['rule-city'], parentLineItemId: 'correction-2' },
+          { amount: new Prisma.Decimal('2250'), taxRuleIds: ['rule-vat'], parentLineItemId: 'night-1' },
+        ])
+        // their parent charges
+        .mockResolvedValueOnce([
+          { id: 'night-1', amount: new Prisma.Decimal('30000') },
+          { id: 'night-2', amount: new Prisma.Decimal('30000') },
+          { id: 'correction-2', amount: new Prisma.Decimal('-30000') },
+        ]);
+
+      const { rows, totalTax } = await service.getTaxBreakdown(TENANT_ID, FOLIO_ID);
+      const city = rows.find((r) => r.ruleId === 'rule-city')!;
+      const vat = rows.find((r) => r.ruleId === 'rule-vat')!;
+      expect(city).toMatchObject({ type: 'fixed', inclusive: false });
+      expect(vat).toMatchObject({ inclusive: true });
+      expect(city.taxCollected.toFixed(2)).toBe('500.00');
+      expect(city.taxableBase.toFixed(2)).toBe('30000.00');
+      // percentage rules keep working back from what they collected
+      expect(vat.taxableBase.toFixed(2)).toBe('30000.00');
+      expect(totalTax.toFixed(2)).toBe('2750.00');
     });
   });
 });

@@ -157,8 +157,12 @@ export interface CancellationQuote {
   withinFreeWindow: boolean;
   pastCheckInTime: boolean;
   penaltyType: PenaltyType;
+  /** The charge as the policy prices it (a first night is that night's rate). */
   penaltyAmount: string;
+  /** Tax added on top of `penaltyAmount`. */
   penaltyTax: string;
+  /** Tax already inside `penaltyAmount`, for a branch quoting tax-inclusive rates. */
+  penaltyTaxIncluded: string;
   penaltyTotal: string;
   /** Payments already on the primary folio (zero for a pay-at-property booking). */
   paidSoFar: string;

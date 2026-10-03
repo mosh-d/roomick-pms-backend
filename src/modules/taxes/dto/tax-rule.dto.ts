@@ -1,8 +1,18 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import { ArrayUnique, IsBoolean, IsIn, IsNumber, IsOptional, IsString, Max, MaxLength, Min, MinLength } from 'class-validator';
-import { AdjustmentType, ChargeType } from '@prisma/client';
+import { ChargeType } from '@prisma/client';
 
+export const TAX_RULE_TYPES = ['percentage', 'fixed'] as const;
+export type TaxRuleType = (typeof TAX_RULE_TYPES)[number];
+
+/**
+ * A rule is either a percentage of the charge (`rate`, 0.075 = 7.5%) or a
+ * fixed amount once per charge (`fixedAmount`, in the branch's currency), and
+ * either added on top of the price or already included in it (`inclusive`).
+ * Which fields are required depends on `type`, so that check lives in
+ * `TaxesService.assertShape` rather than in decorators.
+ */
 export class CreateTaxRuleDto {
   @ApiProperty({ example: 'VAT' })
   @IsString()
@@ -10,12 +20,34 @@ export class CreateTaxRuleDto {
   @MaxLength(100)
   name!: string;
 
-  @ApiProperty({ example: 0.075, description: '0.075 = 7.5%. Stored as Decimal(6,4).' })
+  @ApiPropertyOptional({ enum: TAX_RULE_TYPES, default: 'percentage' })
+  @IsOptional()
+  @IsIn(TAX_RULE_TYPES)
+  type?: TaxRuleType;
+
+  @ApiPropertyOptional({ example: 0.075, description: 'Percentage rules: 0.075 = 7.5%. Leave out for a fixed rule.' })
+  @IsOptional()
   @Type(() => Number)
   @IsNumber({ maxDecimalPlaces: 4 })
   @Min(0)
   @Max(1)
-  rate!: number;
+  rate?: number;
+
+  @ApiPropertyOptional({ example: 500, description: 'Fixed rules: the amount added to each charge — each night, on rooms.' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0.01)
+  @Max(10_000_000)
+  fixedAmount?: number;
+
+  @ApiPropertyOptional({
+    default: false,
+    description: 'true: the tax is already inside the price (VAT-inclusive rates) and is taken out of it; false: it is added on top.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  inclusive?: boolean;
 
   @ApiPropertyOptional({
     enum: ChargeType,
@@ -41,5 +73,10 @@ export class UpdateTaxRuleDto {
   isActive?: boolean;
 }
 
-/** `AdjustmentType` is imported so the enum stays referenced here — `type` is fixed to `percentage` this pass (a fixed-amount tax rule has no meaningful "taxable base" to report on, and the reference only shows percentages). */
-export const DEFAULT_TAX_RULE_TYPE: AdjustmentType = 'percentage';
+/**
+ * Changing a rule's rate, amount or scope. The old rule is retired and a new
+ * one takes its place in one transaction — bills already posted keep pointing
+ * at the old rule, so their tax breakdown still shows the rate they were
+ * actually charged at.
+ */
+export class ReplaceTaxRuleDto extends CreateTaxRuleDto {}

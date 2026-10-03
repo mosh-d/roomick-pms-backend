@@ -14,6 +14,8 @@ export interface BeoPdfSpec {
   catering: Array<{ description: string; quantity: string; unitPrice: string; amount: string }>;
   subtotal: string;
   tax: string;
+  /** Tax already inside the menu prices; null when none is. */
+  taxIncluded: string | null;
   total: string;
   avRequirements: string | null;
   notes: string | null;
@@ -94,6 +96,7 @@ export function renderBeoPdf(spec: BeoPdfSpec): Promise<Buffer> {
       row(['', '', 'Subtotal', spec.subtotal]);
       row(['', '', 'Tax (estimate)', spec.tax]);
       row(['', '', 'Total', spec.total], true);
+      if (spec.taxIncluded) row(['', '', 'Includes tax of', spec.taxIncluded]);
     }
     rule();
 

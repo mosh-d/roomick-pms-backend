@@ -53,7 +53,8 @@ export interface EventBookingDetail extends EventBookingSummary {
   space: EventSpaceSummary;
   currency: string;
   cateringLines: Array<CateringLine & { amount: string }>;
-  totals: { subtotal: string; taxTotal: string; total: string };
+  /** `taxTotal` is added on top of `subtotal`; `taxIncluded` is already inside it. */
+  totals: { subtotal: string; taxTotal: string; taxIncluded: string; total: string };
 }
 
 function parseCapacities(value: Prisma.JsonValue | null | undefined): SetupCapacities | null {
@@ -296,6 +297,7 @@ export class EventSpacesService {
           })),
           subtotal: money(totals.subtotal),
           tax: money(totals.taxTotal),
+          taxIncluded: totals.taxIncluded.isZero() ? null : money(totals.taxIncluded),
           total: money(totals.total),
           avRequirements: booking.avRequirements,
           notes: booking.notes,
@@ -350,11 +352,11 @@ export class EventSpacesService {
     return lines.map((line) => ({ description: line.description.trim(), quantity: line.quantity, unitPrice: line.unitPrice }));
   }
 
+  /** A quote, like the Rate Resolver's: `subtotal` is the menu prices added up, `taxTotal` what's added on top, `taxIncluded` what's already inside them. */
   private async cateringTotals(tx: TenantTx, branchId: string, lines: CateringLine[]) {
     const subtotal = lines.reduce((sum, line) => sum.plus(new Prisma.Decimal(line.unitPrice).mul(line.quantity)), ZERO);
-    const taxes = subtotal.greaterThan(0) ? await this.taxesService.computeTaxesForCharge(tx, branchId, 'fnb', subtotal) : [];
-    const taxTotal = taxes.reduce((sum, tax) => sum.plus(tax.taxAmount), ZERO);
-    return { subtotal, taxTotal, total: subtotal.plus(taxTotal) };
+    const priced = await this.taxesService.priceCharge(tx, branchId, 'fnb', subtotal);
+    return { subtotal, taxTotal: priced.addedTax, taxIncluded: priced.includedTax, total: priced.total };
   }
 
   private async detail(tx: TenantTx, booking: EventBooking, space: EventSpace): Promise<EventBookingDetail> {
@@ -366,7 +368,12 @@ export class EventSpacesService {
       space: toSpaceSummary(space),
       currency: branch?.currency ?? '',
       cateringLines: lines.map((line) => ({ ...line, amount: new Prisma.Decimal(line.unitPrice).mul(line.quantity).toFixed(2) })),
-      totals: { subtotal: totals.subtotal.toFixed(2), taxTotal: totals.taxTotal.toFixed(2), total: totals.total.toFixed(2) },
+      totals: {
+        subtotal: totals.subtotal.toFixed(2),
+        taxTotal: totals.taxTotal.toFixed(2),
+        taxIncluded: totals.taxIncluded.toFixed(2),
+        total: totals.total.toFixed(2),
+      },
     };
   }
 }

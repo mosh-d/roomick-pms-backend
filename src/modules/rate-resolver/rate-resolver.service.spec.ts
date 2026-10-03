@@ -48,15 +48,22 @@ function makeTx() {
 
 let auditLogSeq = 0;
 
+/** `TaxesService.priceCharge`'s answer for `price` with `added` on top and `included` inside. */
+function priced(price: Prisma.Decimal, added = '0', included = '0') {
+  const addedTax = new Prisma.Decimal(added);
+  const includedTax = new Prisma.Decimal(included);
+  return { price, net: price.minus(includedTax), taxes: [], taxTotal: addedTax.plus(includedTax), includedTax, addedTax, total: price.plus(addedTax) };
+}
+
 describe('RateResolverService', () => {
   let service: RateResolverService;
   let tx: ReturnType<typeof makeTx>;
-  let taxesService: { computeTaxesForCharge: jest.Mock };
+  let taxesService: { priceCharge: jest.Mock };
 
   beforeEach(async () => {
     auditLogSeq = 0;
     tx = makeTx();
-    taxesService = { computeTaxesForCharge: jest.fn().mockResolvedValue([]) };
+    taxesService = { priceCharge: jest.fn((_tx: unknown, _branchId: string, _type: string, price: Prisma.Decimal) => Promise.resolve(priced(price))) };
     const moduleRef = await Test.createTestingModule({
       providers: [
         RateResolverService,
@@ -239,11 +246,23 @@ describe('RateResolverService', () => {
 
   describe('resolveStay — tax integration', () => {
     it('totalWithTax adds the resolved tax on top of the subtotal; confirmedRate-equivalent subtotal stays tax-exclusive', async () => {
-      taxesService.computeTaxesForCharge.mockResolvedValue([{ ruleId: 'vat', ruleName: 'VAT', rate: new Prisma.Decimal('0.075'), taxAmount: new Prisma.Decimal('7.50') }]);
+      taxesService.priceCharge.mockImplementation((_tx: unknown, _branchId: string, _type: string, price: Prisma.Decimal) => Promise.resolve(priced(price, '7.50')));
       const result = await service.resolveStay(tx as never, TENANT_ID, BRANCH_ID, ROOM_TYPE as never, new Date('2026-09-01'), new Date('2026-09-02'), {}, { triggeredBy: 'booking_create' });
       expect(result.subtotal.toFixed(2)).toBe('100.00');
       expect(result.taxTotal.toFixed(2)).toBe('7.50');
+      expect(result.taxIncluded.toFixed(2)).toBe('0.00');
       expect(result.totalWithTax.toFixed(2)).toBe('107.50');
+      // one room charge per night, so a fixed tax is counted per night
+      expect(taxesService.priceCharge).toHaveBeenCalledWith(tx, BRANCH_ID, 'room', expect.anything(), 1);
+    });
+
+    it('a branch quoting tax-inclusive rates: the subtotal is the price, the tax inside it is shown, nothing is added', async () => {
+      taxesService.priceCharge.mockImplementation((_tx: unknown, _branchId: string, _type: string, price: Prisma.Decimal) => Promise.resolve(priced(price, '0', '6.98')));
+      const result = await service.resolveStay(tx as never, TENANT_ID, BRANCH_ID, ROOM_TYPE as never, new Date('2026-09-01'), new Date('2026-09-02'), {}, { triggeredBy: 'booking_create' });
+      expect(result.subtotal.toFixed(2)).toBe('100.00');
+      expect(result.taxTotal.toFixed(2)).toBe('0.00');
+      expect(result.taxIncluded.toFixed(2)).toBe('6.98');
+      expect(result.totalWithTax.toFixed(2)).toBe('100.00');
     });
   });
 

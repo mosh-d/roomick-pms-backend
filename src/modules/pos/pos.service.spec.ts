@@ -63,11 +63,26 @@ function makeTx() {
   };
 }
 
+/** `FoliosService.previewCharge` for a price with 7.5% added on top, or — `included` — already inside it. */
+function preview(price: Prisma.Decimal, included = false) {
+  const tax = included ? price.minus(price.div('1.075')).toDecimalPlaces(2) : price.mul('0.075').toDecimalPlaces(2);
+  const zero = new Prisma.Decimal(0);
+  return {
+    price,
+    net: included ? price.minus(tax) : price,
+    taxes: [],
+    taxTotal: tax,
+    includedTax: included ? tax : zero,
+    addedTax: included ? zero : tax,
+    total: included ? price : price.plus(tax),
+  };
+}
+
 function makeFolios() {
   return {
     ensurePrimaryFolio: jest.fn().mockResolvedValue({ id: FOLIO_ID, status: 'open' }),
-    postOutletCharge: jest.fn().mockResolvedValue({ id: LINE_ITEM_ID, taxAmount: new Prisma.Decimal('375') }),
-    previewTaxTotal: jest.fn().mockResolvedValue(new Prisma.Decimal('375')),
+    postOutletCharge: jest.fn().mockResolvedValue({ id: LINE_ITEM_ID, amount: new Prisma.Decimal('5000'), taxAmount: new Prisma.Decimal('375') }),
+    previewCharge: jest.fn((_tx: unknown, _branchId: string, _type: string, price: Prisma.Decimal) => Promise.resolve(preview(price))),
     correctLineItemInTx: jest.fn().mockResolvedValue({ id: 'correction-1' }),
   };
 }
@@ -139,6 +154,24 @@ describe('PosService', () => {
       expect(createdOrder()).toMatchObject({ settlement: 'cash', shiftId: SHIFT_ID, reservationId: undefined, lineItemId: undefined });
       expect((createdOrder().total as Prisma.Decimal).toFixed(2)).toBe('5375.00'); // the quote's own tax preview
       expect(folios.postOutletCharge).not.toHaveBeenCalled();
+    });
+
+    it('records what the outlet keeps when the menu prices already include the tax', async () => {
+      folios.previewCharge.mockImplementation((_tx: unknown, _branchId: string, _type: string, price: Prisma.Decimal) => Promise.resolve(preview(price, true)));
+      await order({ settlement: 'cash' });
+      // 5,000 of menu prices holding 7.5% VAT: the outlet keeps 4,651.16, and the guest pays 5,000
+      expect((createdOrder().subtotal as Prisma.Decimal).toFixed(2)).toBe('4651.16');
+      expect((createdOrder().taxTotal as Prisma.Decimal).toFixed(2)).toBe('348.84');
+      expect((createdOrder().total as Prisma.Decimal).toFixed(2)).toBe('5000.00');
+    });
+
+    it('quotes like the menu reads: the items, any tax on top, and the tax already inside them', async () => {
+      folios.previewCharge.mockImplementation((_tx: unknown, _branchId: string, _type: string, price: Prisma.Decimal) => Promise.resolve(preview(price, true)));
+      const quote = await service.quote(TENANT_ID, OUTLET_ID, { items: TWO_CHAPMANS.items }, actor('front_desk'));
+      expect(quote.subtotal.toFixed(2)).toBe('5000.00');
+      expect(quote.taxTotal.toFixed(2)).toBe('0.00');
+      expect(quote.taxIncluded.toFixed(2)).toBe('348.84');
+      expect(quote.total.toFixed(2)).toBe('5000.00');
     });
 
     it('never ties a card sale to a drawer', async () => {

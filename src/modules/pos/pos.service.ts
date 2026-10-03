@@ -250,13 +250,16 @@ export class PosService {
       this.assertOutletActive(outlet);
       await this.assertCanRingUp(tx, actor, outlet);
       const branch = await this.propertyService.assertBranch(tx, outlet.branchId);
-      const priced = await this.priceBasket(tx, outlet, dto.items);
+      const { lines, priced } = await this.priceBasket(tx, outlet, dto.items);
+      // Reads like the menu: the items added up, then any tax on top. Tax the
+      // branch includes in its prices is shown, never added a second time.
       return {
         currency: branch.currency,
-        lines: priced.lines,
-        subtotal: priced.subtotal,
-        taxTotal: priced.taxTotal,
-        total: priced.subtotal.plus(priced.taxTotal),
+        lines,
+        subtotal: priced.price,
+        taxTotal: priced.addedTax,
+        taxIncluded: priced.includedTax,
+        total: priced.total,
       };
     });
   }
@@ -312,9 +315,13 @@ export class PosService {
       const last = await tx.posOrder.aggregate({ _max: { orderNo: true }, where: { outletId: outlet.id } });
       const orderNo = (last._max.orderNo ?? 0) + 1;
 
-      const priced = await this.priceBasket(tx, outlet, dto.items);
-      if (!priced.subtotal.greaterThan(0)) throw invalid("This order comes to nothing — there's nothing to charge");
+      const { lines, priced } = await this.priceBasket(tx, outlet, dto.items);
+      if (!priced.price.greaterThan(0)) throw invalid("This order comes to nothing — there's nothing to charge");
 
+      // The order is the outlet's ledger, so it records what the outlet keeps
+      // (`net`, any included tax taken out) and all the tax — what revenue
+      // reports and the accounting export read.
+      let net = priced.net;
       let taxTotal = priced.taxTotal;
       let room: { reservationId: string; folioId: string; lineItemId: string } | null = null;
       let shiftId: string | null = null;
@@ -336,19 +343,20 @@ export class PosService {
             message: "This guest's bill has been settled and closed — ask the front desk to reopen it, or take cash or card",
           });
         }
-        const summary = priced.lines.map((line) => `${line.qty}× ${line.name}`).join(', ');
+        const summary = lines.map((line) => `${line.qty}× ${line.name}`).join(', ');
         const lineItem = await this.foliosService.postOutletCharge(tx, {
           folio,
           outletId: outlet.id,
           chargeType: outlet.chargeType,
-          amount: priced.subtotal,
+          amount: priced.price,
           description: `${outlet.name} — Order #${orderNo}: ${summary}`.slice(0, 300),
           serviceDate: toBranchDate(todayInTimezone(branch.timezone)),
           actorId: actor.sub,
         });
         if (!lineItem) throw invalid("This order comes to nothing — there's nothing to charge");
-        // The ledger's own tax figure. The quote used the same rules and
-        // rounding, so the two agree; reading it back makes that certain.
+        // The ledger's own figures. The quote used the same rules and
+        // rounding, so the two agree; reading them back makes that certain.
+        net = lineItem.amount;
         taxTotal = lineItem.taxAmount;
         room = { reservationId: reservation.id, folioId: folio.id, lineItemId: lineItem.id };
       } else if (dto.settlement === 'cash') {
@@ -370,10 +378,10 @@ export class PosService {
           orderNo,
           settlement: dto.settlement,
           tableNumber: tableNumber ? tableNumber : null,
-          items: priced.lines,
-          subtotal: priced.subtotal,
+          items: lines,
+          subtotal: net,
           taxTotal,
-          total: priced.subtotal.plus(taxTotal),
+          total: net.plus(taxTotal),
           currency: branch.currency,
           reservationId: room?.reservationId,
           folioId: room?.folioId,
@@ -506,8 +514,8 @@ export class PosService {
       where: { outletId: outlet.id, id: { in: items.map((item) => item.menuItemId) }, deletedAt: null },
     });
     const { lines, subtotal } = priceOrder(menuItems, items);
-    const taxTotal = await this.foliosService.previewTaxTotal(tx, outlet.branchId, outlet.chargeType, subtotal);
-    return { lines, subtotal, taxTotal };
+    const priced = await this.foliosService.previewCharge(tx, outlet.branchId, outlet.chargeType, subtotal);
+    return { lines, priced };
   }
 
   /** Adds who rang each sale up — the receipt's "Served by". */

@@ -63,7 +63,10 @@ export interface PublicQuote {
   currency: string;
   nightlyRate: string;
   subtotal: string;
+  /** Tax added on top of `subtotal`. */
   taxTotal: string;
+  /** Tax already inside `subtotal` (a property quoting tax-inclusive rates) — for "includes … tax", never added again. */
+  taxIncluded: string;
   totalWithTax: string;
   nights: number;
   /** The cancellation terms this stay would book under — including when it starts so soon that the free window has already closed. */
@@ -162,7 +165,8 @@ export interface PublicCancellationQuote {
   policySummary: string;
   freeCancellationUntil: Date;
   withinFreeWindow: boolean;
-  charge: { amount: string; tax: string; total: string };
+  /** `tax` is added on top of `amount`; `taxIncluded` is already inside it. */
+  charge: { amount: string; tax: string; taxIncluded: string; total: string };
   paidSoFar: string;
   refundDue: string;
 }
@@ -429,6 +433,7 @@ export class PublicBookingService {
       nightlyRate: resolution.nightlyRate.toFixed(2),
       subtotal: resolution.subtotal.toFixed(2),
       taxTotal: resolution.taxTotal.toFixed(2),
+      taxIncluded: resolution.taxIncluded.toFixed(2),
       totalWithTax: resolution.totalWithTax.toFixed(2),
       nights,
       cancellation: {
@@ -759,7 +764,7 @@ export class PublicBookingService {
         policySummary: quote.policy.summary,
         freeCancellationUntil: quote.freeCancellationUntil,
         withinFreeWindow: quote.withinFreeWindow,
-        charge: { amount: quote.penaltyAmount, tax: quote.penaltyTax, total: quote.penaltyTotal },
+        charge: { amount: quote.penaltyAmount, tax: quote.penaltyTax, taxIncluded: quote.penaltyTaxIncluded, total: quote.penaltyTotal },
         paidSoFar: quote.paidSoFar,
         refundDue: quote.refundDue,
       };

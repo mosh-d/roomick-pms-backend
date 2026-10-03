@@ -64,6 +64,9 @@ const MAX_AVAILABILITY_RANGE_DAYS = 92;
 /** Reservation statuses that hold inventory against a room type (§4.2). */
 const HOLDING_STATUSES = ['confirmed', 'checked_in'] as const;
 
+/** How a no-show penalty line starts on the bill — also how a waiver finds one posted before records linked their line. */
+const NO_SHOW_PENALTY_LABEL = 'No-Show Penalty';
+
 @Injectable()
 export class ReservationsService {
   constructor(
@@ -930,10 +933,8 @@ export class ReservationsService {
     // The terms the booking was made under, not whatever the branch offers today.
     const policy = resolveCancellationPolicy(reservation.cancellationPolicy ?? branch.cancellationPolicy);
     const terms = cancellationTermsFor(reservation, branch, policy, now);
-    const penaltyTax = terms.penaltyAmount.isZero()
-      ? new Prisma.Decimal(0)
-      : await this.foliosService.previewTaxTotal(tx, reservation.branchId, 'penalty', terms.penaltyAmount);
-    const penaltyTotal = terms.penaltyAmount.plus(penaltyTax);
+    const penalty = await this.foliosService.previewCharge(tx, reservation.branchId, 'penalty', terms.penaltyAmount);
+    const penaltyTotal = penalty.total;
     const paidSoFar = await this.foliosService.paidOnPrimaryFolio(tx, reservation.id);
     const net = paidSoFar.minus(penaltyTotal);
     return {
@@ -948,7 +949,8 @@ export class ReservationsService {
       pastCheckInTime: terms.pastCheckInTime,
       penaltyType: terms.penaltyType,
       penaltyAmount: terms.penaltyAmount.toFixed(2),
-      penaltyTax: penaltyTax.toFixed(2),
+      penaltyTax: penalty.addedTax.toFixed(2),
+      penaltyTaxIncluded: penalty.includedTax.toFixed(2),
       penaltyTotal: penaltyTotal.toFixed(2),
       paidSoFar: paidSoFar.toFixed(2),
       refundDue: (net.greaterThan(0) ? net : new Prisma.Decimal(0)).toFixed(2),
@@ -1043,26 +1045,21 @@ export class ReservationsService {
     });
 
     const penaltyAmount = penaltyAmountFor(reservation, penaltyType, flatFeeAmount);
-    const noShowRecord = await tx.noShowRecord.create({
-      data: { tenantId, reservationId: reservation.id, penaltyType, penaltyAmount, markedBy },
-    });
 
     // `markedBy` straight through — NULL for the scheduled sweep, which is
     // what `postedBy`/`userId` mean by NULL ("system"). This used to fall back
     // to `''` and `'system'`, which Postgres rejects in those UUID columns;
     // the error aborted the whole night-audit transaction.
     const folio = await this.foliosService.ensurePrimaryFolio(tx, updated, markedBy);
-    if (penaltyAmount && !penaltyAmount.isZero()) {
-      await this.foliosService.postAdHocCharge(
-        tx,
-        updated,
-        folio,
-        'penalty',
-        penaltyAmount,
-        `No-Show Penalty (${penaltyType.replace('_', ' ')})`,
-        markedBy,
-      );
-    }
+    const penaltyLine =
+      penaltyAmount && !penaltyAmount.isZero()
+        ? await this.foliosService.postAdHocCharge(tx, updated, folio, 'penalty', penaltyAmount, `${NO_SHOW_PENALTY_LABEL} (${penaltyType.replace('_', ' ')})`, markedBy)
+        : null;
+    // The record keeps hold of the charge it posted, so a waiver reverses that
+    // exact line and the tax posted with it.
+    const noShowRecord = await tx.noShowRecord.create({
+      data: { tenantId, reservationId: reservation.id, penaltyType, penaltyAmount, markedBy, penaltyLineItemId: penaltyLine?.id ?? null },
+    });
     await this.foliosService.settleIfFullyPaid(tx, folio, markedBy, 'noShow');
 
     await this.audit(tx, tenantId, reservation.branchId, markedBy, 'reservation.no_show', reservation.id, {
@@ -1121,7 +1118,12 @@ export class ReservationsService {
     const reservation = await this.findReservationOrThrow(tx, record.reservationId);
     if (record.penaltyAmount && !record.penaltyAmount.isZero()) {
       const folio = await this.foliosService.ensurePrimaryFolio(tx, reservation, actorId);
-      await this.foliosService.postAdHocCharge(tx, reservation, folio, 'correction', record.penaltyAmount.negated(), 'No-Show Penalty Waived', actorId);
+      // Reverse the penalty line itself, with exactly the tax that went on
+      // with it. This used to post a fresh negative charge through the tax
+      // rules instead, which left a penalty's tax standing whenever the rule
+      // was limited to penalties (a correction isn't a penalty).
+      const penaltyLineId = record.penaltyLineItemId ?? (await this.findUnreversedNoShowPenalty(tx, folio.id));
+      if (penaltyLineId) await this.foliosService.reverseChargeInTx(tx, tenantId, penaltyLineId, 'penalty waived', actorId);
       await this.foliosService.settleIfFullyPaid(tx, folio, actorId, 'noShowWaived');
     }
 
@@ -1129,6 +1131,16 @@ export class ReservationsService {
       penaltyAmount: record.penaltyAmount?.toFixed(2) ?? null,
     });
     return updated;
+  }
+
+  /** For a no-show marked before records linked their penalty line: the latest penalty line on the bill that nobody has reversed yet. */
+  private async findUnreversedNoShowPenalty(tx: TenantTx, folioId: string): Promise<string | null> {
+    const line = await tx.lineItem.findFirst({
+      where: { folioId, chargeType: 'penalty', description: { startsWith: NO_SHOW_PENALTY_LABEL }, isVoid: false, deletedAt: null, correctedBy: null },
+      orderBy: { postedAt: 'desc' },
+      select: { id: true },
+    });
+    return line?.id ?? null;
   }
 
   /**
