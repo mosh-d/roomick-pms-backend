@@ -3,6 +3,8 @@ import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { Test } from '@nestjs/testing';
 import * as bcrypt from 'bcrypt';
+import { PermissionsService } from '../../common/permissions/permissions.service';
+import { RoutePermissionMapService } from '../../common/permissions/route-permission-map.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuthService, SYSTEM_ROLE_NAMES } from './auth.service';
 
@@ -21,7 +23,10 @@ function makeTx(): Record<string, Record<string, jest.Mock>> {
       findUniqueOrThrow: jest.fn().mockResolvedValue({ id: 'role-owner', name: 'owner' }),
       findFirst: jest.fn(),
       findMany: jest.fn().mockResolvedValue([]),
-      update: jest.fn(),
+      create: jest.fn().mockImplementation(({ data }: { data: Record<string, unknown> }) => Promise.resolve({ id: 'role-new', ...data })),
+      update: jest.fn().mockImplementation(({ data }: { data: Record<string, unknown> }) => Promise.resolve({ id: 'role-custom', name: 'Night Auditor', isSystem: false, ...data })),
+      delete: jest.fn().mockResolvedValue({}),
+      count: jest.fn().mockResolvedValue(0),
     },
     user: {
       create: jest.fn().mockResolvedValue({ id: USER_ID, tenantId: TENANT_ID, email: 'a@b.c', name: 'A' }),
@@ -29,11 +34,13 @@ function makeTx(): Record<string, Record<string, jest.Mock>> {
       update: jest.fn().mockResolvedValue({}),
     },
     userBranchRole: {
+      count: jest.fn().mockResolvedValue(0),
       create: jest.fn().mockResolvedValue({}),
       findFirst: jest.fn().mockResolvedValue(null),
       findMany: jest.fn().mockResolvedValue([{ branchId: null, role: { name: 'owner' } }]),
     },
     inviteToken: {
+      count: jest.fn().mockResolvedValue(0),
       findUnique: jest.fn(),
       update: jest.fn().mockResolvedValue({}),
     },
@@ -60,6 +67,7 @@ describe('AuthService', () => {
     withTenant: jest.Mock;
   };
   let jwt: { signAsync: jest.Mock; verifyAsync: jest.Mock };
+  let permissions: { invalidate: jest.Mock; rolesFor: jest.Mock };
 
   beforeEach(async () => {
     tx = makeTx();
@@ -84,12 +92,15 @@ describe('AuthService', () => {
       signAsync: jest.fn().mockResolvedValue('signed.jwt.token'),
       verifyAsync: jest.fn(),
     };
+    permissions = { invalidate: jest.fn(), rolesFor: jest.fn().mockResolvedValue(new Map()) };
 
     const moduleRef = await Test.createTestingModule({
       providers: [
         AuthService,
         { provide: PrismaService, useValue: prisma },
         { provide: JwtService, useValue: jwt },
+        { provide: PermissionsService, useValue: permissions },
+        { provide: RoutePermissionMapService, useValue: { systemRolePresets: () => ({ front_desk: { reservations: ['create', 'read', 'update'] } }) } },
         {
           provide: ConfigService,
           useValue: {
@@ -388,6 +399,67 @@ describe('AuthService', () => {
       expect(tx.branch.findMany).toHaveBeenCalledWith(
         expect.objectContaining({ where: expect.objectContaining({ id: { in: ['b1'] } }) }),
       );
+    });
+  });
+
+  describe('custom roles', () => {
+    const CUSTOM = { id: 'role-custom', name: 'Night Auditor', isSystem: false, permissions: { reservations: ['read'] } };
+    const SEEDED = { id: 'role-manager', name: 'manager', isSystem: true, permissions: null };
+
+    it('creates one with a scoped permission map, and clears the cached one', async () => {
+      tx.role.findFirst.mockResolvedValue(null);
+      const role = await service.createRole(TENANT_ID, '  Night   Auditor ', { reservations: ['read', 'read'] }, USER_ID);
+      const data = (tx.role.create.mock.calls[0][0] as { data: Record<string, unknown> }).data;
+      expect(data).toMatchObject({ name: 'Night Auditor', isSystem: false, permissions: { reservations: ['read'] } });
+      expect(role.name).toBe('Night Auditor');
+      expect(permissions.invalidate).toHaveBeenCalledWith(TENANT_ID);
+      expect(tx.auditLog.create).toHaveBeenCalled();
+    });
+
+    it('refuses a name that is one of the built-in roles, or a duplicate', async () => {
+      tx.role.findFirst.mockResolvedValue(null);
+      await expect(service.createRole(TENANT_ID, 'Front Desk', {}, USER_ID)).rejects.toThrow(/built-in roles/);
+      await expect(service.createRole(TENANT_ID, 'X', {}, USER_ID)).rejects.toThrow(/2 to 60 characters/);
+      tx.role.findFirst.mockResolvedValue(CUSTOM);
+      await expect(service.createRole(TENANT_ID, 'Night Auditor', {}, USER_ID)).rejects.toThrow(/already exists/);
+    });
+
+    it('refuses a permission for something that can’t be delegated', async () => {
+      tx.role.findFirst.mockResolvedValue(null);
+      await expect(service.createRole(TENANT_ID, 'Sneaky', { staff: ['create'] }, USER_ID)).rejects.toThrow(/isn’t something a role can be given/);
+      expect(tx.role.create).not.toHaveBeenCalled();
+    });
+
+    it('won’t re-scope a built-in role — its access is what the routes say', async () => {
+      tx.role.findFirst.mockResolvedValue(SEEDED);
+      await expect(service.updateRolePermissions(TENANT_ID, 'role-manager', { reservations: ['delete'] }, USER_ID)).rejects.toThrow(/built-in role/);
+      expect(tx.role.update).not.toHaveBeenCalled();
+    });
+
+    it('won’t delete one somebody still holds', async () => {
+      tx.role.findFirst.mockResolvedValue(CUSTOM);
+      tx.userBranchRole.count.mockResolvedValue(2);
+      await expect(service.deleteRole(TENANT_ID, 'role-custom', USER_ID)).rejects.toThrow(/still held by 2 staff members/);
+      tx.userBranchRole.count.mockResolvedValue(0);
+      tx.inviteToken.count.mockResolvedValue(1);
+      await expect(service.deleteRole(TENANT_ID, 'role-custom', USER_ID)).rejects.toThrow(/1 unaccepted invite/);
+      expect(tx.role.delete).not.toHaveBeenCalled();
+    });
+
+    it('deletes one nobody holds, and clears the cache', async () => {
+      tx.role.findFirst.mockResolvedValue(CUSTOM);
+      tx.userBranchRole.count.mockResolvedValue(0);
+      tx.inviteToken.count.mockResolvedValue(0);
+      await expect(service.deleteRole(TENANT_ID, 'role-custom', USER_ID)).resolves.toEqual({ deleted: true });
+      expect(permissions.invalidate).toHaveBeenCalledWith(TENANT_ID);
+    });
+
+    it('publishes the vocabulary a matrix is built from, and what each built-in role really covers', () => {
+      const catalogue = service.permissionCatalogue();
+      expect(catalogue.actions).toEqual(['read', 'create', 'update', 'delete']);
+      expect(catalogue.modules.some((module) => module.key === 'reservations')).toBe(true);
+      expect(catalogue.systemRolePresets.front_desk).toEqual({ reservations: ['create', 'read', 'update'] });
+      expect(catalogue.undelegatable.length).toBeGreaterThan(0);
     });
   });
 });

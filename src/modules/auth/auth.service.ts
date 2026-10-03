@@ -13,6 +13,9 @@ import { Prisma, Role, User } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import { randomBytes } from 'node:crypto';
 import { ErrorCode } from '../../common/errors/error-codes';
+import { PERMISSION_ACTIONS, PERMISSION_MODULES, PermissionModule, parsePermissions } from '../../common/permissions/permission-catalogue';
+import { PermissionsService } from '../../common/permissions/permissions.service';
+import { RoutePermissionMapService } from '../../common/permissions/route-permission-map.service';
 import { JwtPayload } from '../../common/types/request-context';
 import { PrismaService, TenantTx } from '../../prisma/prisma.service';
 import { demoExpiryFromNow } from '../tenants/tenants.service';
@@ -71,6 +74,8 @@ export class AuthService {
     private readonly prisma: PrismaService,
     private readonly jwt: JwtService,
     private readonly config: ConfigService,
+    private readonly permissionsService: PermissionsService,
+    private readonly routePermissionMap: RoutePermissionMapService,
   ) {}
 
   // -------------------------------------------------------------------------
@@ -409,27 +414,121 @@ export class AuthService {
     );
   }
 
-  async updateRolePermissions(
-    tenantId: string,
-    roleId: string,
-    permissions: Record<string, string[]>,
-    actorUserId: string,
-  ): Promise<Role> {
-    return this.prisma.withTenant(tenantId, async (tx) => {
-      const role = await tx.role.findFirst({ where: { id: roleId } });
-      if (!role) {
-        throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Role not found' });
+  /**
+   * Re-scopes a custom role. A built-in role is refused: its access is what
+   * the routes say it is, and letting someone edit a map nothing reads would
+   * be a switch wired to nothing.
+   */
+  async updateRolePermissions(tenantId: string, roleId: string, permissions: Record<string, string[]>, actorUserId: string): Promise<Role> {
+    return this.updateRole(tenantId, roleId, { permissions }, actorUserId);
+  }
+
+  /**
+   * A role a tenant invents. It holds no name the routes know, so what it can
+   * do is exactly its permission map and nothing else — and the map can only
+   * name modules from the catalogue, which deliberately excludes staff,
+   * roles, security, system administration, backups, GDPR and integrations.
+   */
+  async createRole(tenantId: string, name: string, rawPermissions: unknown, actorUserId: string): Promise<Role> {
+    const cleanName = this.assertRoleName(name);
+    const permissions = parsePermissions(rawPermissions);
+    const role = await this.prisma.withTenant(tenantId, async (tx) => {
+      const clash = await tx.role.findFirst({ where: { name: cleanName } });
+      if (clash) {
+        throw new ConflictException({ code: ErrorCode.CONFLICT, message: `A role called “${cleanName}” already exists` });
+      }
+      const created = await tx.role.create({ data: { tenantId, name: cleanName, isSystem: false, permissions } });
+      await this.audit(tx, tenantId, actorUserId, 'role.created', 'role', created.id, { name: cleanName, permissions: permissions as Prisma.InputJsonValue });
+      return created;
+    });
+    this.permissionsService.invalidate(tenantId);
+    return role;
+  }
+
+  async updateRole(tenantId: string, roleId: string, changes: { name?: string; permissions?: unknown }, actorUserId: string): Promise<Role> {
+    const cleanName = changes.name === undefined ? undefined : this.assertRoleName(changes.name);
+    const permissions = changes.permissions === undefined ? undefined : parsePermissions(changes.permissions);
+    const role = await this.prisma.withTenant(tenantId, async (tx) => {
+      const existing = await this.assertCustomRole(tx, roleId);
+      if (cleanName && cleanName !== existing.name) {
+        const clash = await tx.role.findFirst({ where: { name: cleanName } });
+        if (clash) {
+          throw new ConflictException({ code: ErrorCode.CONFLICT, message: `A role called “${cleanName}” already exists` });
+        }
       }
       const updated = await tx.role.update({
         where: { id: roleId },
-        data: { permissions },
+        data: { ...(cleanName ? { name: cleanName } : {}), ...(permissions ? { permissions } : {}) },
       });
-      await this.audit(tx, tenantId, actorUserId, 'role.permissions_updated', 'role', roleId, {
-        before: role.permissions,
-        after: permissions,
+      await this.audit(tx, tenantId, actorUserId, 'role.updated', 'role', roleId, {
+        before: { name: existing.name, permissions: existing.permissions },
+        after: { name: updated.name, permissions: updated.permissions },
       });
       return updated;
     });
+    this.permissionsService.invalidate(tenantId);
+    return role;
+  }
+
+  /** Refused while anyone still holds it: deleting it would silently take their access away. */
+  async deleteRole(tenantId: string, roleId: string, actorUserId: string): Promise<{ deleted: true }> {
+    await this.prisma.withTenant(tenantId, async (tx) => {
+      const role = await this.assertCustomRole(tx, roleId);
+      const [holders, invites] = await Promise.all([
+        tx.userBranchRole.count({ where: { roleId } }),
+        tx.inviteToken.count({ where: { roleId, acceptedAt: null } }),
+      ]);
+      if (holders > 0 || invites > 0) {
+        const parts = [holders ? `${holders} staff member${holders === 1 ? '' : 's'}` : '', invites ? `${invites} unaccepted invite${invites === 1 ? '' : 's'}` : ''].filter(Boolean);
+        throw new ConflictException({ code: ErrorCode.CONFLICT, message: `“${role.name}” is still held by ${parts.join(' and ')}` });
+      }
+      await tx.role.delete({ where: { id: roleId } });
+      await this.audit(tx, tenantId, actorUserId, 'role.deleted', 'role', roleId, { name: role.name });
+    });
+    this.permissionsService.invalidate(tenantId);
+    return { deleted: true as const };
+  }
+
+  /** The vocabulary the permission matrix is built from, plus what each seeded role really covers. */
+  permissionCatalogue(): {
+    modules: readonly PermissionModule[];
+    actions: readonly string[];
+    systemRolePresets: Record<string, Record<string, string[]>>;
+    undelegatable: string[];
+  } {
+    return {
+      modules: PERMISSION_MODULES,
+      actions: PERMISSION_ACTIONS,
+      systemRolePresets: this.routePermissionMap.systemRolePresets(),
+      // Named here so the matrix can say so rather than leaving a gap someone
+      // reads as an oversight.
+      undelegatable: ['Staff and invitations', 'Roles and permissions', 'Audit log and GDPR', 'System administration and backups', 'Integrations', 'Property-wide settings'],
+    };
+  }
+
+  private assertRoleName(name: string): string {
+    const clean = name.trim().replace(/\s+/g, ' ');
+    if (clean.length < 2 || clean.length > 60) {
+      throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: 'A role name needs 2 to 60 characters' });
+    }
+    if ((SYSTEM_ROLE_NAMES as readonly string[]).includes(clean.toLowerCase().replace(/ /g, '_'))) {
+      throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: `“${clean}” is one of the built-in roles — choose another name` });
+    }
+    return clean;
+  }
+
+  private async assertCustomRole(tx: TenantTx, roleId: string): Promise<Role> {
+    const role = await tx.role.findFirst({ where: { id: roleId } });
+    if (!role) {
+      throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Role not found' });
+    }
+    if (role.isSystem) {
+      throw new BadRequestException({
+        code: ErrorCode.VALIDATION_FAILED,
+        message: `“${role.name}” is a built-in role: what it can do is fixed. Create a custom role to tailor access.`,
+      });
+    }
+    return role;
   }
 
   // -------------------------------------------------------------------------

@@ -2,7 +2,8 @@ import { Body, Controller, Get, Param, ParseUUIDPipe, Post } from '@nestjs/commo
 import { ApiBearerAuth, ApiOperation, ApiPropertyOptional, ApiTags } from '@nestjs/swagger';
 import { IsISO8601, IsOptional } from 'class-validator';
 import { CurrentTenant, CurrentUser } from '../../common/decorators';
-import { Roles, SystemRole } from '../../common/decorators/roles.decorator';
+import { Permission } from '../../common/decorators/permission.decorator';
+import { ALL_SYSTEM_ROLES, Roles, SystemRole } from '../../common/decorators/roles.decorator';
 import { JwtPayload } from '../../common/types/request-context';
 import { NightAuditService } from './night-audit.service';
 
@@ -16,10 +17,12 @@ export class RunNightAuditDto {
 @ApiTags('night-audit')
 @ApiBearerAuth()
 @Controller()
+@Permission('night_audit')
 export class NightAuditController {
   constructor(private readonly nightAuditService: NightAuditService) {}
 
   @Get('branches/:branchId/night-audit/preflight')
+  @Roles(...ALL_SYSTEM_ROLES)
   @ApiOperation({ summary: 'Pre-audit checks: which date would close, whether it already ran, due-outs, open folios, unresolved no-shows' })
   getPreflight(
     @CurrentTenant() tenantId: string,
@@ -29,6 +32,7 @@ export class NightAuditController {
   }
 
   @Get('branches/:branchId/night-audit')
+  @Roles(...ALL_SYSTEM_ROLES)
   @ApiOperation({ summary: 'Recent night audit runs for a branch' })
   listRuns(
     @CurrentTenant() tenantId: string,

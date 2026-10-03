@@ -1,7 +1,8 @@
 import { Body, Controller, Get, Param, ParseUUIDPipe, Patch, Post } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentTenant, CurrentUser } from '../../common/decorators';
-import { Roles, SystemRole } from '../../common/decorators/roles.decorator';
+import { Permission } from '../../common/decorators/permission.decorator';
+import { ALL_SYSTEM_ROLES, Roles, SystemRole } from '../../common/decorators/roles.decorator';
 import { JwtPayload } from '../../common/types/request-context';
 import { AddShiftIssueDto, CloseShiftDto, OpenShiftDto, UpdateShiftIssueDto } from './dto/shift.dto';
 import { ShiftsService } from './shifts.service';
@@ -11,6 +12,7 @@ const FLOOR_STAFF = [SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk,
 @ApiTags('shifts')
 @ApiBearerAuth()
 @Controller()
+@Permission('shifts')
 export class ShiftsController {
   constructor(private readonly shiftsService: ShiftsService) {}
 
@@ -27,6 +29,7 @@ export class ShiftsController {
   }
 
   @Post('shifts/:shiftId/close')
+  @Permission('shifts', 'update')
   @Roles(...FLOOR_STAFF)
   @ApiOperation({ summary: 'Close a shift — computes system cash total from linked payments, flags variance, requires an explanation past the branch threshold' })
   closeShift(
@@ -39,12 +42,14 @@ export class ShiftsController {
   }
 
   @Get('shifts/:shiftId')
+  @Roles(...ALL_SYSTEM_ROLES)
   @ApiOperation({ summary: 'A shift with its issues and linked payments' })
   getShift(@CurrentTenant() tenantId: string, @Param('shiftId', ParseUUIDPipe) shiftId: string): ReturnType<ShiftsService['getShift']> {
     return this.shiftsService.getShift(tenantId, shiftId);
   }
 
   @Get('branches/:branchId/shifts')
+  @Roles(...ALL_SYSTEM_ROLES)
   @ApiOperation({ summary: 'Shift history for a branch, newest first' })
   listShifts(
     @CurrentTenant() tenantId: string,
@@ -54,6 +59,7 @@ export class ShiftsController {
   }
 
   @Get('branches/:branchId/shifts/current')
+  @Roles(...ALL_SYSTEM_ROLES)
   @ApiOperation({ summary: "The calling agent's own open shift on this branch, if any" })
   getCurrentShift(
     @CurrentTenant() tenantId: string,
@@ -64,6 +70,7 @@ export class ShiftsController {
   }
 
   @Get('branches/:branchId/shifts/handover')
+  @Roles(...ALL_SYSTEM_ROLES)
   @ApiOperation({ summary: 'Last closed shift’s handover notes, plus every unresolved issue branch-wide, for an agent opening a new shift' })
   getHandoverContext(
     @CurrentTenant() tenantId: string,

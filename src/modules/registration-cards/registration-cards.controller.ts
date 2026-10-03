@@ -2,7 +2,8 @@ import { Body, Controller, Get, Param, ParseUUIDPipe, Post, Res } from '@nestjs/
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import type { Response } from 'express';
 import { CurrentTenant, CurrentUser } from '../../common/decorators';
-import { Roles, SystemRole } from '../../common/decorators/roles.decorator';
+import { Permission } from '../../common/decorators/permission.decorator';
+import { ALL_SYSTEM_ROLES, Roles, SystemRole } from '../../common/decorators/roles.decorator';
 import { JwtPayload } from '../../common/types/request-context';
 import { SignRegistrationCardDto } from './dto/registration-card.dto';
 import { RegistrationCardsService } from './registration-cards.service';
@@ -10,6 +11,7 @@ import { RegistrationCardsService } from './registration-cards.service';
 @ApiTags('registration-cards')
 @ApiBearerAuth()
 @Controller()
+@Permission('guests')
 export class RegistrationCardsController {
   constructor(private readonly registrationCardsService: RegistrationCardsService) {}
 
@@ -25,6 +27,7 @@ export class RegistrationCardsController {
   }
 
   @Get('reservations/:reservationId/registration-card')
+  @Roles(...ALL_SYSTEM_ROLES)
   @ApiOperation({ summary: "A reservation's own registration card, if one has been generated yet" })
   getCardForReservation(
     @CurrentTenant() tenantId: string,
@@ -34,12 +37,14 @@ export class RegistrationCardsController {
   }
 
   @Get('registration-cards/:cardId')
+  @Roles(...ALL_SYSTEM_ROLES)
   @ApiOperation({ summary: 'Get a registration card' })
   getCard(@CurrentTenant() tenantId: string, @Param('cardId', ParseUUIDPipe) cardId: string): ReturnType<RegistrationCardsService['getCard']> {
     return this.registrationCardsService.getCard(tenantId, cardId);
   }
 
   @Get('registration-cards/:cardId/download')
+  @Roles(...ALL_SYSTEM_ROLES)
   @ApiOperation({ summary: 'Download the registration card as a PDF — the persisted signed document if signed, a live-rendered preview otherwise' })
   async downloadCard(
     @CurrentTenant() tenantId: string,
@@ -53,6 +58,7 @@ export class RegistrationCardsController {
   }
 
   @Post('registration-cards/:cardId/sign')
+  @Permission('guests', 'update')
   @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk)
   @ApiOperation({ summary: 'Capture the guest signature — a legal document, signed once' })
   signCard(

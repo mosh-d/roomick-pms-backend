@@ -1,6 +1,7 @@
 import { Body, Controller, Get, HttpCode, Param, ParseUUIDPipe, Post, Put } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentTenant, CurrentUser } from '../../common/decorators';
+import { Permission } from '../../common/decorators/permission.decorator';
 import { Roles, SystemRole } from '../../common/decorators/roles.decorator';
 import { JwtPayload } from '../../common/types/request-context';
 import { AdjustPointsDto, RedeemPointsDto, SaveLoyaltyProgramDto } from './dto/loyalty.dto';
@@ -9,6 +10,7 @@ import { GuestLoyaltyView, LoyaltyProgramView, LoyaltyService, LoyaltySummary, R
 @ApiTags('loyalty')
 @ApiBearerAuth()
 @Controller()
+@Permission('loyalty')
 export class LoyaltyController {
   constructor(private readonly loyaltyService: LoyaltyService) {}
 
@@ -41,6 +43,7 @@ export class LoyaltyController {
   }
 
   @Post('guests/:guestId/loyalty/enroll')
+  @Permission('loyalty', 'update')
   @HttpCode(200)
   @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk)
   @ApiOperation({ summary: 'Enrol a guest in the loyalty programme (a stay enrols them on its own at check-out)' })
@@ -49,6 +52,7 @@ export class LoyaltyController {
   }
 
   @Post('guests/:guestId/loyalty/adjustments')
+  @Permission('loyalty', 'update')
   @Roles(SystemRole.Owner, SystemRole.Manager)
   @ApiOperation({ summary: "Add or take off points, with a reason — never below zero" })
   adjust(

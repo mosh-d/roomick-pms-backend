@@ -4,6 +4,7 @@ import { Throttle } from '@nestjs/throttler';
 import type { Response } from 'express';
 import { CurrentTenant, CurrentUser } from '../../common/decorators';
 import { Public } from '../../common/decorators/public.decorator';
+import { Permission } from '../../common/decorators/permission.decorator';
 import { Roles, SystemRole } from '../../common/decorators/roles.decorator';
 import { JwtPayload } from '../../common/types/request-context';
 import { escapeHtml } from './campaign-render';
@@ -30,6 +31,7 @@ import { CampaignSummary, CampaignView, MarketingService, SegmentPreview, Segmen
 @ApiTags('marketing')
 @ApiBearerAuth()
 @Controller()
+@Permission('marketing')
 export class MarketingController {
   constructor(private readonly marketingService: MarketingService) {}
 
@@ -69,6 +71,7 @@ export class MarketingController {
   }
 
   @Post('marketing/segments/preview')
+  @Permission('marketing', 'read')
   @HttpCode(HttpStatus.OK)
   @Roles(SystemRole.Owner, SystemRole.Manager)
   @ApiOperation({ summary: 'How many guests a set of rules matches, and how many of them can be emailed — works for unsaved rules' })
@@ -126,6 +129,7 @@ export class MarketingController {
   }
 
   @Post('marketing/templates/preview')
+  @Permission('marketing', 'read')
   @HttpCode(HttpStatus.OK)
   @Roles(SystemRole.Owner, SystemRole.Manager)
   @ApiOperation({ summary: 'A draft rendered with example values — the text part and the HTML part' })
@@ -178,6 +182,7 @@ export class MarketingController {
   }
 
   @Post('marketing/campaigns/:campaignId/send')
+  @Permission('marketing', 'update')
   @HttpCode(HttpStatus.OK)
   @Roles(SystemRole.Owner, SystemRole.Manager)
   @ApiOperation({ summary: 'Send now — writes one outbox message per opted-in guest in the segment' })
@@ -186,6 +191,7 @@ export class MarketingController {
   }
 
   @Post('marketing/campaigns/:campaignId/test')
+  @Permission('marketing', 'update')
   @HttpCode(HttpStatus.OK)
   @Roles(SystemRole.Owner, SystemRole.Manager)
   @ApiOperation({ summary: 'Send one test copy to a staff address — never counted, never recorded against a guest' })
@@ -199,6 +205,7 @@ export class MarketingController {
   }
 
   @Post('marketing/campaigns/:campaignId/cancel')
+  @Permission('marketing', 'update')
   @HttpCode(HttpStatus.OK)
   @Roles(SystemRole.Owner, SystemRole.Manager)
   @ApiOperation({ summary: 'Cancel a campaign that has not gone out' })
@@ -209,6 +216,7 @@ export class MarketingController {
   // --- Consent --------------------------------------------------------------
 
   @Put('guests/:guestId/marketing-consent')
+  @Permission('guests', 'update')
   @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk)
   @ApiOperation({ summary: 'Record that a guest has agreed to (or withdrawn from) marketing email' })
   setConsent(

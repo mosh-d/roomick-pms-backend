@@ -1,12 +1,14 @@
 import {
   Body,
   Controller,
+  Delete,
   ForbiddenException,
   Get,
   HttpCode,
   HttpStatus,
   Param,
   ParseUUIDPipe,
+  Patch,
   Post,
   Put,
   Query,
@@ -23,7 +25,7 @@ import { AcceptInviteDto } from './dto/accept-invite.dto';
 import { LoginDto } from './dto/login.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
 import { RegisterDto } from './dto/register.dto';
-import { UpdateRolePermissionsDto } from './dto/update-role-permissions.dto';
+import { CreateRoleDto, UpdateRoleDto, UpdateRolePermissionsDto } from './dto/update-role-permissions.dto';
 import { VerifyEmailDto } from './dto/verify-email.dto';
 
 @ApiTags('auth')
@@ -122,6 +124,42 @@ export class AuthController {
       });
     }
     return this.authService.listRoles(tenantId);
+  }
+
+  @Get('permissions/catalogue')
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'What a custom role can be given: the modules, the actions, what each built-in role really covers, and what can’t be delegated' })
+  permissionCatalogue(): ReturnType<AuthService['permissionCatalogue']> {
+    return this.authService.permissionCatalogue();
+  }
+
+  @Post('roles')
+  @ApiBearerAuth()
+  @Roles(SystemRole.Owner)
+  @ApiOperation({ summary: 'Create a custom role beyond the six built-in ones (owner only)' })
+  createRole(@CurrentTenant() tenantId: string, @CurrentUser() user: JwtPayload, @Body() dto: CreateRoleDto): Promise<Role> {
+    return this.authService.createRole(tenantId, dto.name, dto.permissions ?? {}, user.sub);
+  }
+
+  @Patch('roles/:roleId')
+  @ApiBearerAuth()
+  @Roles(SystemRole.Owner)
+  @ApiOperation({ summary: 'Rename or re-scope a custom role (owner only)' })
+  updateRole(
+    @CurrentTenant() tenantId: string,
+    @CurrentUser() user: JwtPayload,
+    @Param('roleId', ParseUUIDPipe) roleId: string,
+    @Body() dto: UpdateRoleDto,
+  ): Promise<Role> {
+    return this.authService.updateRole(tenantId, roleId, dto, user.sub);
+  }
+
+  @Delete('roles/:roleId')
+  @ApiBearerAuth()
+  @Roles(SystemRole.Owner)
+  @ApiOperation({ summary: 'Delete a custom role nobody holds (owner only)' })
+  deleteRole(@CurrentTenant() tenantId: string, @CurrentUser() user: JwtPayload, @Param('roleId', ParseUUIDPipe) roleId: string): Promise<{ deleted: true }> {
+    return this.authService.deleteRole(tenantId, roleId, user.sub);
   }
 
   @Put('roles/:roleId/permissions')

@@ -1,6 +1,7 @@
 import { Body, Controller, Delete, Get, HttpCode, Param, ParseUUIDPipe, Patch, Post, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentTenant, CurrentUser } from '../../common/decorators';
+import { Permission } from '../../common/decorators/permission.decorator';
 import { Roles, SystemRole } from '../../common/decorators/roles.decorator';
 import { JwtPayload } from '../../common/types/request-context';
 import {
@@ -20,6 +21,7 @@ import { POS_TERMINAL_ROLES, PosService } from './pos.service';
 @ApiTags('pos')
 @ApiBearerAuth()
 @Controller()
+@Permission('pos')
 export class PosController {
   constructor(private readonly posService: PosService) {}
 
@@ -123,6 +125,7 @@ export class PosController {
   // --- Selling -----------------------------------------------------------------
 
   @Post('pos/outlets/:outletId/quote')
+  @Permission('pos', 'read')
   @HttpCode(200)
   @Roles(...POS_TERMINAL_ROLES)
   @ApiOperation({ summary: 'Price a basket — subtotal, tax and total from the server, modifiers included' })
@@ -181,6 +184,7 @@ export class PosController {
   }
 
   @Post('pos/orders/:orderId/void')
+  @Permission('pos', 'update')
   @HttpCode(200)
   @Roles(SystemRole.Owner, SystemRole.Manager)
   @ApiOperation({ summary: "Void a sale — a room charge comes off the guest's bill, tax and all" })

@@ -1,7 +1,8 @@
 import { Body, Controller, Get, Param, ParseUUIDPipe, Patch, Post } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentTenant, CurrentUser } from '../../common/decorators';
-import { Roles, SystemRole } from '../../common/decorators/roles.decorator';
+import { Permission } from '../../common/decorators/permission.decorator';
+import { ALL_SYSTEM_ROLES, Roles, SystemRole } from '../../common/decorators/roles.decorator';
 import { JwtPayload } from '../../common/types/request-context';
 import { CreateBrandDto, UpdateBrandDto } from './dto/brand.dto';
 import {
@@ -18,6 +19,7 @@ import { PropertyService } from './property.service';
 @ApiTags('property')
 @ApiBearerAuth()
 @Controller()
+@Permission('property')
 export class PropertyController {
   constructor(private readonly propertyService: PropertyService) {}
 
@@ -34,6 +36,7 @@ export class PropertyController {
   }
 
   @Get('brands')
+  @Roles(...ALL_SYSTEM_ROLES)
   @ApiOperation({ summary: 'List brands for the current tenant' })
   listBrands(@CurrentTenant() tenantId: string): ReturnType<PropertyService['listBrands']> {
     return this.propertyService.listBrands(tenantId);

@@ -1,7 +1,8 @@
 import { Body, Controller, Get, Param, ParseUUIDPipe, Patch, Post, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentTenant, CurrentUser } from '../../common/decorators';
-import { Roles, SystemRole } from '../../common/decorators/roles.decorator';
+import { Permission } from '../../common/decorators/permission.decorator';
+import { ALL_SYSTEM_ROLES, Roles, SystemRole } from '../../common/decorators/roles.decorator';
 import { JwtPayload } from '../../common/types/request-context';
 import { AddGuestNoteDto, CreateGuestDto, UpdateGuestDto } from './dto/guest.dto';
 import { GuestsService } from './guests.service';
@@ -9,6 +10,7 @@ import { GuestsService } from './guests.service';
 @ApiTags('guests')
 @ApiBearerAuth()
 @Controller()
+@Permission('guests')
 export class GuestsController {
   constructor(private readonly guestsService: GuestsService) {}
 
@@ -20,6 +22,7 @@ export class GuestsController {
   }
 
   @Get('guests')
+  @Roles(...ALL_SYSTEM_ROLES)
   @ApiOperation({ summary: 'Guest Profiles & CRM — the browsable, paginated list (unlike /guests/search, q is optional)' })
   listGuests(
     @CurrentTenant() tenantId: string,
@@ -31,12 +34,14 @@ export class GuestsController {
   }
 
   @Get('guests/search')
+  @Roles(...ALL_SYSTEM_ROLES)
   @ApiOperation({ summary: 'Search guests by name or email (top 20 matches)' })
   searchGuests(@CurrentTenant() tenantId: string, @Query('q') q: string): ReturnType<GuestsService['searchGuests']> {
     return this.guestsService.searchGuests(tenantId, q);
   }
 
   @Get('guests/:guestId')
+  @Roles(...ALL_SYSTEM_ROLES)
   @ApiOperation({ summary: 'Full guest profile — preferences, loyalty, stay history, spend summary, notes feed' })
   getGuest(
     @CurrentTenant() tenantId: string,

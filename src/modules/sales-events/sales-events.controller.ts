@@ -2,6 +2,7 @@ import { Body, Controller, Delete, Get, HttpCode, Param, ParseUUIDPipe, Patch, P
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import type { Response } from 'express';
 import { CurrentTenant, CurrentUser } from '../../common/decorators';
+import { Permission } from '../../common/decorators/permission.decorator';
 import { Roles, SystemRole } from '../../common/decorators/roles.decorator';
 import { JwtPayload } from '../../common/types/request-context';
 import {
@@ -18,6 +19,7 @@ import { EventBookingDetail, EventBookingSummary, EventSpaceSummary, EventSpaces
 @ApiTags('sales-events')
 @ApiBearerAuth()
 @Controller()
+@Permission('sales_events')
 export class SalesEventsController {
   constructor(
     private readonly groupBlocksService: GroupBlocksService,
@@ -46,6 +48,7 @@ export class SalesEventsController {
   }
 
   @Patch('group-blocks/:blockId/release')
+  @Permission('sales_events', 'update')
   @Roles(SystemRole.Owner, SystemRole.Manager)
   @ApiOperation({ summary: 'Release a block — it takes no more bookings and its held rooms go back on sale; booked rooms are unaffected' })
   releaseBlock(

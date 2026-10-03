@@ -1,7 +1,8 @@
 import { Body, Controller, Get, Param, ParseUUIDPipe, Patch, Post, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentTenant, CurrentUser } from '../../common/decorators';
-import { Roles, SystemRole } from '../../common/decorators/roles.decorator';
+import { Permission } from '../../common/decorators/permission.decorator';
+import { ALL_SYSTEM_ROLES, Roles, SystemRole } from '../../common/decorators/roles.decorator';
 import { JwtPayload } from '../../common/types/request-context';
 import {
   AvailabilityCalendarQueryDto,
@@ -23,6 +24,7 @@ import { ReservationsService } from './reservations.service';
 @ApiTags('reservations')
 @ApiBearerAuth()
 @Controller()
+@Permission('reservations')
 export class ReservationsController {
   constructor(private readonly reservationsService: ReservationsService) {}
 
@@ -51,6 +53,7 @@ export class ReservationsController {
   }
 
   @Get('branches/:branchId/availability')
+  @Roles(...ALL_SYSTEM_ROLES)
   @ApiOperation({ summary: 'Per-night available-room count for a room type over a date range' })
   getAvailability(
     @CurrentTenant() tenantId: string,
@@ -61,6 +64,7 @@ export class ReservationsController {
   }
 
   @Get('branches/:branchId/availability-calendar')
+  @Roles(...ALL_SYSTEM_ROLES)
   @ApiOperation({ summary: 'Every room type at this branch, per-night available counts across a full month' })
   getAvailabilityCalendar(
     @CurrentTenant() tenantId: string,
@@ -82,6 +86,7 @@ export class ReservationsController {
   }
 
   @Get('branches/:branchId/reservations')
+  @Roles(...ALL_SYSTEM_ROLES)
   @ApiOperation({ summary: 'Search/filter reservations at this branch (by status, and/or confirmation number or guest name)' })
   listReservations(
     @CurrentTenant() tenantId: string,
@@ -92,6 +97,7 @@ export class ReservationsController {
   }
 
   @Get('branches/:branchId/arrivals')
+  @Roles(...ALL_SYSTEM_ROLES)
   @ApiOperation({ summary: 'Confirmed reservations checking in on the given date (default: today, branch timezone)' })
   listArrivals(
     @CurrentTenant() tenantId: string,
@@ -102,6 +108,7 @@ export class ReservationsController {
   }
 
   @Get('branches/:branchId/departures')
+  @Roles(...ALL_SYSTEM_ROLES)
   @ApiOperation({ summary: 'Checked-in reservations checking out on the given date (default: today, branch timezone)' })
   listDepartures(
     @CurrentTenant() tenantId: string,
@@ -112,6 +119,7 @@ export class ReservationsController {
   }
 
   @Get('branches/:branchId/in-house')
+  @Roles(...ALL_SYSTEM_ROLES)
   @ApiOperation({ summary: 'Every currently checked-in reservation at this branch' })
   listInHouse(
     @CurrentTenant() tenantId: string,
@@ -121,6 +129,7 @@ export class ReservationsController {
   }
 
   @Get('reservations/:reservationId')
+  @Roles(...ALL_SYSTEM_ROLES)
   @ApiOperation({ summary: 'Get a reservation' })
   getById(
     @CurrentTenant() tenantId: string,
@@ -130,6 +139,7 @@ export class ReservationsController {
   }
 
   @Post('reservations/:reservationId/check-in')
+  @Permission('reservations', 'update')
   @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk)
   @ApiOperation({ summary: 'Check in a confirmed reservation, assigning a room if none is set yet' })
   checkIn(
@@ -142,6 +152,7 @@ export class ReservationsController {
   }
 
   @Post('reservations/:reservationId/check-out')
+  @Permission('reservations', 'update')
   @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk)
   @ApiOperation({ summary: 'Check out a checked-in reservation and release the room (marked dirty)' })
   checkOut(
@@ -163,6 +174,7 @@ export class ReservationsController {
   }
 
   @Post('reservations/:reservationId/cancel')
+  @Permission('reservations', 'update')
   @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk)
   @ApiOperation({ summary: "Cancel a confirmed or waitlisted reservation — the branch's cancellation policy decides any charge" })
   cancel(
@@ -175,6 +187,7 @@ export class ReservationsController {
   }
 
   @Post('reservations/:reservationId/cancel-with-waiver')
+  @Permission('reservations', 'update')
   @Roles(SystemRole.Owner, SystemRole.Manager)
   @ApiOperation({ summary: 'Manager override — cancel without the cancellation charge; the waiver and its reason are audited' })
   cancelWithWaiver(
@@ -223,6 +236,7 @@ export class ReservationsController {
   }
 
   @Post('reservations/:reservationId/promote')
+  @Permission('reservations', 'update')
   @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk)
   @ApiOperation({ summary: 'Promote a waitlisted reservation to confirmed, if a room has opened up' })
   promoteFromWaitlist(
@@ -234,6 +248,7 @@ export class ReservationsController {
   }
 
   @Get('branches/:branchId/no-shows/pending')
+  @Roles(...ALL_SYSTEM_ROLES)
   @ApiOperation({ summary: 'Confirmed reservations past their check-in date with no check-in yet' })
   listPendingNoShows(
     @CurrentTenant() tenantId: string,
@@ -243,6 +258,7 @@ export class ReservationsController {
   }
 
   @Post('reservations/:reservationId/no-show')
+  @Permission('reservations', 'update')
   @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk)
   @ApiOperation({ summary: 'Mark a confirmed reservation as a no-show now — penalty applied per the branch policy, room released, folio settled if nothing is owed' })
   markNoShow(
@@ -254,6 +270,7 @@ export class ReservationsController {
   }
 
   @Post('no-show-records/:noShowRecordId/waive')
+  @Permission('reservations', 'update')
   @Roles(SystemRole.Owner, SystemRole.Manager)
   @ApiOperation({ summary: 'Waive a no-show penalty — reverses the charge if one was posted' })
   waiveNoShowPenalty(
@@ -265,6 +282,7 @@ export class ReservationsController {
   }
 
   @Post('reservations/:reservationId/reinstate')
+  @Permission('reservations', 'update')
   @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk)
   @ApiOperation({ summary: 'Reinstate a no-show with revised dates (late arrival) — optionally waives the penalty' })
   reinstateFromNoShow(
@@ -277,6 +295,7 @@ export class ReservationsController {
   }
 
   @Post('reservations/:reservationId/walk')
+  @Permission('reservations', 'update')
   @Roles(SystemRole.Owner, SystemRole.Manager)
   @ApiOperation({ summary: 'Walk a confirmed reservation — relocate to another property, refund any payment already recorded, auto-cancel here' })
   walkReservation(

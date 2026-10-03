@@ -1,7 +1,8 @@
 import { Body, Controller, Get, HttpCode, HttpStatus, Param, ParseUUIDPipe, Post, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentTenant, CurrentUser } from '../../common/decorators';
-import { Roles, SystemRole } from '../../common/decorators/roles.decorator';
+import { Permission } from '../../common/decorators/permission.decorator';
+import { ALL_SYSTEM_ROLES, Roles, SystemRole } from '../../common/decorators/roles.decorator';
 import { JwtPayload } from '../../common/types/request-context';
 import { InboxQueryDto, InboxReplyDto, SendCommunicationDto } from './dto/comms-log.dto';
 import { CommsLogService } from './comms-log.service';
@@ -9,6 +10,7 @@ import { CommsLogService } from './comms-log.service';
 @ApiTags('comms-log')
 @ApiBearerAuth()
 @Controller()
+@Permission('comms')
 export class CommsLogController {
   constructor(private readonly commsLogService: CommsLogService) {}
 
@@ -25,6 +27,7 @@ export class CommsLogController {
   }
 
   @Get('reservations/:reservationId/communications')
+  @Roles(...ALL_SYSTEM_ROLES)
   @ApiOperation({ summary: 'Every communication logged against a reservation, newest first' })
   listForReservation(
     @CurrentTenant() tenantId: string,
@@ -34,6 +37,7 @@ export class CommsLogController {
   }
 
   @Get('guests/:guestId/communications')
+  @Roles(...ALL_SYSTEM_ROLES)
   @ApiOperation({ summary: 'Every communication logged against a guest profile across all their reservations, newest first' })
   listForGuest(
     @CurrentTenant() tenantId: string,
@@ -69,6 +73,7 @@ export class CommsLogController {
   }
 
   @Post('branches/:branchId/inbox/:guestId/read')
+  @Permission('comms', 'update')
   @HttpCode(HttpStatus.OK)
   @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk)
   @ApiOperation({ summary: "Mark a guest's unread messages as read" })

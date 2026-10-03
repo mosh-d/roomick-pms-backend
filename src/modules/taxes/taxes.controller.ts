@@ -1,13 +1,15 @@
 import { Body, Controller, Get, Param, ParseUUIDPipe, Patch, Post } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentTenant } from '../../common/decorators';
-import { Roles, SystemRole } from '../../common/decorators/roles.decorator';
+import { Permission } from '../../common/decorators/permission.decorator';
+import { ALL_SYSTEM_ROLES, Roles, SystemRole } from '../../common/decorators/roles.decorator';
 import { CreateTaxRuleDto, UpdateTaxRuleDto } from './dto/tax-rule.dto';
 import { TaxesService } from './taxes.service';
 
 @ApiTags('taxes')
 @ApiBearerAuth()
 @Controller()
+@Permission('taxes')
 export class TaxesController {
   constructor(private readonly taxesService: TaxesService) {}
 
@@ -23,6 +25,7 @@ export class TaxesController {
   }
 
   @Get('branches/:branchId/tax-rules')
+  @Roles(...ALL_SYSTEM_ROLES)
   @ApiOperation({ summary: 'List a branch tax rules (active and retired)' })
   listTaxRules(
     @CurrentTenant() tenantId: string,

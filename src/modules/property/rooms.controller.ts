@@ -1,7 +1,8 @@
 import { Body, Controller, Get, Param, ParseUUIDPipe, Patch, Post } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentTenant, CurrentUser } from '../../common/decorators';
-import { Roles, SystemRole } from '../../common/decorators/roles.decorator';
+import { Permission } from '../../common/decorators/permission.decorator';
+import { ALL_SYSTEM_ROLES, Roles, SystemRole } from '../../common/decorators/roles.decorator';
 import { JwtPayload } from '../../common/types/request-context';
 import { CreateRoomTypeDto, UpdateRoomTypeDto } from './dto/room-type.dto';
 import { BulkCreateRoomsDto, ChangeRoomStatusDto, CreateRoomBlockDto } from './dto/rooms.dto';
@@ -10,6 +11,7 @@ import { RoomsService } from './rooms.service';
 @ApiTags('rooms')
 @ApiBearerAuth()
 @Controller()
+@Permission('property')
 export class RoomsController {
   constructor(private readonly roomsService: RoomsService) {}
 
@@ -26,6 +28,7 @@ export class RoomsController {
   }
 
   @Get('branches/:branchId/room-types')
+  @Roles(...ALL_SYSTEM_ROLES)
   @ApiOperation({ summary: 'List room types for a branch' })
   listRoomTypes(
     @CurrentTenant() tenantId: string,
@@ -62,6 +65,7 @@ export class RoomsController {
   }
 
   @Get('branches/:branchId/rooms')
+  @Roles(...ALL_SYSTEM_ROLES)
   @ApiOperation({ summary: 'List rooms for a branch with floor/building/room-type detail — powers the Room Status Board' })
   listRooms(
     @CurrentTenant() tenantId: string,
@@ -71,6 +75,7 @@ export class RoomsController {
   }
 
   @Patch('rooms/:roomId/status')
+  @Roles(...ALL_SYSTEM_ROLES)
   @ApiOperation({
     summary:
       'Change room status axes (§4.1): housekeeping ladder for everyone, occupancy/held + inspected are supervisor-only',
@@ -85,6 +90,7 @@ export class RoomsController {
   }
 
   @Post('rooms/:roomId/block')
+  @Permission('property', 'update')
   @Roles(SystemRole.Owner, SystemRole.Manager)
   @ApiOperation({ summary: 'Create a date-ranged administrative block on a room' })
   blockRoom(
@@ -97,6 +103,7 @@ export class RoomsController {
   }
 
   @Get('branches/:branchId/room-blocks')
+  @Roles(...ALL_SYSTEM_ROLES)
   @ApiOperation({ summary: 'Every room block still in effect today or later (Room Blocking / OOO)' })
   listActiveBlocks(
     @CurrentTenant() tenantId: string,
@@ -106,6 +113,7 @@ export class RoomsController {
   }
 
   @Post('room-blocks/:blockId/end')
+  @Permission('property', 'update')
   @Roles(SystemRole.Owner, SystemRole.Manager)
   @ApiOperation({ summary: 'End a room block early by pulling its toDate back to today' })
   unblockRoom(

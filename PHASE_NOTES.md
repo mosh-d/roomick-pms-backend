@@ -1,5 +1,59 @@
 # Phase Notes
 
+## Month 12 (first slice) — custom roles that are actually enforced (2026-09-24)
+
+Month 12's Security & Roles deliverable: "A custom role beyond the original 6 can be created, scoped via the permission matrix, and correctly enforced." No migration — `Role.permissions` and `isSystem` already existed.
+
+### What was wrong before
+- **The matrix saved maps nothing read.** `PUT /auth/roles/:id/permissions` wrote `Role.permissions`, but `RolesGuard` only ever compared role *names* against `@Roles(...)`. The frontend page said so itself ("not yet enforced").
+- **Custom roles couldn't be created** — there was no endpoint for it.
+- **54 routes had no role requirement at all**, mostly reads (reservations, arrivals, guests, bills…), so the matrix's "read" column would have meant nothing for a custom role.
+
+### How a request is authorised now (`RolesGuard`)
+1. **No `@Roles`** → through, as before (any signed-in user).
+2. **A seeded role named on the route** → through, exactly as before. No database read.
+3. **A custom role held at this branch whose permissions cover the route** → through. The route says which module it belongs to with `@Permission(module)`, usually once per controller; the action follows the HTTP method (GET read, POST create, PUT/PATCH update, DELETE delete) unless the route states its own.
+4. Otherwise 403.
+
+A seeded role's own permission map is ignored on purpose — its access is what the routes say. Editing a seeded role's map is now refused with a reason instead of silently doing nothing.
+
+### What can and can't be delegated
+- **17 modules** (`permission-catalogue.ts`): reservations, guests, bills & payments, housekeeping, maintenance, POS, shifts, guest messages, reports, night audit, property setup, taxes, alerts, sales & events, revenue, loyalty, marketing.
+- **Deliberately no module** for staff and invitations, roles and permissions, audit log and GDPR, system administration and backups, integrations, or tenant settings. Those controllers carry no `@Permission`, so no custom role can reach them however it's configured — it can never grant itself more access, invite anyone, or export guest data.
+- **30 routes declare their own action** because the method reads wrongly: check-in, check-out, cancel, no-show, close a bill, void an order and the like are `update`; quotes, rate calculations and previews are `read`.
+
+### The 39 routes that were open to anyone
+- They now name all six seeded roles explicitly (`ALL_SYSTEM_ROLES`). **Every existing user keeps exactly the access they had** — everyone holds one of the six — while a custom role now needs the matching permission.
+- Revenue management already had a class-level `@Roles(Owner, Manager)`; adding route-level roles there would have *overridden and widened* it, so it only gained the module annotation. A check during the work caught this, and a second one caught a scanner bug that would have stacked a duplicate `@Roles` on some marketing routes. Both were fixed before anything was tested live, and a final scan confirmed no route carries two.
+- **Still open to every signed-in user, unchanged:** the housekeeping, reports and alerts controllers have no role requirement anywhere — including housekeeping *writes* (create, assign, start, complete a task). Not touched here: tightening them is a policy decision for the owner, not a side effect of this work.
+
+### Role management (owner only)
+- `POST /auth/roles` (name, optional permissions), `PATCH /auth/roles/:id` (rename and/or re-scope), `DELETE /auth/roles/:id`. The old `PUT …/permissions` still works, for custom roles only.
+- **Names:** 2–60 characters, unique per tenant, and not a seeded role's name in any spelling ("Front Desk" is refused as `front_desk`).
+- **Deleting** is refused while anyone holds the role or an unaccepted invite names it, with the counts — deleting it would silently take people's access away.
+- **Permission maps are parsed strictly** on every write: an unknown module or action is an error, never a silently ignored key.
+- Every change is audited (`role.created`, `role.updated`, `role.deleted`), with before and after.
+
+### Making changes take effect at once
+The token carries role names, not permissions, so taking a permission away must not wait for tokens to expire. `PermissionsService` reads roles from the database behind a cache that's cleared on every role write; a 60-second TTL is the backstop for a second server process.
+
+### The matrix's presets come from the routes
+`GET /auth/permissions/catalogue` returns the modules, actions, the areas that can't be delegated, and **what each seeded role really covers** — computed at start-up by `RoutePermissionMapService`, which walks every route's `@Roles` and `@Permission`. A hand-written preset table would drift the first time a route's roles changed.
+
+### Verified
+- **Checks:** `tsc` and `npm run lint` clean; **897 tests** in 50 suites. New: the guard (seeded roles unchanged and never hit the database, a custom role allowed only within its map, an explicit action honoured, no module = no access, branch scoping, a deleted role grants nothing, a seeded role's map ignored), the catalogue parser, and role management in the auth spec.
+- **Live API, 24/24**, against real Postgres:
+  - the catalogue with no undelegatable module, and the front-desk preset read off the routes;
+  - a seeded name, an undelegatable module and a short name refused; a seeded role's map refused with its reason;
+  - "Night Auditor" created with reservations read/update, bills read/create and night audit;
+  - a real invited user holding it at one branch could list reservations, check a guest in, post a charge and run the night audit — and was refused booking, closing a bill, guest records, staff, and creating or deleting roles;
+  - granting "close a bill" worked on the same token immediately, and so did taking reservations away;
+  - renamed; refused deletion while held; deleted once the person moved to front desk; five audit rows.
+- **Browser:** 12/12 — see the frontend notes.
+
+### Worth knowing for local testing
+Another project's backend (`five-clover-nestjs-backend`) can also listen on port 3000 — on IPv6, while Roomick's binds IPv4. `localhost` then reaches whichever wins name resolution, which shows up as 404s from the wrong API. `127.0.0.1:3000` always reaches Roomick.
+
 ## Month 11 (third slice) — the Integrations Marketplace: a catalogue, and three integrations a hotelier can switch on alone (2026-09-22)
 
 Month 11's marketplace deliverable: "A hotelier can browse the marketplace by category and enable a real integration without a developer's involvement." Migration `20260922010000`.

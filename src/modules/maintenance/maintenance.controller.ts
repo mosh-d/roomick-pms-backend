@@ -2,7 +2,8 @@ import { Body, Controller, Get, Param, ParseUUIDPipe, Patch, Post, Query } from 
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { MaintenanceStatus } from '@prisma/client';
 import { CurrentTenant, CurrentUser } from '../../common/decorators';
-import { Roles, SystemRole } from '../../common/decorators/roles.decorator';
+import { Permission } from '../../common/decorators/permission.decorator';
+import { ALL_SYSTEM_ROLES, Roles, SystemRole } from '../../common/decorators/roles.decorator';
 import { JwtPayload } from '../../common/types/request-context';
 import { CreateAssetDto, CreateWorkOrderDto, UpdateWorkOrderDto } from './dto/maintenance.dto';
 import { MaintenanceService } from './maintenance.service';
@@ -10,10 +11,12 @@ import { MaintenanceService } from './maintenance.service';
 @ApiTags('maintenance')
 @ApiBearerAuth()
 @Controller()
+@Permission('maintenance')
 export class MaintenanceController {
   constructor(private readonly maintenanceService: MaintenanceService) {}
 
   @Post('branches/:branchId/maintenance/work-orders')
+  @Roles(...ALL_SYSTEM_ROLES)
   @ApiOperation({ summary: 'Submit a maintenance request — open to any department, not role-gated' })
   createWorkOrder(
     @CurrentTenant() tenantId: string,
@@ -25,6 +28,7 @@ export class MaintenanceController {
   }
 
   @Get('branches/:branchId/maintenance/work-orders')
+  @Roles(...ALL_SYSTEM_ROLES)
   @ApiOperation({ summary: 'The work order board — every status, or filtered to one' })
   listWorkOrders(
     @CurrentTenant() tenantId: string,
@@ -59,6 +63,7 @@ export class MaintenanceController {
   }
 
   @Get('branches/:branchId/maintenance/assets')
+  @Roles(...ALL_SYSTEM_ROLES)
   @ApiOperation({ summary: 'Asset registry, each with a computed nextServiceDue' })
   listAssets(
     @CurrentTenant() tenantId: string,

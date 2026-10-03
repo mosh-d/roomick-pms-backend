@@ -1,7 +1,8 @@
 import { Body, Controller, Get, Param, ParseUUIDPipe, Patch, Post, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentTenant, CurrentUser } from '../../common/decorators';
-import { Roles, SystemRole } from '../../common/decorators/roles.decorator';
+import { Permission } from '../../common/decorators/permission.decorator';
+import { ALL_SYSTEM_ROLES, Roles, SystemRole } from '../../common/decorators/roles.decorator';
 import { JwtPayload } from '../../common/types/request-context';
 import { CalculateRateDto, CreateRatePlanDto, UpdateRatePlanDto } from './dto/rate-resolver.dto';
 import { RateResolverService } from './rate-resolver.service';
@@ -9,10 +10,13 @@ import { RateResolverService } from './rate-resolver.service';
 @ApiTags('rate-resolver')
 @ApiBearerAuth()
 @Controller()
+@Permission('reservations')
 export class RateResolverController {
   constructor(private readonly rateResolverService: RateResolverService) {}
 
   @Post('branches/:branchId/rate-resolver/calculate')
+  @Roles(...ALL_SYSTEM_ROLES)
+  @Permission('reservations', 'read')
   @ApiOperation({ summary: 'Resolve a nightly rate for a stay through the plan cascade — the same logic every booking screen uses, never re-derived client-side' })
   calculate(
     @CurrentTenant() tenantId: string,
@@ -24,6 +28,7 @@ export class RateResolverController {
   }
 
   @Get('rate-resolver/audit')
+  @Roles(...ALL_SYSTEM_ROLES)
   @ApiOperation({ summary: 'Full per-night rule-resolution trace for a reservation, for dispute handling' })
   getAudit(@CurrentTenant() tenantId: string, @Query('reservationId', ParseUUIDPipe) reservationId: string): ReturnType<RateResolverService['getAuditTrail']> {
     return this.rateResolverService.getAuditTrail(tenantId, reservationId);
@@ -41,6 +46,7 @@ export class RateResolverController {
   }
 
   @Get('branches/:branchId/rate-plans')
+  @Roles(...ALL_SYSTEM_ROLES)
   @ApiOperation({ summary: 'List a branch rate plans (active and retired)' })
   listRatePlans(@CurrentTenant() tenantId: string, @Param('branchId', ParseUUIDPipe) branchId: string): ReturnType<RateResolverService['listRatePlans']> {
     return this.rateResolverService.listRatePlans(tenantId, branchId);

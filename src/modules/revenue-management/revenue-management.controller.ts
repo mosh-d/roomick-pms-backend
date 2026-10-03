@@ -2,6 +2,7 @@ import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Patch, Post, Put, 
 import { Competitor, RatePlan } from '@prisma/client';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentTenant, CurrentUser } from '../../common/decorators';
+import { Permission } from '../../common/decorators/permission.decorator';
 import { Roles, SystemRole } from '../../common/decorators/roles.decorator';
 import { JwtPayload } from '../../common/types/request-context';
 import {
@@ -21,6 +22,9 @@ import { CompSetAnalysis, CompSetService } from './comp-set.service';
 @ApiBearerAuth()
 @Controller()
 @Roles(SystemRole.Owner, SystemRole.Manager)
+// The class-level @Roles above keeps these routes to the roles it names;
+// this module is what a custom role's own permissions are checked against.
+@Permission('revenue')
 export class RevenueManagementController {
   constructor(
     private readonly restrictionsService: RestrictionsService,
@@ -81,6 +85,7 @@ export class RevenueManagementController {
   }
 
   @Post('branches/:branchId/rate-recommendations/approve')
+  @Permission('revenue', 'update')
   @ApiOperation({ summary: 'Approve a rate recommendation — creates a real seasonal RatePlan for that single date, applied through the normal rate cascade' })
   approveRecommendation(@CurrentTenant() tenantId: string, @Param('branchId', ParseUUIDPipe) branchId: string, @Body() dto: ApproveRateRecommendationDto): Promise<RatePlan> {
     return this.rateRecommendationsService.approveRecommendation(tenantId, branchId, dto);

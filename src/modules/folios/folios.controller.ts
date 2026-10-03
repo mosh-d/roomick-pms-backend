@@ -1,7 +1,8 @@
 import { Body, Controller, Get, Param, ParseUUIDPipe, Post, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentTenant, CurrentUser } from '../../common/decorators';
-import { Roles, SystemRole } from '../../common/decorators/roles.decorator';
+import { Permission } from '../../common/decorators/permission.decorator';
+import { ALL_SYSTEM_ROLES, Roles, SystemRole } from '../../common/decorators/roles.decorator';
 import { JwtPayload } from '../../common/types/request-context';
 import { CorrectLineItemDto, CreateFolioDto, PostChargeDto, RecordPaymentDto, SplitFolioDto } from './dto/folio.dto';
 import { FoliosService } from './folios.service';
@@ -9,10 +10,12 @@ import { FoliosService } from './folios.service';
 @ApiTags('folios')
 @ApiBearerAuth()
 @Controller()
+@Permission('folios')
 export class FoliosController {
   constructor(private readonly foliosService: FoliosService) {}
 
   @Get('folios/:folioId')
+  @Roles(...ALL_SYSTEM_ROLES)
   @ApiOperation({ summary: 'Folio with line items, payments, and computed totals (balance is derived, never stored)' })
   getFolio(
     @CurrentTenant() tenantId: string,
@@ -22,6 +25,7 @@ export class FoliosController {
   }
 
   @Get('folios/:folioId/tax-breakdown')
+  @Roles(...ALL_SYSTEM_ROLES)
   @ApiOperation({ summary: 'Per-rule tax breakdown for a folio (§4.5 GROUP BY rule)' })
   getTaxBreakdown(
     @CurrentTenant() tenantId: string,
@@ -31,6 +35,7 @@ export class FoliosController {
   }
 
   @Get('reservations/:reservationId/folios')
+  @Roles(...ALL_SYSTEM_ROLES)
   @ApiOperation({ summary: 'Folios belonging to a reservation' })
   listForReservation(
     @CurrentTenant() tenantId: string,
@@ -40,6 +45,7 @@ export class FoliosController {
   }
 
   @Get('branches/:branchId/folios')
+  @Roles(...ALL_SYSTEM_ROLES)
   @ApiOperation({
     summary:
       'Branch folios. filter=outstanding (balance owed) | overdue (balance owed and check-out date passed — a City Ledger receivable) | all',
@@ -78,6 +84,7 @@ export class FoliosController {
   }
 
   @Post('folios/:folioId/close')
+  @Permission('folios', 'update')
   @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk, SystemRole.Accountant)
   @ApiOperation({ summary: 'Close/settle a folio — only permitted at a zero or credit balance' })
   closeFolio(
@@ -101,6 +108,7 @@ export class FoliosController {
   }
 
   @Post('folios/:folioId/split')
+  @Permission('folios', 'update')
   @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk, SystemRole.Accountant)
   @ApiOperation({
     summary:
@@ -116,6 +124,7 @@ export class FoliosController {
   }
 
   @Get('folios/:folioId/transfer-history')
+  @Roles(...ALL_SYSTEM_ROLES)
   @ApiOperation({ summary: 'Transfers this folio was the source or target of' })
   getTransferHistory(
     @CurrentTenant() tenantId: string,
@@ -125,6 +134,7 @@ export class FoliosController {
   }
 
   @Post('line-items/:lineItemId/correct')
+  @Permission('folios', 'update')
   @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.Accountant)
   @ApiOperation({
     summary: 'Append a negating correction for a line item (the original is never mutated — append-only ledger, §4.5)',
