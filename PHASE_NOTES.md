@@ -1,5 +1,79 @@
 # Phase Notes
 
+## Rounding up before the owner's integrations: billing workflows, group check-in, layout editing, reports, email, API keys and webhooks (2026-10-07)
+
+The owner asked for every piece of development work that doesn't need their accounts to be finished, so the integrations and account links that only they can do can start. Migrations `20261007010000` to `20261007060000`.
+
+### Roles are checked at the branch a record belongs to (fix)
+44 routes are addressed by a record's id rather than `/branches/:branchId/...` — a folio, a refund, a group block, a floor. They accepted the right role held at **any** branch, so a front desk at one property could act on another property's bill by its id. Each now carries `@BranchOf(record, param)`, and `RolesGuard` looks up the record's own branch first (`record-branch.ts`). A missing record is left to the route's 404, a malformed id to its validation.
+
+### Company accounts and contracted rates
+- A booking can be made under a company (`Reservation.corporateAccountId`) and with a promo code (`promoCode`); both are kept, so **modify and extend re-price under the same deal** instead of falling back to the public rate (`dealTerms`, `storedDeal`).
+- The Rate Resolver's corporate tier only applies to the company the stay is booked under. An inactive account is refused.
+- `GET/POST /corporate-accounts`, `GET/PATCH /corporate-accounts/:accountId`.
+
+### Folio Transfer
+- `POST /folios/:folioId/transfer` moves chosen charges (or everything) onto any open bill at the same property — another room's, a company's, a secondary folio. A charge's tax and any correction go with it. Each move is a `FolioTransfer`.
+- **Reversible for 24 hours** (`POST /folio-transfers/:transferId/reverse`), owner or manager; history per bill and per branch (`GET /folios/:folioId/transfer-history`, `GET /branches/:branchId/folio-transfers`).
+- Secondary folios take a payer name or a company.
+- **A moved room night was billed twice (fix).** Check-out's backfill looked for each night on the stay's own primary folio only, so a night moved to a company folio was posted again. Room nights now record the stay they're for (`LineItem.stayReservationId`, backfilled per tenant under FORCE RLS), and the check is by stay.
+
+### Refunds with a manager's approval
+- `POST /folios/:folioId/refunds` (desk asks) → `POST /refunds/:id/approve` or `/reject` (owner or manager) → `POST /refunds/:id/pay-out` (desk). `GET /branches/:branchId/refunds` lists them.
+- Paid out as a **negative payment** by cash, card or bank transfer; cash comes out of the drawer of whoever hands it over (their open shift).
+- Never more than the credit on the bill, counting refunds already asked for — so a guest can't end up owing.
+
+### Room moves, upgrades, and a manual room override at check-in
+- `GET /reservations/:id/room-move-quote?roomTypeId=` and `PATCH /reservations/:id/move-room` — checked-in guests only. Keep the booked rate, or charge the new type's rate (resolved like any quote, `triggeredBy: room_move`) for the nights left; tonight's already-billed night isn't charged again. The old room goes dirty with a cleaning task.
+- Check-in takes `overrideReason`: another room type, or a room still being cleaned, with the reason audited.
+
+### Alerts and the arrival lists
+Urgent work orders still open appear under Alerts (Maintenance). Arrivals and in-house lists carry each guest's VIP level and group block.
+
+### The restore drill failed for every tenant (fix)
+- It copied rows with unique values (`refresh_tokens.tokenHash`, `branches.bookingSlug`) straight back into the same database. Those columns are now read off the schema — unique string columns that aren't keys — and given fresh values in the drill.
+- Group check-in's master bill (`Reservation.billToFolioId`) made a foreign-key cycle (reservations ↔ folios) the insert order couldn't resolve, and the app refused to boot. Cycles are broken on optional keys, filled in after both rows exist. Real drills pass again.
+
+### Group check-in
+`POST /group-blocks/:blockId/check-in` checks a group in **all or none**, each guest into the room given. With a master bill, the group's room nights go to the organiser's folio (`Reservation.billToFolioId`); each guest's incidentals stay on their own bill.
+
+### Rooms & Layout after onboarding
+`GET /branches/:branchId/layout`, `PATCH /buildings/:id`, `PATCH /floors/:id`, `PATCH /rooms/:id`, `DELETE /rooms/:id`: rename buildings, label floors, renumber, retype, move or remove rooms. Retyping or removing a room is **refused when it would leave a booked room type short on any night** (overstaying guests included). Adding a removed number again brings the same room back, to be cleaned.
+
+### Financial report
+`GET /branches/:branchId/reports/financial?from&to&groupBy` (owner, manager, accountant): revenue by department, tax by rule, money in and back out per day/week/month, payment methods, and POS tax.
+
+### Custom report builder
+Four datasets (reservations, charges, payments, guests), each a fixed catalogue of columns — only catalogue names reach a query, so nothing else (password hashes, ID numbers) can be asked for. Filters by column type, grouping with counts and totals, sorting. `POST .../reports/custom/run` (first 500 rows and the total), `.../csv` (every row, up to 20,000), saved reports per branch (`report_templates`, RLS).
+
+### Email goes out through any SMTP provider
+- `SmtpMailTransport` (nodemailer) is bound when `SMTP_HOST` is set; the log transport stays otherwise, so development still sends nothing. `MAIL_FROM` is required with it (validated at boot: an address, or a name with the address in angle brackets). Port 465 is TLS from the start, anything else upgrades with STARTTLS, and **production refuses a server that won't upgrade**.
+- `GET /comms/delivery` (any staff) says whether email reaches guests, so Guest Messages stops saying it doesn't once it does.
+- `DEPLOYMENT.md` and `render.yaml` list `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `MAIL_FROM` — and `PUBLIC_API_BASE_URL`, without which a marketing email's links pointed at localhost.
+
+### API keys sign in — read only, and only what they're given
+- A request presents `Authorization: Bearer rk_…` (or `X-API-Key`) with the usual `X-Tenant-ID`. `JwtAuthGuard` looks the key up by its SHA-256 under that tenant (`ApiKeyAuthService`; unique index on `keyHash`); a suspended account lets no key in. `lastUsedAt` is written at most once a minute.
+- **What it can read is `scopes`** — permission modules, the same vocabulary custom roles use — and, with `branchId`, only that branch. `RolesGuard.apiKeyMayRead` runs for a key **whether or not the route names roles**: the route must carry `@Permission(module)` for a module in the key's scopes, be a GET, not be a `?reveal=true`, and — for a branch key — be about that branch (by URL or by `@BranchOf` record). Routes with no module (staff, roles, security, backups, GDPR, integrations) are out of reach by construction.
+- Reports, Housekeeping and Alerts now carry `@Permission`, so a key (or a custom role) can be given them. Nothing changes for the seeded roles; those controllers are still open to every signed-in person, pending the owner's decision.
+- `PATCH /api-keys/:id` changes a key's name, scopes or branch without changing the key. Keys made before this have no scopes, so read nothing until given some. Created, changed and revoked are audited — never the key.
+
+### Webhooks are delivered
+- **Ten events** (`webhook-events.ts`): `reservation.created`, `.updated`, `.cancelled`, `.checked_in`, `.checked_out`, `.no_show`, `.walked`, `.room_moved`, `payment.received`, `refund.paid`. Names are a contract — added to, never renamed.
+- **Raised in the same transaction as the change** (`WebhookEventsService`): every reservation change already goes through `ReservationsService.audit`, so that's where they're raised (`RESERVATION_ACTION_EVENTS`; a walk-in is created *and* checked in); payments from `FoliosService.audit`, refunds from the pay-out and from walking a guest. With nobody subscribed it costs one indexed read. The payload is the booking or payment as it stood, with the guest's name, email and phone.
+- **An outbox** (`webhook_deliveries`, RLS): one row per event per webhook. `WebhookDispatcherService` sends after commit — never inside a transaction. A tenant that just queued something is looked at every 2 seconds for 20 seconds; a sweep every 30 seconds picks up retries. Each delivery is claimed (`lockedUntil`) before sending, so two servers or a Retry click never send it at once. Delivery is at least once; receivers de-duplicate on the event `id`.
+- **Signed**: `Roomick-Signature: t=<unix>,v1=<HMAC-SHA256 of "t.body" with the webhook's secret>`, plus `Roomick-Event` and `Roomick-Delivery`.
+- **Retried** after 1, 5 and 15 minutes, then 1, 3, 6 and 12 hours — eight tries, about a day. A 2xx within 10 seconds is delivered; anything else, a redirect included, is a failure with its reason kept.
+- **Can't be pointed inwards (SSRF).** In production a webhook must be `https`, without credentials, and not a private address; every address a name resolves to is checked when the socket connects, so a name that changes to a private address later is still refused. Redirects are never followed. Development allows `http://localhost` for testing a receiver.
+- `POST /webhooks/:id/test` sends a sample and returns the answer; `GET /webhooks/:id/deliveries` the last 50; `POST /webhook-deliveries/:id/retry` tries one again now. Switching a webhook off drops what was waiting. Deliveries are kept 30 days, and **erasing a guest (GDPR) deletes every delivery that carried them**, sent or not — counted in the erasure's audit entry. Webhooks can be kept to one branch.
+- Old subscriptions named route strings (`reservations.post`); the migration maps the ones that have an event now and switches off any left with none.
+
+### ID-number reveals are audited (fix)
+`AuditInterceptor` was meant to record every `?reveal=true` read (and every change, as a safety net), but read the tenant from a request-scoped store that was gone by the time the response came back — so it **never wrote anything**. It now records reveals from the request itself — who, when, from where, which guest — and never the number. Changes are audited by each service, as they always were.
+
+### Verified
+- **Checks:** `tsc` and lint clean; **1,134 tests** in 61 suites (new: the API key guard paths, key lookup, the SMTP transport against a local SMTP server, env validation, address checks and signing, the dispatcher's claim/retry/give-up, event fan-out).
+- **Live, against real Postgres:** each feature above had its own API script and browser run during the work. For the last three: a booking's confirmation left through SMTP to a local server with the configured sender and the row read `sent` (4/4); API keys and webhooks 35/35 — signed deliveries within seconds, branch-kept webhooks, a walk-in as two events, a payment, a 503 retried a minute later by itself and by Retry, a key reading only its scopes and branch, refused writes, reveals and integration pages, revoked at once, no secret in the audit trail, an ID reveal recorded; erasing a guest removed the two deliveries about her and kept another guest's (4/4).
+
 ## Owner's to-do batch: overstays, sessions, returning guests, GDPR erasure (2026-10-07)
 
 From `docs/to-do.md` and the owner's go-ahead on GDPR erasure. Migration `20261003040000`.
