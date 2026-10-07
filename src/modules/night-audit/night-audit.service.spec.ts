@@ -41,6 +41,8 @@ function makeTx() {
     },
     reservation: { findMany: jest.fn().mockResolvedValue([]), update: jest.fn().mockResolvedValue({}) },
     folio: { findMany: jest.fn().mockResolvedValue([]) },
+    maintenanceOrder: { count: jest.fn().mockResolvedValue(0) },
+    shift: { findMany: jest.fn().mockResolvedValue([]) },
   };
 }
 
@@ -91,18 +93,20 @@ describe('NightAuditService', () => {
       expect(result.status).toBe('completed');
     });
 
-    it('selects only reservations occupying that night — arrival on/before, departure strictly after', async () => {
+    it('bills everyone checked in that night — whatever their booked departure date', async () => {
       await service.runAudit(TENANT_ID, BRANCH_ID, AUDIT_DATE, ACTOR_ID);
-      expect(tx.reservation.findMany).toHaveBeenNthCalledWith(
-        1,
-        expect.objectContaining({
-          where: expect.objectContaining({
-            status: 'checked_in',
-            checkInDate: { lte: new Date('2026-09-02T00:00:00.000Z') },
-            checkOutDate: { gt: new Date('2026-09-02T00:00:00.000Z') },
-          }),
-        }),
-      );
+      const where = (tx.reservation.findMany.mock.calls[0] as [{ where: Record<string, unknown> }])[0].where;
+      expect(where).toMatchObject({ status: 'checked_in', checkInDate: { lte: new Date('2026-09-02T00:00:00.000Z') } });
+      expect(where).not.toHaveProperty('checkOutDate');
+    });
+
+    it('charges a guest still in the room after their departure date, and labels the night an overstay', async () => {
+      const overstayer = reservation({ id: 'stayed-on', checkInDate: new Date('2026-08-28T00:00:00.000Z'), checkOutDate: new Date('2026-08-30T00:00:00.000Z') });
+      tx.reservation.findMany.mockResolvedValueOnce([overstayer, reservation()]).mockResolvedValueOnce([]);
+      const result = await service.runAudit(TENANT_ID, BRANCH_ID, AUDIT_DATE, ACTOR_ID);
+      expect(result.chargesPosted).toBe(2);
+      const labels = foliosService.postRoomChargeForDate.mock.calls.map((call) => (call as unknown[])[4]);
+      expect(labels).toEqual(['Night Audit — overstay', 'Night Audit']);
     });
 
     it('counts a night the guard already billed as processed but not re-posted', async () => {
@@ -189,6 +193,36 @@ describe('NightAuditService', () => {
     });
   });
 
+  describe('datesToAudit — catching up nights the sweep missed', () => {
+    const daysBefore = (n: number) => {
+      const date = new Date(`${service.yesterdayForBranch('UTC')}T00:00:00.000Z`);
+      date.setUTCDate(date.getUTCDate() - n);
+      return date;
+    };
+    const iso = (date: Date) => date.toISOString().slice(0, 10);
+
+    it('a branch never audited starts from yesterday — no backfilling its whole history', async () => {
+      expect(await service.datesToAudit(TENANT_ID, BRANCH_ID, 'UTC')).toEqual([iso(daysBefore(0))]);
+    });
+
+    it('closes out every night since the last audit, oldest first', async () => {
+      tx.nightAuditLog.findFirst.mockResolvedValue({ auditDate: daysBefore(3) });
+      tx.nightAuditLog.findMany.mockResolvedValue([{ auditDate: daysBefore(3) }]);
+      expect(await service.datesToAudit(TENANT_ID, BRANCH_ID, 'UTC')).toEqual([iso(daysBefore(2)), iso(daysBefore(1)), iso(daysBefore(0))]);
+    });
+
+    it('nothing to do once yesterday is audited', async () => {
+      tx.nightAuditLog.findFirst.mockResolvedValue({ auditDate: daysBefore(0) });
+      tx.nightAuditLog.findMany.mockResolvedValue([{ auditDate: daysBefore(0) }]);
+      expect(await service.datesToAudit(TENANT_ID, BRANCH_ID, 'UTC')).toEqual([]);
+    });
+
+    it('goes back a week at most — a branch idle for longer restarts from yesterday', async () => {
+      tx.nightAuditLog.findFirst.mockResolvedValue({ auditDate: daysBefore(20) });
+      expect(await service.datesToAudit(TENANT_ID, BRANCH_ID, 'UTC')).toEqual([iso(daysBefore(0))]);
+    });
+  });
+
   describe('yesterdayForBranch', () => {
     it('returns the day before today in the branch timezone', () => {
       const result = service.yesterdayForBranch('UTC');
@@ -199,10 +233,20 @@ describe('NightAuditService', () => {
   });
 
   describe('getPreflight', () => {
-    it('reports untracked checklist items as null rather than passing', async () => {
+    it('checks for urgent work orders and an open night shift', async () => {
+      tx.maintenanceOrder.count.mockResolvedValue(2);
+      tx.shift.findMany.mockResolvedValue([{ shiftType: 'evening' }]);
       const result = await service.getPreflight(TENANT_ID, BRANCH_ID);
-      const untracked = result.checklist.filter((c) => c.passed === null);
-      expect(untracked.map((c) => c.key)).toEqual(['maintenance_clear', 'shift_open']);
+      const byKey = Object.fromEntries(result.checklist.map((c) => [c.key, c]));
+      expect(byKey.maintenance_clear).toMatchObject({ passed: false, detail: '2 urgent work orders still open' });
+      expect(byKey.shift_open).toMatchObject({ passed: false, detail: 'A shift is open, but not a night shift' });
+      expect(tx.maintenanceOrder.count).toHaveBeenCalledWith({ where: { branchId: BRANCH_ID, priority: 'urgent', status: { in: ['open', 'in_progress', 'on_hold'] } } });
+    });
+
+    it('passes both once the urgent work is done and the night shift is on', async () => {
+      tx.shift.findMany.mockResolvedValue([{ shiftType: 'night' }]);
+      const result = await service.getPreflight(TENANT_ID, BRANCH_ID);
+      expect(result.checklist.filter((c) => c.key !== 'departures_resolved').every((c) => c.passed === true)).toBe(true);
     });
 
     it('fails the departures check while someone is still in-house past check-out', async () => {

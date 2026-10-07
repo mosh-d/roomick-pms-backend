@@ -1,7 +1,7 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { Branch, NoShowRecord, PenaltyType, Prisma, Reservation, Room, RoomType } from '@prisma/client';
 import { ErrorCode } from '../../common/errors/error-codes';
-import { timeOfDay, todayInTimezone, toBranchDate } from '../../common/utils/branch-date';
+import { hasPassedBranchCutoff, timeOfDay, todayInTimezone, toBranchDate } from '../../common/utils/branch-date';
 import { PrismaService, TenantTx } from '../../prisma/prisma.service';
 import { PropertyService } from '../property/property.service';
 import { RoomsService } from '../property/rooms.service';
@@ -66,6 +66,9 @@ const HOLDING_STATUSES = ['confirmed', 'checked_in'] as const;
 
 /** How a no-show penalty line starts on the bill — also how a waiver finds one posted before records linked their line. */
 const NO_SHOW_PENALTY_LABEL = 'No-Show Penalty';
+
+/** An overstaying guest's stay, for inventory: open-ended until they check out or the stay is extended. */
+const OPEN_ENDED = new Date('9999-12-31T00:00:00.000Z');
 
 @Injectable()
 export class ReservationsService {
@@ -184,10 +187,7 @@ export class ReservationsService {
             where: { room: { branchId, roomTypeId: roomType.id, deletedAt: null, heldStatus: null }, fromDate: { lt: to }, toDate: { gte: from } },
             select: { roomId: true, fromDate: true, toDate: true },
           });
-          const reservations = await tx.reservation.findMany({
-            where: { branchId, roomTypeId: roomType.id, deletedAt: null, status: { in: [...HOLDING_STATUSES] }, checkInDate: { lt: to }, checkOutDate: { gt: from } },
-            select: { checkInDate: true, checkOutDate: true },
-          });
+          const reservations = await this.holdingStays(tx, branchId, roomType.id, from, to);
           const overbookingConfigs = await tx.overbookingConfig.findMany({ where: { branchId, OR: [{ roomTypeId: roomType.id }, { roomTypeId: null }] } });
           const roomTypeConfig = overbookingConfigs.find((c) => c.roomTypeId === roomType.id);
           const branchConfig = overbookingConfigs.find((c) => c.roomTypeId === null);
@@ -267,22 +267,11 @@ export class ReservationsService {
       select: { roomId: true, fromDate: true, toDate: true },
     });
 
-    const reservations = await tx.reservation.findMany({
-      where: {
-        branchId,
-        roomTypeId,
-        deletedAt: null,
-        status: { in: [...HOLDING_STATUSES] },
-        checkInDate: { lt: to },
-        checkOutDate: { gt: from },
-        // Modifying a reservation re-checks availability for its (possibly
-        // unchanged) dates — without this exclusion, the reservation would
-        // count as occupying a room against itself, wrongly reporting no
-        // availability for a change that doesn't actually need a new room.
-        ...(excludeReservationId ? { id: { not: excludeReservationId } } : {}),
-      },
-      select: { checkInDate: true, checkOutDate: true },
-    });
+    // Modifying a reservation re-checks availability for its (possibly
+    // unchanged) dates — without the exclusion, the reservation would count
+    // as occupying a room against itself, wrongly reporting no availability
+    // for a change that doesn't actually need a new room.
+    const reservations = await this.holdingStays(tx, branchId, roomTypeId, from, to, excludeReservationId);
 
     const overbookingConfigs = await tx.overbookingConfig.findMany({ where: { branchId, OR: [{ roomTypeId }, { roomTypeId: null }] } });
     const roomTypeConfig = overbookingConfigs.find((c) => c.roomTypeId === roomTypeId);
@@ -303,6 +292,51 @@ export class ReservationsService {
       const available = Math.max(0, capacity - reservedCount - (heldForGroups.get(date) ?? 0));
       return { date, available };
     });
+  }
+
+  /**
+   * The stays holding a room type's rooms across `[from, to)`. A guest still
+   * checked in after their departure has passed keeps the room every night
+   * until they check out or the stay is extended — their stay is returned
+   * open-ended. Otherwise the room went back on sale the moment the old date
+   * passed, with the guest still in it, and the next booking for that night
+   * had nowhere to sleep (the in-house PMS's own rule).
+   *
+   * "Passed" is the branch's own check-out time on the departure day, the
+   * same moment the Alerts page starts calling the guest overdue.
+   */
+  private async holdingStays(
+    tx: TenantTx,
+    branchId: string,
+    roomTypeId: string,
+    from: Date,
+    to: Date,
+    excludeReservationId?: string,
+  ): Promise<Array<{ checkInDate: Date; checkOutDate: Date }>> {
+    const stays = await tx.reservation.findMany({
+      where: {
+        branchId,
+        roomTypeId,
+        deletedAt: null,
+        status: { in: [...HOLDING_STATUSES] },
+        checkInDate: { lt: to },
+        // Everyone in-house is a candidate however old their departure date;
+        // whether they're actually overstaying is decided below.
+        OR: [{ checkOutDate: { gt: from } }, { status: 'checked_in' }],
+        ...(excludeReservationId ? { id: { not: excludeReservationId } } : {}),
+      },
+      select: { checkInDate: true, checkOutDate: true, status: true },
+    });
+
+    const now = new Date();
+    const mayBeOverdue = stays.some((stay) => stay.status === 'checked_in' && stay.checkOutDate.getTime() <= now.getTime() + 86_400_000);
+    const branch = mayBeOverdue ? await tx.branch.findFirst({ where: { id: branchId }, select: { timezone: true, checkOutTime: true } }) : null;
+    const overdue = (stay: { status: string; checkOutDate: Date }) =>
+      !!branch && stay.status === 'checked_in' && hasPassedBranchCutoff(stay.checkOutDate, timeOfDay(branch.checkOutTime), branch.timezone, now);
+
+    return stays
+      .map((stay) => ({ checkInDate: stay.checkInDate, checkOutDate: overdue(stay) ? OPEN_ENDED : stay.checkOutDate }))
+      .filter((stay) => stay.checkOutDate > from);
   }
 
   private overbookingConfigFor<

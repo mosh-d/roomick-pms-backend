@@ -14,6 +14,9 @@ interface NoShowPolicy {
   flatFeeAmount?: number;
 }
 
+/** How many nights back the scheduled sweep will close out a branch it missed — see `datesToAudit`. */
+const CATCH_UP_DAYS = 7;
+
 export interface NightAuditRunResult {
   auditDate: string;
   foliosProcessed: number;
@@ -78,16 +81,20 @@ export class NightAuditService {
       let chargesPosted = 0;
       let totalAmountPosted = new Prisma.Decimal(0);
 
-      // 1. Post the night that just ended for everyone in-house across it.
-      //    `checkInDate <= auditDate < checkOutDate` is the definition of
-      //    "occupied that night" — the departure day is never billable.
+      // 1. Post the night that just ended for everyone in the hotel that
+      //    night. Occupancy is what counts, not the booked dates — a guest
+      //    still checked in after their departure date is still in the room,
+      //    and owes the night like any other (the in-house PMS's own rule).
+      //    Those overstay nights are labelled so they stand out on the bill
+      //    and on Alerts until the desk checks the guest out or extends the
+      //    stay. A booked departure day is never billed: someone who leaves
+      //    on it is checked out before this runs.
       const inHouse = await tx.reservation.findMany({
         where: {
           branchId,
           deletedAt: null,
           status: 'checked_in',
           checkInDate: { lte: auditDate },
-          checkOutDate: { gt: auditDate },
         },
         include: { roomType: { select: { name: true } } },
       });
@@ -104,7 +111,7 @@ export class NightAuditService {
             reservation,
             folio,
             auditDate,
-            'Night Audit',
+            reservation.checkOutDate <= auditDate ? 'Night Audit — overstay' : 'Night Audit',
             triggeredBy,
           );
           foliosProcessed++;
@@ -208,7 +215,7 @@ export class NightAuditService {
       const auditDateValue = toBranchDate(auditDate);
       const today = toBranchDate(todayInTimezone(branch.timezone));
 
-      const [alreadyRan, dueOut, openFolios, unresolvedNoShows] = await Promise.all([
+      const [alreadyRan, dueOut, openFolios, unresolvedNoShows, urgentWork, openShifts] = await Promise.all([
         tx.nightAuditLog.findFirst({ where: { branchId, auditDate: auditDateValue } }),
         // Departures whose checkout date has passed but who are still in-house.
         tx.reservation.findMany({
@@ -224,7 +231,10 @@ export class NightAuditService {
           where: { branchId, deletedAt: null, status: 'confirmed', checkInDate: { lte: auditDateValue } },
           include: { guest: { select: { name: true } } },
         }),
+        tx.maintenanceOrder.count({ where: { branchId, priority: 'urgent', status: { in: ['open', 'in_progress', 'on_hold'] } } }),
+        tx.shift.findMany({ where: { branchId, closedAt: null }, select: { shiftType: true } }),
       ]);
+      const nightShiftOpen = openShifts.some((shift) => shift.shiftType === 'night');
 
       return {
         auditDate,
@@ -236,12 +246,20 @@ export class NightAuditService {
             passed: dueOut.length === 0,
             detail: dueOut.length > 0 ? `${dueOut.length} still in-house past check-out` : null,
           },
-          // The reference also checks "No blocking maintenance issues" and
-          // "Night shift is open". Both need modules that don't exist
-          // (maintenance_orders, shifts) — reported as untracked rather
-          // than faked as passing, which would make the checklist a lie.
-          { key: 'maintenance_clear', label: 'No blocking maintenance issues', passed: null, detail: 'Maintenance module not built yet' },
-          { key: 'shift_open', label: 'Night shift is open', passed: null, detail: 'Shift module not built yet' },
+          // An urgent work order still open is the blocking kind — a room
+          // that can't be sold, or a hazard to deal with before the night.
+          {
+            key: 'maintenance_clear',
+            label: 'No blocking maintenance issues',
+            passed: urgentWork === 0,
+            detail: urgentWork > 0 ? `${urgentWork} urgent work ${urgentWork === 1 ? 'order' : 'orders'} still open` : null,
+          },
+          {
+            key: 'shift_open',
+            label: 'Night shift is open',
+            passed: nightShiftOpen,
+            detail: nightShiftOpen ? null : openShifts.length > 0 ? 'A shift is open, but not a night shift' : 'No shift is open',
+          },
         ],
         openFolios: openFolios.map((f) => ({ id: f.id, guestName: f.guest.name })),
         unresolvedNoShows: unresolvedNoShows.map((r) => ({
@@ -267,6 +285,36 @@ export class NightAuditService {
       // with a symbol, same as every other money response.
       return runs.map((r) => ({ ...r, id: r.id.toString(), currency: branch.currency }));
     });
+  }
+
+  /**
+   * The nights the sweep still owes a branch, oldest first: every day since
+   * its last audit up to yesterday, so a night the server was down for (a
+   * deploy at the wrong hour, an outage) is still closed out — its in-house
+   * guests still billed, its no-shows still marked — instead of skipped for
+   * good. Capped at a week back: a branch idle longer than that (or never
+   * audited) starts from yesterday, rather than suddenly billing weeks of
+   * nights nobody was watching; those can still be run by hand.
+   */
+  async datesToAudit(tenantId: string, branchId: string, timezone: string): Promise<string[]> {
+    const yesterday = toBranchDate(this.yesterdayForBranch(timezone));
+    const earliest = new Date(yesterday);
+    earliest.setUTCDate(earliest.getUTCDate() - (CATCH_UP_DAYS - 1));
+    const done = await this.prisma.withTenant(tenantId, (tx) =>
+      tx.nightAuditLog.findMany({ where: { branchId, auditDate: { gte: earliest, lte: yesterday } }, select: { auditDate: true } }),
+    );
+    const doneDates = new Set(done.map((run) => run.auditDate.toISOString().slice(0, 10)));
+    const latest = await this.prisma.withTenant(tenantId, (tx) =>
+      tx.nightAuditLog.findFirst({ where: { branchId }, orderBy: { auditDate: 'desc' }, select: { auditDate: true } }),
+    );
+    // Nothing ever run, or nothing within the week: just yesterday.
+    const start = latest && latest.auditDate >= earliest ? new Date(latest.auditDate) : new Date(yesterday);
+    const dates: string[] = [];
+    for (const night = start; night <= yesterday; night.setUTCDate(night.getUTCDate() + 1)) {
+      const date = night.toISOString().slice(0, 10);
+      if (!doneDates.has(date)) dates.push(date);
+    }
+    return dates;
   }
 
   /**
@@ -307,16 +355,12 @@ export class NightAuditService {
           );
           if (localHour < auditHourLocal) continue;
 
-          const auditDate = this.yesterdayForBranch(branch.timezone);
-          const alreadyRan = await this.prisma.withTenant(tenant.id, (tx) =>
-            tx.nightAuditLog.findFirst({ where: { branchId: branch.id, auditDate: toBranchDate(auditDate) } }),
-          );
-          if (alreadyRan) continue;
-
-          const result = await this.runAudit(tenant.id, branch.id, auditDate, null);
-          this.logger.log(
-            `Night audit ${result.status}: branch ${branch.id} date ${auditDate} — ${result.chargesPosted} charges, ${result.noShowsMarked} no-shows`,
-          );
+          for (const auditDate of await this.datesToAudit(tenant.id, branch.id, branch.timezone)) {
+            const result = await this.runAudit(tenant.id, branch.id, auditDate, null);
+            this.logger.log(
+              `Night audit ${result.status}: branch ${branch.id} date ${auditDate} — ${result.chargesPosted} charges, ${result.noShowsMarked} no-shows`,
+            );
+          }
         } catch (error) {
           // One branch failing must not stop the sweep for the rest.
           this.logger.error(`Night audit failed for branch ${branch.id}`, error);

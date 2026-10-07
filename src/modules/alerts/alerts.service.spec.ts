@@ -1,4 +1,5 @@
 import { Test } from '@nestjs/testing';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { PropertyService } from '../property/property.service';
 import { FoliosService } from '../folios/folios.service';
@@ -12,6 +13,7 @@ function branch(overrides: Partial<Record<string, unknown>> = {}) {
   return {
     id: BRANCH_ID,
     timezone: 'Africa/Lagos',
+    currency: 'NGN',
     checkInTime: new Date('1970-01-01T14:00:00.000Z'),
     checkOutTime: new Date('1970-01-01T11:00:00.000Z'),
     ...overrides,
@@ -33,12 +35,12 @@ describe('AlertsService', () => {
   let service: AlertsService;
   let tx: ReturnType<typeof makeTx>;
   let propertyService: { assertBranch: jest.Mock };
-  let foliosService: { listFolios: jest.Mock };
+  let foliosService: { listFolios: jest.Mock; primaryFolioBalances: jest.Mock };
 
   beforeEach(async () => {
     tx = makeTx();
     propertyService = { assertBranch: jest.fn().mockImplementation((_tx, id) => tx.branch.findFirst({ where: { id } })) };
-    foliosService = { listFolios: jest.fn().mockResolvedValue([]) };
+    foliosService = { listFolios: jest.fn().mockResolvedValue([]), primaryFolioBalances: jest.fn().mockResolvedValue(new Map()) };
 
     const moduleRef = await Test.createTestingModule({
       providers: [
@@ -91,7 +93,17 @@ describe('AlertsService', () => {
       Promise.resolve(where.status === 'checked_in' ? [reservation] : []),
     );
     const result = await service.getAlerts(TENANT_ID, BRANCH_ID);
-    expect(result.overdueCheckouts).toEqual([reservation]);
+    expect(result.overdueCheckouts).toEqual([{ ...reservation, folioId: null, balanceDue: '0.00', currency: 'NGN' }]);
+  });
+
+  it('carries what an overdue guest owes on their row — they are still in-house, so not repeated under Overdue Balances', async () => {
+    const reservation = { id: 'r2', checkInDate: new Date('2020-01-01T00:00:00.000Z'), checkOutDate: new Date('2020-01-02T00:00:00.000Z') };
+    tx.reservation.findMany = jest.fn().mockImplementation(({ where }) => Promise.resolve(where.status === 'checked_in' ? [reservation] : []));
+    foliosService.primaryFolioBalances.mockResolvedValue(new Map([['r2', { folioId: 'f-r2', balanceDue: new Prisma.Decimal('30000') }]]));
+    const result = await service.getAlerts(TENANT_ID, BRANCH_ID);
+    expect(foliosService.primaryFolioBalances).toHaveBeenCalledWith(tx, ['r2']);
+    expect(result.overdueCheckouts[0]).toMatchObject({ folioId: 'f-r2', balanceDue: '30000.00', currency: 'NGN' });
+    expect(result.overdueBalances).toEqual([]);
   });
 
   it('delegates overdue balances to FoliosService.listFolios("overdue") instead of re-deriving balance logic', async () => {

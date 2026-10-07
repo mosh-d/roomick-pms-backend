@@ -193,6 +193,18 @@ export class FoliosService {
     return this.taxesService.priceCharge(tx, branchId, chargeType, price);
   }
 
+  /** What each reservation's primary bill stands at — for lists that show a stay's balance beside it (Alerts' overdue checkouts). Read-only; a stay with no bill yet is left out. */
+  async primaryFolioBalances(tx: TenantTx, reservationIds: string[]): Promise<Map<string, { folioId: string; balanceDue: Prisma.Decimal }>> {
+    const balances = new Map<string, { folioId: string; balanceDue: Prisma.Decimal }>();
+    if (reservationIds.length === 0) return balances;
+    const folios = await tx.folio.findMany({ where: { reservationId: { in: reservationIds }, label: null, deletedAt: null }, select: { id: true, reservationId: true } });
+    for (const folio of folios) {
+      if (!folio.reservationId) continue;
+      balances.set(folio.reservationId, { folioId: folio.id, balanceDue: (await this.computeTotals(tx, folio.id)).balanceDue });
+    }
+    return balances;
+  }
+
   /** Payments recorded on a reservation's primary folio; zero when it has none yet. Read-only — never creates a folio. */
   async paidOnPrimaryFolio(tx: TenantTx, reservationId: string): Promise<Prisma.Decimal> {
     const folio = await tx.folio.findFirst({ where: { reservationId, label: null, deletedAt: null }, select: { id: true } });

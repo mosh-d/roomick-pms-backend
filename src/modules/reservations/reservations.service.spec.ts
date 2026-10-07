@@ -208,6 +208,37 @@ describe('ReservationsService', () => {
       ]);
     });
 
+    it('a guest still checked in after their departure keeps the room every night from then on — it isn’t sold under them', async () => {
+      tx.room.count.mockResolvedValue(2);
+      tx.branch.findFirst.mockResolvedValue({ timezone: 'Africa/Lagos', checkOutTime: new Date('1970-01-01T11:00:00.000Z') });
+      tx.reservation.findMany.mockResolvedValue([
+        // due out on 1 Aug 2026, never checked out
+        { checkInDate: new Date('2026-07-30T00:00:00.000Z'), checkOutDate: new Date('2026-08-01T00:00:00.000Z'), status: 'checked_in' },
+        // an ordinary confirmed booking that ended before the window
+        { checkInDate: new Date('2026-07-30T00:00:00.000Z'), checkOutDate: new Date('2026-08-01T00:00:00.000Z'), status: 'confirmed' },
+      ]);
+      const result = await service.getAvailability(TENANT_ID, BRANCH_ID, { from: '2099-01-01', to: '2099-01-03', roomTypeId: TYPE_ID });
+      expect(tx.reservation.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: expect.objectContaining({ OR: [{ checkOutDate: { gt: new Date('2099-01-01T00:00:00.000Z') } }, { status: 'checked_in' }] }) }),
+      );
+      expect(result).toEqual([
+        { date: '2099-01-01', available: 1 },
+        { date: '2099-01-02', available: 1 },
+      ]);
+    });
+
+    it('a guest due out today but not yet past check-out time doesn’t hold tonight', async () => {
+      tx.room.count.mockResolvedValue(2);
+      const today = new Date().toISOString().slice(0, 10);
+      // a check-out time of 23:59:59 that can't have passed yet in UTC+14 at the latest
+      tx.branch.findFirst.mockResolvedValue({ timezone: 'UTC', checkOutTime: new Date('1970-01-01T23:59:59.000Z') });
+      tx.reservation.findMany.mockResolvedValue([
+        { checkInDate: new Date('2026-07-30T00:00:00.000Z'), checkOutDate: new Date(`${today}T00:00:00.000Z`), status: 'checked_in' },
+      ]);
+      const result = await service.getAvailability(TENANT_ID, BRANCH_ID, { from: today, to: new Date(Date.parse(today) + 86_400_000).toISOString().slice(0, 10), roomTypeId: TYPE_ID });
+      expect(result).toEqual([{ date: today, available: 2 }]);
+    });
+
     it('a held room reduces the pool for every night, not just some (heldStatus is a static flag, not date-scoped)', async () => {
       tx.room.count.mockResolvedValue(4); // count() itself already excludes heldStatus rooms — pool is pre-reduced
       const result = await service.getAvailability(TENANT_ID, BRANCH_ID, { from: '2026-09-01', to: '2026-09-03', roomTypeId: TYPE_ID });

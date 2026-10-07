@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { hasPassedBranchCutoff, timeOfDay, toBranchDate, todayInTimezone } from '../../common/utils/branch-date';
 import { PrismaService } from '../../prisma/prisma.service';
 import { PropertyService } from '../property/property.service';
@@ -93,9 +94,20 @@ export class AlertsService {
       // passed (see `hasPassedBranchCutoff`'s own comment); anything
       // strictly before today is unambiguously overdue regardless of clock
       // time, and this same filter correctly includes those too.
+      const overdue = overdueCandidates.filter((r) => hasPassedBranchCutoff(r.checkOutDate, checkOutCutoff, branch.timezone, now));
+      // An overdue guest is still in-house — their bill is a guest-ledger
+      // matter, so it isn't repeated under Overdue Balances (which is for
+      // guests who have left). What they owe rides on their row instead;
+      // the night audit keeps charging them each night they stay.
+      const balances = await this.foliosService.primaryFolioBalances(tx, overdue.map((r) => r.id));
       return {
         missedCheckIns: missedCandidates.filter((r) => hasPassedBranchCutoff(r.checkInDate, checkInCutoff, branch.timezone, now)),
-        overdueCheckouts: overdueCandidates.filter((r) => hasPassedBranchCutoff(r.checkOutDate, checkOutCutoff, branch.timezone, now)),
+        overdueCheckouts: overdue.map((r) => ({
+          ...r,
+          folioId: balances.get(r.id)?.folioId ?? null,
+          balanceDue: (balances.get(r.id)?.balanceDue ?? new Prisma.Decimal(0)).toFixed(2),
+          currency: branch.currency,
+        })),
       };
     });
   }
