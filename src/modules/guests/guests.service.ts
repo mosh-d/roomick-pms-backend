@@ -198,7 +198,7 @@ export class GuestsService {
     });
   }
 
-  /** Full profile including the ID-document fields — masked unless `reveal` (the `?reveal=true` convention `AuditInterceptor` already audits as `pii.reveal`). */
+  /** Full profile including the ID-document fields — masked unless `reveal` (the `?reveal=true` convention `AuditInterceptor` records as `pii.reveal`). */
   async getGuestDetail(tenantId: string, guestId: string, reveal: boolean): Promise<GuestDetail> {
     return this.prisma.withTenant(tenantId, async (tx) => {
       const guest = await tx.guestProfile.findFirst({

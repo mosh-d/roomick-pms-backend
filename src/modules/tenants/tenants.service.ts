@@ -166,9 +166,8 @@ export class TenantsService {
    * tables are `Restrict`-configured AND actually reachable today: Room,
    * RoomType, Branch, User, and — easy to miss, caught by actually running
    * this against a populated tenant rather than trusting the schema read —
-   * AuditLog, which `AuditInterceptor` (see common/interceptors/) writes a
-   * row to on *every* mutating request, so any tenant that's done anything
-   * at all has rows there. Clear all five explicitly, in dependency order
+   * AuditLog, which every service writes a row to for each change it makes,
+   * so any tenant that's done anything at all has rows there. Clear all five explicitly, in dependency order
    * (Room references RoomType/Branch; RoomType references Branch; Branch
    * references Brand; AuditLog and User only reference Tenant directly).
    * Everything else (Role, UserBranchRole, InviteToken, Brand, Building,

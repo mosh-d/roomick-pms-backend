@@ -1,112 +1,75 @@
 import { CallHandler, ExecutionContext, Injectable, Logger, NestInterceptor } from '@nestjs/common';
 import { Observable } from 'rxjs';
 import { concatMap } from 'rxjs/operators';
-import { Prisma } from '@prisma/client';
-import { TenantContextService } from '../context/tenant-context.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuthenticatedRequest } from '../types/request-context';
 
-const MUTATING_METHODS = new Set(['POST', 'PATCH', 'PUT', 'DELETE']);
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
- * Spec §6: every mutating request writes an audit_log row (userId, tenantId,
- * action, entity, entityId, before/after diff, IP). GETs are skipped except
- * `?reveal=true` reads of masked PII.
+ * Records every `?reveal=true` read — the one way to see a guest's ID
+ * document number unmasked — as `pii.reveal`: who, when, from where, and
+ * which record. Never what was revealed: the audit trail must not become a
+ * second, unencrypted copy of the numbers it guards.
  *
- * P0 scaffold: `action` is derived from the route and `after` captures the
- * response body. Services that know their true before/after states (P1+)
- * should write richer rows through AuditService (to come) — this interceptor
- * is the safety net that guarantees nothing mutating goes unlogged.
+ * Changes aren't recorded here. Every service writes its own audit row for
+ * what it changes, in the same transaction and in its own words; a generic
+ * row per request on top of that would only double the trail. (This class
+ * once tried to do both, reading the tenant from a request-scoped store that
+ * was already gone by the time the response arrived, so for a long while it
+ * recorded nothing at all — reveals included. It now reads the request.)
  */
 @Injectable()
 export class AuditInterceptor implements NestInterceptor {
   private readonly logger = new Logger(AuditInterceptor.name);
 
-  constructor(
-    private readonly prisma: PrismaService,
-    private readonly context: TenantContextService,
-  ) {}
+  constructor(private readonly prisma: PrismaService) {}
 
   intercept(executionContext: ExecutionContext, next: CallHandler): Observable<unknown> {
     const request = executionContext.switchToHttp().getRequest<AuthenticatedRequest>();
-    const isReveal = request.query?.reveal === 'true';
-    const shouldAudit = MUTATING_METHODS.has(request.method) || isReveal;
-
-    if (!shouldAudit) return next.handle();
+    const isReveal = request.method === 'GET' && (request.query as Record<string, unknown> | undefined)?.reveal === 'true';
+    if (!isReveal) return next.handle();
 
     return next.handle().pipe(
       concatMap(async (responseBody: unknown) => {
-        await this.writeAuditRow(request, responseBody, isReveal);
+        await this.recordReveal(request);
         return responseBody;
       }),
     );
   }
 
-  private async writeAuditRow(
-    request: AuthenticatedRequest,
-    responseBody: unknown,
-    isReveal: boolean,
-  ): Promise<void> {
-    const store = this.context.store;
-    const tenantId = store?.tenantId;
-    if (!tenantId) return; // public/unauthenticated routes (register, login) audit themselves in-service
+  private async recordReveal(request: AuthenticatedRequest): Promise<void> {
+    const tenantId = request.tenantId ?? request.user?.tenantId;
+    if (!tenantId || !request.user) return;
 
     const params = request.params as Record<string, string | undefined>;
-    const action = isReveal
-      ? 'pii.reveal'
-      : `${this.entityFromPath(request.originalUrl)}.${request.method.toLowerCase()}`;
-
+    const path = (request.originalUrl.split('?')[0] ?? '').slice(0, 300);
     try {
       await this.prisma.withTenant(tenantId, (tx) =>
         tx.auditLog.create({
           data: {
             tenantId,
-            branchId: store?.branchId,
-            userId: store?.userId,
-            action,
-            entityType: this.entityFromPath(request.originalUrl),
-            entityId: this.firstUuid(params),
-            after: this.safeJson(responseBody),
-            ipAddress: store?.ipAddress,
-            userAgent: store?.userAgent,
+            branchId: params.branchId && UUID.test(params.branchId) ? params.branchId : undefined,
+            // An API key is never let through to a reveal, so this is a person.
+            userId: request.user!.apiKey ? undefined : request.user!.sub,
+            action: 'pii.reveal',
+            entityType: this.entityFromPath(path),
+            entityId: Object.values(params).find((value) => value !== undefined && UUID.test(value)),
+            after: { path },
+            ipAddress: request.ip,
+            userAgent: request.header('user-agent')?.slice(0, 500),
           },
         }),
       );
     } catch (err) {
-      // Never fail a completed business action because the audit write failed —
-      // but make the failure loud.
-      this.logger.error(`audit_log write failed for ${action}`, err);
+      // The read has happened; failing it now would only hide that it did. Loud instead.
+      this.logger.error(`audit_log write failed for pii.reveal on ${path}`, err);
     }
   }
 
-  private entityFromPath(url: string): string {
-    // /api/v1/branches/:id/reservations?... → "reservations"
-    const path = url.split('?')[0] ?? '';
-    const segments = path.split('/').filter(Boolean);
-    const nonIdSegments = segments.filter(
-      (s) => !/^[0-9a-f]{8}-[0-9a-f-]{27,}$/i.test(s) && s !== 'api' && !/^v\d+$/.test(s),
-    );
-    return nonIdSegments[nonIdSegments.length - 1] ?? 'unknown';
-  }
-
-  private firstUuid(params: Record<string, string | undefined>): string | undefined {
-    const candidates = ['id', ...Object.keys(params)];
-    for (const key of candidates) {
-      const value = params[key];
-      if (value && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)) {
-        return value;
-      }
-    }
-    return undefined;
-  }
-
-  private safeJson(value: unknown): Prisma.InputJsonValue | undefined {
-    try {
-      return value === undefined
-        ? undefined
-        : (JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue);
-    } catch {
-      return undefined;
-    }
+  private entityFromPath(path: string): string {
+    // /api/v1/guests/:id → "guests"
+    const segments = path.split('/').filter((segment) => segment && !UUID.test(segment) && segment !== 'api' && !/^v\d+$/.test(segment));
+    return segments[segments.length - 1] ?? 'unknown';
   }
 }
