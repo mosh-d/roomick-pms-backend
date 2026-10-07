@@ -71,6 +71,11 @@ its connection string.
 | `DOCUMENT_STORAGE_DIR` | `/var/roomick/documents` |
 | `BACKUP_STORAGE_DIR` | `/var/roomick/backups` |
 | `SENTRY_DSN` | optional; error tracking stays off entirely while unset |
+| `PUBLIC_API_BASE_URL` | this API's public address, e.g. `https://api.yourdomain` — the open pixel, links and unsubscribe link in a marketing email point here (without it they point at localhost) |
+| `SMTP_HOST` | your email provider's SMTP server, e.g. `smtp.resend.com`. While unset, no email is sent — every message is only written to the log |
+| `SMTP_PORT` | `587` (STARTTLS, the default) or `465` (TLS from the start) |
+| `SMTP_USER` / `SMTP_PASS` | the SMTP username and password (for Resend: `resend` and an API key) |
+| `MAIL_FROM` | the sender guests see, e.g. `Lekki Suites <bookings@yourdomain>` — required with `SMTP_HOST`, and the domain must be verified with the provider (SPF, DKIM, DMARC) |
 
 Do **not** set `PORT` — Render injects it, and `main.ts` reads it and binds
 `0.0.0.0`.

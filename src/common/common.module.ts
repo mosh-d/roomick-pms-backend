@@ -5,7 +5,8 @@ import { EncryptionService } from './crypto/encryption.service';
 import { DOCUMENT_STORAGE_ADAPTER } from './documents/document-storage.interface';
 import { LocalFilesystemDocumentStorage } from './documents/local-filesystem-document-storage';
 import { LogMailTransport } from './mail/log-mail-transport';
-import { MAIL_TRANSPORT } from './mail/mail-transport.interface';
+import { MAIL_TRANSPORT, MailTransport } from './mail/mail-transport.interface';
+import { SmtpMailTransport, smtpSettingsFromEnv } from './mail/smtp-mail-transport';
 import { MetricsService } from './metrics/metrics.service';
 import { PermissionsService } from './permissions/permissions.service';
 import { RoutePermissionMapService } from './permissions/route-permission-map.service';
@@ -21,11 +22,15 @@ import { RoutePermissionMapService } from './permissions/route-permission-map.se
     PermissionsService,
     RoutePermissionMapService,
     { provide: DOCUMENT_STORAGE_ADAPTER, useClass: LocalFilesystemDocumentStorage },
-    // Only a log-only transport exists today, so it's bound unconditionally
-    // rather than behind an env switch — a `MAIL_TRANSPORT=smtp` branch with
-    // exactly one possible value would be indirection pretending to be a
-    // choice. Add the switch alongside the second implementation, not before.
-    { provide: MAIL_TRANSPORT, useClass: LogMailTransport },
+    // SMTP once `SMTP_HOST` is set (any provider — they all take SMTP), the
+    // log transport until then, so development sends nothing by default.
+    {
+      provide: MAIL_TRANSPORT,
+      useFactory: (): MailTransport => {
+        const smtp = smtpSettingsFromEnv(process.env);
+        return smtp ? new SmtpMailTransport(smtp) : new LogMailTransport();
+      },
+    },
   ],
   exports: [TenantContextService, EncryptionService, MetricsService, PermissionsService, RoutePermissionMapService, DOCUMENT_STORAGE_ADAPTER, MAIL_TRANSPORT],
 })

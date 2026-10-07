@@ -75,3 +75,18 @@ services:
       # Optional — error tracking stays entirely off while unset (src/instrument.ts).
       - key: SENTRY_DSN
         sync: false
+      # This API's public address — marketing emails' pixel, links and unsubscribe point here.
+      - key: PUBLIC_API_BASE_URL
+        sync: false
+      # Email: nothing is sent until SMTP_HOST is set (any provider's SMTP —
+      # Resend, Postmark, Amazon SES…). MAIL_FROM is required with it.
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        value: "587"
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASS
+        sync: false
+      - key: MAIL_FROM
+        sync: false

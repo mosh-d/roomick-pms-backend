@@ -1,8 +1,9 @@
-import { Body, Controller, Get, HttpCode, HttpStatus, Param, ParseUUIDPipe, Post, Query } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, HttpStatus, Inject, Param, ParseUUIDPipe, Post, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentTenant, CurrentUser } from '../../common/decorators';
 import { Permission } from '../../common/decorators/permission.decorator';
 import { ALL_SYSTEM_ROLES, Roles, SystemRole } from '../../common/decorators/roles.decorator';
+import { MAIL_TRANSPORT, MailTransport } from '../../common/mail/mail-transport.interface';
 import { JwtPayload } from '../../common/types/request-context';
 import { InboxQueryDto, InboxReplyDto, SendCommunicationDto } from './dto/comms-log.dto';
 import { CommsLogService } from './comms-log.service';
@@ -13,12 +14,22 @@ import { BranchOf } from '../../common/decorators/branch-of.decorator';
 @Controller()
 @Permission('comms')
 export class CommsLogController {
-  constructor(private readonly commsLogService: CommsLogService) {}
+  constructor(
+    private readonly commsLogService: CommsLogService,
+    @Inject(MAIL_TRANSPORT) private readonly mailTransport: MailTransport,
+  ) {}
+
+  @Get('comms/delivery')
+  @Roles(...ALL_SYSTEM_ROLES)
+  @ApiOperation({ summary: 'Which channels reach a guest today — email once an SMTP provider is connected; SMS has no provider yet' })
+  delivery(): { email: boolean; sms: boolean } {
+    return { email: this.mailTransport.name !== 'log', sms: false };
+  }
 
   @Post('reservations/:reservationId/communications/send')
   @BranchOf('reservation', 'reservationId')
   @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk)
-  @ApiOperation({ summary: 'Log a one-off manual message to a guest (email or SMS) — sending itself is stubbed for MVP; this is the record' })
+  @ApiOperation({ summary: 'A one-off message to a guest — recorded here, and emailed within a minute once an SMTP provider is connected (SMS is recorded only)' })
   sendManual(
     @CurrentTenant() tenantId: string,
     @CurrentUser() user: JwtPayload,
