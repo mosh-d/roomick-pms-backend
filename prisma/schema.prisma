@@ -1144,6 +1144,11 @@ model Reservation {
   overrideRate          Decimal?           @db.Decimal(12, 2) // manager rate override (absolute nightly rate) — NOT a rate_plans row
   overrideReason        String? // mandatory when overrideRate is set
   groupBlockId          String?            @db.Uuid // NULL = not booked against a group block; the block's own rate is applied via the SAME overrideRate mechanism, not a parallel one
+  // The company the stay is booked under, and the promo code it was booked
+  // with — kept so re-pricing (modify, extend stay) keeps the deal instead of
+  // falling back to the public rate.
+  corporateAccountId    String?            @db.Uuid
+  promoCode             String?            @db.VarChar(50)
   status                ReservationStatus  @default(confirmed)
   channel               ReservationChannel
   checkInDate           DateTime           @db.Date
@@ -1183,14 +1188,15 @@ model Reservation {
   updatedAt DateTime  @updatedAt @db.Timestamptz(6)
   deletedAt DateTime? @db.Timestamptz(6) // soft delete only — cancelled reservations stay
 
-  tenant        Tenant       @relation(fields: [tenantId], references: [id], onDelete: Restrict)
-  branch        Branch       @relation(fields: [branchId], references: [id], onDelete: Restrict)
-  guest         GuestProfile @relation(fields: [guestId], references: [id], onDelete: Restrict)
-  roomType      RoomType     @relation(fields: [roomTypeId], references: [id], onDelete: Restrict)
-  room          Room?        @relation(fields: [roomId], references: [id], onDelete: SetNull)
-  ratePlan      RatePlan?    @relation(fields: [ratePlanId], references: [id], onDelete: SetNull)
-  createdByUser User?        @relation(fields: [createdBy], references: [id], onDelete: SetNull)
-  groupBlock    GroupBlock?  @relation(fields: [groupBlockId], references: [id], onDelete: SetNull)
+  tenant           Tenant            @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  branch           Branch            @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  guest            GuestProfile      @relation(fields: [guestId], references: [id], onDelete: Restrict)
+  roomType         RoomType          @relation(fields: [roomTypeId], references: [id], onDelete: Restrict)
+  room             Room?             @relation(fields: [roomId], references: [id], onDelete: SetNull)
+  ratePlan         RatePlan?         @relation(fields: [ratePlanId], references: [id], onDelete: SetNull)
+  createdByUser    User?             @relation(fields: [createdBy], references: [id], onDelete: SetNull)
+  groupBlock       GroupBlock?       @relation(fields: [groupBlockId], references: [id], onDelete: SetNull)
+  corporateAccount CorporateAccount? @relation(fields: [corporateAccountId], references: [id], onDelete: SetNull)
 
   rateAuditLogs              RateAuditLog[]
   noShowRecords              NoShowRecord[]
@@ -1209,6 +1215,7 @@ model Reservation {
   @@index([guestId])
   @@index([branchId, status, checkInDate])
   @@index([groupBlockId])
+  @@index([corporateAccountId])
   @@map("reservations")
 }
 
@@ -1328,7 +1335,8 @@ model CorporateAccount {
   tenant   Tenant    @relation(fields: [tenantId], references: [id], onDelete: Restrict)
   ratePlan RatePlan? @relation(fields: [ratePlanId], references: [id], onDelete: SetNull)
 
-  folios Folio[]
+  folios       Folio[]
+  reservations Reservation[]
 
   @@index([tenantId, isActive])
   @@map("corporate_accounts")

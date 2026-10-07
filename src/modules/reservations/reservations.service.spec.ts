@@ -71,6 +71,7 @@ function makeTx() {
       ),
     },
     lineItem: { findFirst: jest.fn().mockResolvedValue(null) },
+    corporateAccount: { findFirst: jest.fn().mockResolvedValue({ id: 'corp-1' }) },
     noShowRecord: {
       create: jest.fn().mockImplementation(({ data }: { data: Record<string, unknown> }) => Promise.resolve({ id: 'nsr-1', penaltyWaived: false, ...data })),
       findFirst: jest.fn(),
@@ -450,6 +451,18 @@ describe('ReservationsService', () => {
     it('allows a party at exactly the room type\'s capacity', async () => {
       tx.roomType.findFirst.mockResolvedValueOnce({ id: TYPE_ID, branchId: BRANCH_ID, name: 'Standard', baseRate: '100.00', capacity: { adults: 2, children: 1 } });
       await expect(service.createReservation(TENANT_ID, BRANCH_ID, { ...dto, adults: 2, children: 1 }, ACTOR_ID)).resolves.toBeDefined();
+    });
+
+    it('books a company stay under an active account and keeps the company and promo code on the reservation', async () => {
+      await service.createReservation(TENANT_ID, BRANCH_ID, { ...dto, corporateAccountId: 'corp-1', promoCode: ' SAVE10 ' }, ACTOR_ID);
+      expect(rateResolverService.resolveStay).toHaveBeenCalledWith(tx, TENANT_ID, BRANCH_ID, expect.anything(), expect.any(Date), expect.any(Date), { promoCode: 'SAVE10', corporateAccountId: 'corp-1' }, expect.anything());
+      expect(tx.reservation.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ corporateAccountId: 'corp-1', promoCode: 'SAVE10' }) }));
+    });
+
+    it('refuses a company account that is not active', async () => {
+      tx.corporateAccount.findFirst.mockResolvedValueOnce(null);
+      await expect(service.createReservation(TENANT_ID, BRANCH_ID, { ...dto, corporateAccountId: 'corp-gone' }, ACTOR_ID)).rejects.toThrow(/company account is not active/);
+      expect(tx.reservation.create).not.toHaveBeenCalled();
     });
 
     it('checks Revenue Management restrictions with the resolved branch/room type/dates', async () => {
@@ -1303,8 +1316,8 @@ describe('ReservationsService', () => {
       expect(String((result as unknown as { confirmedRate: unknown }).confirmedRate)).toBe('400');
     });
 
-    it('re-resolves through the Rate Resolver WITHOUT a promo/corporate override — a discount active at original booking is not carried forward', async () => {
-      tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'confirmed' }));
+    it('re-prices under the deal the stay was booked with — its company and promo code carry over', async () => {
+      tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'confirmed', corporateAccountId: 'corp-1', promoCode: 'SAVE10' }));
       await service.modifyReservation(TENANT_ID, RESERVATION_ID, dto, ACTOR_ID);
       expect(rateResolverService.resolveStay).toHaveBeenCalledWith(
         tx,
@@ -1313,7 +1326,7 @@ describe('ReservationsService', () => {
         expect.objectContaining({ id: TYPE_ID }),
         expect.any(Date),
         expect.any(Date),
-        {},
+        { promoCode: 'SAVE10', corporateAccountId: 'corp-1' },
         { triggeredBy: 'modify', userId: ACTOR_ID, reservationId: RESERVATION_ID },
       );
     });

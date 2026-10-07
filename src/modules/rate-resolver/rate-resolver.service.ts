@@ -185,9 +185,11 @@ export class RateResolverService {
     const stayLength = nights.length;
 
     let corporateRatePlanId: string | null = null;
+    let isCorporate = false;
     if (options.corporateAccountId) {
       const account = await tx.corporateAccount.findFirst({ where: { id: options.corporateAccountId, isActive: true } });
       corporateRatePlanId = account?.ratePlanId ?? null;
+      isCorporate = account !== null;
     }
 
     const plans = await tx.ratePlan.findMany({
@@ -203,7 +205,12 @@ export class RateResolverService {
       },
     });
 
-    const perNight: NightResolution[] = nights.map((date) => this.resolveNight(roomType, date, plans, options.promoCode, corporateRatePlanId));
+    // A `corporate` cascade plan is a discount for company bookings — it used
+    // to apply to every booking alike, since nothing could be booked for a
+    // company before accounts existed. Now only a stay booked under an active
+    // company account gets it.
+    const eligible = isCorporate ? plans : plans.filter((plan) => plan.type !== 'corporate');
+    const perNight: NightResolution[] = nights.map((date) => this.resolveNight(roomType, date, eligible, options.promoCode, corporateRatePlanId));
 
     // `create`, not `createMany` — a booking-create/walk-in call resolves
     // the rate BEFORE the reservation row exists, so `reservationId` is

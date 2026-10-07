@@ -48,6 +48,8 @@ const RESERVATION_INCLUDE = {
   // whose rate changes mid-week. NULL when the stay resolved to the plain
   // base rate (no cascade/override plan applied).
   ratePlan: { select: { id: true, name: true, type: true } },
+  // The company a corporate stay is booked under.
+  corporateAccount: { select: { id: true, name: true } },
   // Reservations carry no currency field of their own — a reservation's
   // money is always the branch's own currency. Included here so any screen
   // showing `confirmedRate` (e.g. Modify Reservation's cost preview) can
@@ -514,6 +516,7 @@ export class ReservationsService {
         await this.assertAvailableForStay(tx, branchId, dto.roomTypeId, checkInDate, checkOutDate, undefined, block?.id);
       }
 
+      const deal = await this.dealTerms(tx, dto);
       const resolved = await this.rateResolverService.resolveStay(
         tx,
         tenantId,
@@ -521,7 +524,7 @@ export class ReservationsService {
         roomType,
         checkInDate,
         checkOutDate,
-        { promoCode: dto.promoCode, corporateAccountId: dto.corporateAccountId },
+        deal,
         { triggeredBy: 'booking_create', userId: actorId ?? undefined },
       );
       const confirmationNumber = await this.generateConfirmationNumber(tx, tenantId, branchId);
@@ -532,6 +535,8 @@ export class ReservationsService {
         guestId: guest.id,
         roomTypeId: dto.roomTypeId,
         ratePlanId: resolved.ratePlanId,
+        corporateAccountId: deal.corporateAccountId,
+        promoCode: deal.promoCode,
         confirmationNumber,
         confirmedRate: resolved.subtotal,
         status: dto.joinWaitlist ? 'waitlisted' : 'confirmed',
@@ -592,6 +597,7 @@ export class ReservationsService {
       }
       await this.assertRoomCheckInReady(tx, room, branchId, dto.roomTypeId, checkInDate, checkOutDate);
 
+      const deal = await this.dealTerms(tx, dto);
       const resolved = await this.rateResolverService.resolveStay(
         tx,
         tenantId,
@@ -599,7 +605,7 @@ export class ReservationsService {
         roomType,
         checkInDate,
         checkOutDate,
-        { promoCode: dto.promoCode, corporateAccountId: dto.corporateAccountId },
+        deal,
         { triggeredBy: 'walkin', userId: actorId },
       );
       const confirmationNumber = await this.generateConfirmationNumber(tx, tenantId, branchId);
@@ -611,6 +617,8 @@ export class ReservationsService {
         roomTypeId: dto.roomTypeId,
         roomId: dto.roomId,
         ratePlanId: resolved.ratePlanId,
+        corporateAccountId: deal.corporateAccountId,
+        promoCode: deal.promoCode,
         confirmationNumber,
         confirmedRate: resolved.subtotal,
         status: 'checked_in',
@@ -1208,7 +1216,7 @@ export class ReservationsService {
         roomType,
         checkInDate,
         checkOutDate,
-        {},
+        this.storedDeal(reservation),
         { triggeredBy: 'modify', userId: actorId, reservationId },
       );
 
@@ -1279,13 +1287,12 @@ export class ReservationsService {
         await this.assertAvailableForStay(tx, reservation.branchId, roomTypeId, checkInDate, checkOutDate, reservationId, reservation.groupBlockId ?? undefined);
       }
 
-      // Re-resolves through the base/cascade tiers only — a promo code or
-      // negotiated corporate rate applied at original booking is NOT
-      // reapplied here (ModifyReservationDto carries neither), so a
-      // discounted booking loses that discount on modify. Carrying the
-      // original override forward across a date/room-type change is a real
-      // gap, deliberately deferred rather than half-built — see
-      // PHASE_NOTES.md.
+      // Re-prices under the deal the stay was booked with — its company
+      // account and promo code, kept on the reservation. (Until they were
+      // stored, a modified company or promo booking silently fell back to
+      // the public rate.) A promo whose dates no longer cover the new stay
+      // simply doesn't apply: the Rate Resolver checks its window like any
+      // booking's.
       const resolved = await this.rateResolverService.resolveStay(
         tx,
         tenantId,
@@ -1293,7 +1300,7 @@ export class ReservationsService {
         roomType,
         checkInDate,
         checkOutDate,
-        {},
+        this.storedDeal(reservation),
         { triggeredBy: 'modify', userId: actorId, reservationId },
       );
 
@@ -1387,7 +1394,7 @@ export class ReservationsService {
         roomType,
         reservation.checkInDate,
         newCheckOutDate,
-        {},
+        this.storedDeal(reservation),
         { triggeredBy: 'extend_stay', userId: actorId, reservationId },
       );
 
@@ -1756,6 +1763,27 @@ export class ReservationsService {
    * outer `withTenant` transaction healthy for the retry's own queries and
    * for whatever the caller does next.
    */
+  /**
+   * The deal a booking is made under: its promo code, and the company it's
+   * booked for. A company has to be an active account of this tenant — a
+   * stale or made-up id would otherwise price at the public rate while the
+   * booking still claimed the company.
+   */
+  private async dealTerms(tx: TenantTx, dto: { promoCode?: string; corporateAccountId?: string }): Promise<{ promoCode?: string; corporateAccountId?: string }> {
+    const promoCode = dto.promoCode?.trim() || undefined;
+    if (!dto.corporateAccountId) return { promoCode };
+    const account = await tx.corporateAccount.findFirst({ where: { id: dto.corporateAccountId, isActive: true }, select: { id: true } });
+    if (!account) {
+      throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: 'That company account is not active — pick another, or book without one' });
+    }
+    return { promoCode, corporateAccountId: account.id };
+  }
+
+  /** The deal a stay was booked under, for re-pricing it: a modified or extended stay keeps its company rate and promo code. */
+  private storedDeal(reservation: { promoCode: string | null; corporateAccountId: string | null }): { promoCode?: string; corporateAccountId?: string } {
+    return { promoCode: reservation.promoCode ?? undefined, corporateAccountId: reservation.corporateAccountId ?? undefined };
+  }
+
   private async createReservationRow(tx: TenantTx, data: Prisma.ReservationUncheckedCreateInput) {
     for (let attempt = 0; attempt < 3; attempt++) {
       await tx.$executeRawUnsafe('SAVEPOINT create_reservation_attempt');

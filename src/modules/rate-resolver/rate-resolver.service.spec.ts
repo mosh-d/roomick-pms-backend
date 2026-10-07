@@ -242,6 +242,16 @@ describe('RateResolverService', () => {
       expect(result.subtotal.toFixed(2)).toBe('70.00');
       expect(result.ratePlanId).toBe('negotiated-1');
     });
+
+    it('a corporate discount plan applies to company bookings only — not to everyone, as it used to', async () => {
+      tx.ratePlan.findMany.mockResolvedValue([plan({ id: 'corp-tier', type: 'corporate', cascadeTier: 4, isOverride: false, amount: new Prisma.Decimal('-10'), adjustmentType: 'percentage' })]);
+      const nights = [new Date('2026-09-01'), new Date('2026-09-02')] as const;
+      const publicRate = await service.resolveStay(tx as never, TENANT_ID, BRANCH_ID, ROOM_TYPE as never, ...nights, {}, { triggeredBy: 'booking_create' });
+      tx.corporateAccount.findFirst.mockResolvedValue({ id: 'corp-1', ratePlanId: null, isActive: true });
+      const companyRate = await service.resolveStay(tx as never, TENANT_ID, BRANCH_ID, ROOM_TYPE as never, ...nights, { corporateAccountId: 'corp-1' }, { triggeredBy: 'booking_create' });
+      expect(publicRate.subtotal.toFixed(2)).toBe('100.00');
+      expect(companyRate.subtotal.toFixed(2)).toBe('90.00');
+    });
   });
 
   describe('resolveStay — tax integration', () => {
