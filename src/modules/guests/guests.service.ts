@@ -274,21 +274,36 @@ export class GuestsService {
     return idDocExpiryDate.getTime() >= Date.now() ? 'valid' : 'expired';
   }
 
-  async searchGuests(tenantId: string, q: string): Promise<GuestSummary[]> {
-    return this.prisma.withTenant(tenantId, (tx) =>
-      tx.guestProfile.findMany({
+  /**
+   * Name, email or phone. Phones are stored as typed ("+234 803 …",
+   * "0803-…"), so they're compared digits to digits with a leading local 0
+   * dropped — "0803 123" finds "+2348031234567". Four digits at least, so a
+   * house number in a name search doesn't drag in every phone that contains it.
+   */
+  async searchGuests(tenantId: string, q: string): Promise<Array<GuestSummary & { vipLevel: number | null }>> {
+    const digits = q.replace(/[^0-9]/g, '').replace(/^0+/, '');
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const byPhone =
+        digits.length >= 4
+          ? await tx.$queryRaw<Array<{ id: string }>>`
+              SELECT id FROM guest_profiles
+              WHERE "deletedAt" IS NULL AND regexp_replace(coalesce(phone, ''), '[^0-9]', '', 'g') LIKE ${`%${digits}%`}
+              LIMIT 20`
+          : [];
+      return tx.guestProfile.findMany({
         where: {
           deletedAt: null,
           OR: [
             { name: { contains: q, mode: 'insensitive' } },
             { email: { contains: q, mode: 'insensitive' } },
+            ...(byPhone.length > 0 ? [{ id: { in: byPhone.map((row) => row.id) } }] : []),
           ],
         },
-        select: GUEST_SUMMARY_SELECT,
+        select: { ...GUEST_SUMMARY_SELECT, vipLevel: true },
         orderBy: { name: 'asc' },
         take: 20,
-      }),
-    );
+      });
+    });
   }
 
   /**

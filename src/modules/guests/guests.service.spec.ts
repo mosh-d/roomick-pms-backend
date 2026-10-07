@@ -191,6 +191,22 @@ describe('GuestsService', () => {
         }),
       );
     });
+
+    it('also finds a guest by phone, however it was typed — digits to digits, the local leading 0 dropped', async () => {
+      (tx as unknown as { $queryRaw: jest.Mock }).$queryRaw = jest.fn().mockResolvedValue([{ id: GUEST_ID }]);
+      await service.searchGuests(TENANT_ID, '0803 123');
+      const query = (tx as unknown as { $queryRaw: jest.Mock }).$queryRaw.mock.calls[0] as unknown[];
+      expect(query.slice(1)).toEqual(['%803123%']);
+      expect(tx.guestProfile.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: expect.objectContaining({ OR: expect.arrayContaining([{ id: { in: [GUEST_ID] } }]) }) }),
+      );
+    });
+
+    it('doesn’t search phones on fewer than four digits', async () => {
+      (tx as unknown as { $queryRaw: jest.Mock }).$queryRaw = jest.fn();
+      await service.searchGuests(TENANT_ID, 'Flat 12');
+      expect((tx as unknown as { $queryRaw: jest.Mock }).$queryRaw).not.toHaveBeenCalled();
+    });
   });
 
   describe('findOrCreateGuestInTx', () => {

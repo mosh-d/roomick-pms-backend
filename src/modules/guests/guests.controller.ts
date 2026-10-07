@@ -35,7 +35,7 @@ export class GuestsController {
 
   @Get('guests/search')
   @Roles(...ALL_SYSTEM_ROLES)
-  @ApiOperation({ summary: 'Search guests by name or email (top 20 matches)' })
+  @ApiOperation({ summary: 'Search guests by name, email or phone (top 20 matches) — the walk-in and booking forms suggest returning guests from it' })
   searchGuests(@CurrentTenant() tenantId: string, @Query('q') q: string): ReturnType<GuestsService['searchGuests']> {
     return this.guestsService.searchGuests(tenantId, q);
   }
