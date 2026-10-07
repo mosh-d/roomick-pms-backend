@@ -29,15 +29,11 @@ const RETENTION_DAYS = 30;
 type DynamicDelegate = {
   findMany: (args: Record<string, never>) => Promise<unknown[]>;
   createMany: (args: { data: Record<string, unknown>[] }) => Promise<unknown>;
+  update: (args: { where: Record<string, unknown>; data: Record<string, unknown> }) => Promise<unknown>;
   deleteMany: (args: { where: { tenantId: string } }) => Promise<unknown>;
   count: (args: { where: { tenantId: string } }) => Promise<number>;
 };
 
-/** Two fields in the whole tenant-scoped schema carry a GLOBAL (not per-tenant) uniqueness constraint — restoring into a still-LIVE original tenant collides on the exact original value otherwise. Rewritten to something derived from the row's own fresh id (already guaranteed unique), only in the drill's copy — never touches the real row. */
-const GLOBAL_UNIQUE_FIELDS: Partial<Record<string, string>> = {
-  User: 'email',
-  InviteToken: 'token',
-};
 
 interface RestoreModelMeta {
   modelName: string;
@@ -45,7 +41,22 @@ interface RestoreModelMeta {
   idFieldName: string;
   /** `false` = BigInt id (RateAuditLog/NightAuditLog/AuditLog) — nothing in the tenant-scoped schema references these as a foreign key, so the drill lets Postgres autogenerate a fresh one instead of remapping. */
   idIsUuid: boolean;
+  /**
+   * Columns unique across EVERY tenant, not per tenant (`User.email`,
+   * `InviteToken.token`, `Branch.bookingSlug`, `RefreshToken.tokenHash`) —
+   * restoring into a still-live original tenant collides on the original
+   * value. Rewritten off the row's own fresh id in the drill's copy only.
+   * Read from the schema, not listed by hand: a hand list missed the booking
+   * slug and the session token hash, and every drill failed on them.
+   */
+  globalUniqueFields: string[];
   relations: Array<{ fieldNames: string[]; targetModel: string }>;
+  /**
+   * Optional FKs that close a cycle (`Reservation.billToFolioId` → Folio,
+   * whose own `reservationId` points back): inserted empty, then filled in
+   * once every row exists. See `buildRestoreInsertOrder`.
+   */
+  deferred: Array<{ fieldNames: string[]; targetModel: string }>;
 }
 
 export interface RestoreDrillResult {
@@ -244,9 +255,9 @@ export class BackupsService {
    * the moment a new tenant-scoped model or relation is added. Every row's
    * own id gets a fresh UUID (colliding on the original tenant's still-live
    * primary keys otherwise), FK columns are rewritten through the id map
-   * built as parents are inserted, and the two fields in the whole schema
-   * with a GLOBAL uniqueness constraint (`User.email`, `InviteToken.token`
-   * — see `GLOBAL_UNIQUE_FIELDS`) are rewritten off the row's own new id.
+   * built as parents are inserted, and every field with a GLOBAL uniqueness
+   * constraint (`User.email`, `Branch.bookingSlug`, … — see
+   * `RestoreModelMeta.globalUniqueFields`) is rewritten off the row's own new id.
    */
   async runRestoreDrill(backupRecordId: string): Promise<RestoreDrillResult> {
     const record = await this.prisma.backupRecord.findFirst({ where: { id: backupRecordId } });
@@ -284,6 +295,8 @@ export class BackupsService {
     try {
       await this.prisma.withTenant(drillTenant.id, async (tx) => {
         const dynamicTx = tx as unknown as Record<string, DynamicDelegate>;
+        // Deferred FKs, filled in after every insert: which row, which column, the original value.
+        const pendingLinks: Array<{ meta: RestoreModelMeta; rowId: string; field: string; targetModel: string; value: string }> = [];
 
         for (const meta of this.restoreInsertOrder) {
           const rows = (snapshot[meta.modelName] ?? []) as Array<Record<string, unknown>>;
@@ -316,16 +329,31 @@ export class BackupsService {
                 out[fk] = targetMap?.get(value as string) ?? value;
               }
             }
+            for (const rel of meta.deferred) {
+              for (const fk of rel.fieldNames) {
+                const value = out[fk];
+                if (value == null || !newRowId) continue;
+                pendingLinks.push({ meta, rowId: newRowId, field: fk, targetModel: rel.targetModel, value: value as string });
+                out[fk] = null;
+              }
+            }
 
-            const globalUniqueField = GLOBAL_UNIQUE_FIELDS[meta.modelName];
-            if (globalUniqueField && newRowId) {
-              out[globalUniqueField] = meta.modelName === 'User' ? `restore-drill+${newRowId}@invalid.local` : newRowId;
+            for (const field of meta.globalUniqueFields) {
+              if (!newRowId || out[field] == null) continue;
+              out[field] = meta.modelName === 'User' && field === 'email' ? `restore-drill+${newRowId}@invalid.local` : newRowId;
             }
 
             return out;
           });
 
           await dynamicTx[meta.accessor].createMany({ data: remapped });
+        }
+
+        for (const link of pendingLinks) {
+          await dynamicTx[link.meta.accessor].update({
+            where: { [link.meta.idFieldName]: link.rowId },
+            data: { [link.field]: idMaps.get(link.targetModel)?.get(link.value) ?? link.value },
+          });
         }
 
         // A real SELECT COUNT(*) per model, not an assumption that
@@ -393,49 +421,88 @@ export class BackupsService {
    * hand-listed — a hand-listed order silently rots the first time a new
    * tenant-scoped model or relation is added and nobody remembers to update
    * it. Plain Kahn's algorithm; ties broken alphabetically so the order is
-   * deterministic across runs (matters for tests, not correctness). Throws
-   * if the tenant-scoped schema ever has a real cyclic FK dependency — it
-   * doesn't today (checked directly), but a silent infinite loop would be
-   * far worse than a loud failure if that ever changed.
+   * deterministic across runs (matters for tests, not correctness).
+   *
+   * **A cycle is broken on an optional FK** — `Reservation.billToFolioId`
+   * (a group's master bill) points at a Folio whose own `reservationId`
+   * points back. When the order sticks, an optional FK that lies on the
+   * cycle is deferred: its rows go in with it empty and it's filled in once
+   * every row exists. A cycle with no optional FK to break it still throws
+   * — a silent infinite loop would be far worse than a loud failure.
    */
   private buildRestoreInsertOrder(): RestoreModelMeta[] {
     const scopedNames = new Set(this.tenantScopedModels.map((m) => m.modelName));
+    const optionalField = new Map<string, boolean>();
     const metas: RestoreModelMeta[] = this.tenantScopedModels.map(({ modelName, accessor }) => {
       const model = Prisma.dmmf.datamodel.models.find((m) => m.name === modelName)!;
       const idField = model.fields.find((f) => f.isId)!;
+      for (const f of model.fields) optionalField.set(`${modelName}.${f.name}`, !f.isRequired);
       const relations = model.fields
         .filter((f) => f.kind === 'object' && f.relationFromFields && f.relationFromFields.length > 0)
         .map((f) => ({ fieldNames: [...f.relationFromFields!], targetModel: f.type }));
-      return { modelName, accessor, idFieldName: idField.name, idIsUuid: idField.type === 'String', relations };
+      // A unique foreign key needs no rewrite — it's remapped to a fresh row's id like any other.
+      const foreignKeys = new Set(relations.flatMap((r) => r.fieldNames));
+      const globalUniqueFields = model.fields
+        .filter((f) => f.kind === 'scalar' && f.isUnique && !f.isId && f.type === 'String' && !foreignKeys.has(f.name))
+        .map((f) => f.name);
+      return { modelName, accessor, idFieldName: idField.name, idIsUuid: idField.type === 'String', globalUniqueFields, relations, deferred: [] };
     });
-
     const byName = new Map(metas.map((m) => [m.modelName, m]));
-    const dependents = new Map<string, string[]>(metas.map((m) => [m.modelName, []]));
-    const remainingDeps = new Map<string, number>();
+    const dependsOn = (m: RestoreModelMeta) => new Set(m.relations.map((r) => r.targetModel).filter((t) => scopedNames.has(t) && t !== m.modelName));
 
-    for (const m of metas) {
-      const deps = new Set(m.relations.map((r) => r.targetModel).filter((t) => scopedNames.has(t) && t !== m.modelName));
-      remainingDeps.set(m.modelName, deps.size);
-      for (const dep of deps) dependents.get(dep)!.push(m.modelName);
-    }
-
-    const ready = metas.filter((m) => remainingDeps.get(m.modelName) === 0).map((m) => m.modelName);
-    const order: string[] = [];
-    while (ready.length > 0) {
-      ready.sort();
-      const name = ready.shift()!;
-      order.push(name);
-      for (const dependent of dependents.get(name)!) {
-        const remaining = remainingDeps.get(dependent)! - 1;
-        remainingDeps.set(dependent, remaining);
-        if (remaining === 0) ready.push(dependent);
+    for (;;) {
+      const dependents = new Map<string, string[]>(metas.map((m) => [m.modelName, []]));
+      const remainingDeps = new Map<string, number>();
+      for (const m of metas) {
+        const deps = dependsOn(m);
+        remainingDeps.set(m.modelName, deps.size);
+        for (const dep of deps) dependents.get(dep)!.push(m.modelName);
       }
-    }
 
-    if (order.length !== metas.length) {
-      const stuck = metas.map((m) => m.modelName).filter((n) => !order.includes(n));
-      throw new Error(`Cannot compute a restore insert order — cyclic tenant-scoped FK dependency among: ${stuck.join(', ')}`);
+      const ready = metas.filter((m) => remainingDeps.get(m.modelName) === 0).map((m) => m.modelName);
+      const order: string[] = [];
+      while (ready.length > 0) {
+        ready.sort();
+        const name = ready.shift()!;
+        order.push(name);
+        for (const dependent of dependents.get(name)!) {
+          const remaining = remainingDeps.get(dependent)! - 1;
+          remainingDeps.set(dependent, remaining);
+          if (remaining === 0) ready.push(dependent);
+        }
+      }
+      if (order.length === metas.length) return order.map((name) => byName.get(name)!);
+
+      // Stuck: defer one optional FK that lies on a cycle — from A to B where B depends (in turn) on A.
+      const stuck = new Set(metas.map((m) => m.modelName).filter((n) => !order.includes(n)));
+      const reaches = (from: string, to: string): boolean => {
+        const seen = new Set<string>();
+        const queue = [from];
+        while (queue.length > 0) {
+          const name = queue.shift()!;
+          if (name === to) return true;
+          if (seen.has(name) || !stuck.has(name)) continue;
+          seen.add(name);
+          queue.push(...dependsOn(byName.get(name)!));
+        }
+        return false;
+      };
+      const candidates = metas
+        .filter((m) => stuck.has(m.modelName))
+        .flatMap((m) =>
+          m.relations
+            .filter((r) => stuck.has(r.targetModel) && r.targetModel !== m.modelName)
+            .filter((r) => r.fieldNames.every((f) => optionalField.get(`${m.modelName}.${f}`)))
+            .filter((r) => reaches(r.targetModel, m.modelName))
+            .map((r) => ({ meta: m, relation: r, key: `${m.modelName}.${r.fieldNames.join(',')}` })),
+        )
+        .sort((a, b) => a.key.localeCompare(b.key));
+      const breaker = candidates[0];
+      if (!breaker) {
+        throw new Error(`Cannot compute a restore insert order — cyclic tenant-scoped FK dependency among: ${[...stuck].join(', ')}`);
+      }
+      breaker.meta.relations = breaker.meta.relations.filter((r) => r !== breaker.relation);
+      breaker.meta.deferred.push(breaker.relation);
     }
-    return order.map((name) => byName.get(name)!);
   }
 }

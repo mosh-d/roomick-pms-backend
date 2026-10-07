@@ -7,7 +7,7 @@ import { BACKUP_STORAGE_ADAPTER } from './storage/backup-storage.interface';
 
 const TENANT_ID = '11111111-1111-4111-8111-111111111111';
 
-type FakeDelegate = { findMany: jest.Mock; createMany: jest.Mock; deleteMany: jest.Mock; count: jest.Mock };
+type FakeDelegate = { findMany: jest.Mock; createMany: jest.Mock; update: jest.Mock; deleteMany: jest.Mock; count: jest.Mock };
 
 function makeTx() {
   // A handful of real tenant-scoped model accessors — enough to prove the
@@ -23,6 +23,7 @@ function makeTx() {
         const delegate: FakeDelegate = {
           findMany: jest.fn().mockResolvedValue([]),
           createMany: jest.fn().mockResolvedValue({ count: 0 }),
+          update: jest.fn().mockResolvedValue({}),
           deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
           count: jest.fn().mockImplementation(() => {
             const lastCall = delegate.createMany.mock.calls.at(-1) as [{ data: unknown[] }] | undefined;
@@ -264,6 +265,21 @@ describe('BackupsService', () => {
       expect(result.ok).toBe(false);
       expect(result.mismatches).toContain('Reservation');
       expect(result.modelCounts?.Reservation).toEqual({ expected: 1, restored: 0 });
+    });
+
+    it("rewrites every column unique across all tenants — a branch's booking slug and a session's token hash too, not just the email", async () => {
+      mockStoredSnapshot({
+        ...seedSnapshot(),
+        Branch: [{ id: 'branch-1', tenantId: TENANT_ID, brandId: 'brand-1', name: 'Main', bookingSlug: 'abijo-suites' }],
+        RefreshToken: [{ id: 'rt-1', tenantId: TENANT_ID, userId: 'user-1', tokenHash: 'a'.repeat(64) }],
+      });
+      const result = await service.runRestoreDrill('backup-1');
+      expect(result.ok).toBe(true);
+      const branchRow = (tx.branch.createMany.mock.calls[0][0].data as Array<Record<string, unknown>>)[0];
+      const tokenRow = (tx.refreshToken.createMany.mock.calls[0][0].data as Array<Record<string, unknown>>)[0];
+      expect(branchRow.bookingSlug).toBe(branchRow.id);
+      expect(tokenRow.tokenHash).toBe(tokenRow.id);
+      expect(tokenRow.userId).not.toBe('user-1');
     });
 
     it('still cleans up the throwaway tenant even when an insert fails partway through', async () => {
