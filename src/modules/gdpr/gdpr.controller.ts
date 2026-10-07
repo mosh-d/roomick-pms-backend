@@ -1,18 +1,46 @@
-import { Body, Controller, Get, Param, ParseUUIDPipe, Patch, Post, Res } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, HttpCode, HttpStatus, Param, ParseUUIDPipe, Patch, Post, Put, Query, Res } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import type { Response } from 'express';
 import { CurrentTenant, CurrentUser } from '../../common/decorators';
 import { Roles, SystemRole } from '../../common/decorators/roles.decorator';
 import { JwtPayload } from '../../common/types/request-context';
-import { CreateGdprRequestDto, UpdateGdprRequestStatusDto } from './dto/gdpr.dto';
+import { ErrorCode } from '../../common/errors/error-codes';
+import { CreateGdprRequestDto, RetentionDto, UpdateGdprRequestStatusDto } from './dto/gdpr.dto';
 import { GdprService } from './gdpr.service';
+import { RetentionService } from './retention.service';
 
 @ApiTags('gdpr')
 @ApiBearerAuth()
 @Controller('gdpr')
 @Roles(SystemRole.Owner)
 export class GdprController {
-  constructor(private readonly gdprService: GdprService) {}
+  constructor(
+    private readonly gdprService: GdprService,
+    private readonly retentionService: RetentionService,
+  ) {}
+
+  @Get('retention')
+  @ApiOperation({ summary: 'How long registration cards and ID documents are kept, and what is past that now — or, with ?months=, what that period would remove' })
+  retention(@CurrentTenant() tenantId: string, @Query('months') months?: string): ReturnType<RetentionService['status']> {
+    if (months === undefined) return this.retentionService.status(tenantId);
+    if (!/^\d{1,3}$/.test(months)) {
+      throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: 'months must be a whole number' });
+    }
+    return this.retentionService.status(tenantId, Number(months));
+  }
+
+  @Put('retention')
+  @ApiOperation({ summary: 'Set how long registration cards and ID documents are kept after a stay (null keeps them) — removed nightly after that' })
+  setRetention(@CurrentTenant() tenantId: string, @CurrentUser() user: JwtPayload, @Body() dto: RetentionDto): ReturnType<RetentionService['setPeriod']> {
+    return this.retentionService.setPeriod(tenantId, dto.months, user.sub);
+  }
+
+  @Post('retention/run')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Remove what is past the retention period now, instead of waiting for tonight' })
+  runRetention(@CurrentTenant() tenantId: string, @CurrentUser() user: JwtPayload): ReturnType<RetentionService['purgeTenant']> {
+    return this.retentionService.purgeTenant(tenantId, user.sub);
+  }
 
   @Post('data-requests')
   @ApiOperation({ summary: 'File a GDPR data request (access, erasure, or portability) on behalf of a guest' })

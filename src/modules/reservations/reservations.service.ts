@@ -24,6 +24,7 @@ import {
   penaltyAmountFor,
   resolveCancellationPolicy,
 } from './policies';
+import { manageBookingLine } from './guest-links';
 import {
   AvailabilityCalendarQueryDto,
   AvailabilityQueryDto,
@@ -576,7 +577,7 @@ export class ReservationsService {
           guestId: guest.id,
           channel: 'email',
           subject: `Reservation Confirmed — ${confirmationNumber}`,
-          body: `Your reservation ${confirmationNumber} is confirmed — ${roomType.name}, ${dto.checkInDate} to ${dto.checkOutDate}.`,
+          body: `Your reservation ${confirmationNumber} is confirmed — ${roomType.name}, ${dto.checkInDate} to ${dto.checkOutDate}.${manageBookingLine(branch, confirmationNumber)}`,
           trigger: 'booking_confirmation',
         });
       }
@@ -665,7 +666,7 @@ export class ReservationsService {
         guestId: guest.id,
         channel: 'email',
         subject: `Welcome — ${confirmationNumber}`,
-        body: `Welcome! You're checked in to room ${room.number} (${roomType.name}). Check-out is ${dto.checkOutDate}.`,
+        body: `Welcome! You're checked in to room ${room.number} (${roomType.name}). Check-out is ${dto.checkOutDate}.${manageBookingLine(branch, confirmationNumber)}`,
         trigger: 'checkin_receipt',
       });
       return reservation;
@@ -770,7 +771,7 @@ export class ReservationsService {
       guestId: updated.guestId,
       channel: 'email',
       subject: `Welcome — ${updated.confirmationNumber}`,
-      body: `Welcome! You're checked in to room ${room.number} (${updated.roomType.name}). Check-out is ${updated.checkOutDate.toISOString().slice(0, 10)}.`,
+      body: `Welcome! You're checked in to room ${room.number} (${updated.roomType.name}). Check-out is ${updated.checkOutDate.toISOString().slice(0, 10)}.${manageBookingLine(branch, updated.confirmationNumber)}`,
       trigger: 'checkin_receipt',
     });
     return updated;

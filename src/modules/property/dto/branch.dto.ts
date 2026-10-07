@@ -144,6 +144,25 @@ export class CancellationPolicyDto {
   allowOnlineCancellation!: boolean;
 }
 
+/**
+ * What a guest reads, and agrees to, before booking online: the property's
+ * privacy notice and its booking terms, as the owner writes them. Either can
+ * be cleared with null or an empty string.
+ */
+export class GuestTermsDto {
+  @ApiPropertyOptional({ description: 'How the property uses guests’ personal details', nullable: true })
+  @IsOptional()
+  @IsString()
+  @MaxLength(20000)
+  privacyNotice?: string | null;
+
+  @ApiPropertyOptional({ description: 'The terms a guest accepts when booking online', nullable: true })
+  @IsOptional()
+  @IsString()
+  @MaxLength(20000)
+  bookingTerms?: string | null;
+}
+
 export class RegCardTemplateDto {
   @ApiPropertyOptional()
   @IsOptional()

@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { Test } from '@nestjs/testing';
 import * as bcrypt from 'bcrypt';
+import { AccountMailService } from '../../common/mail/account-mail.service';
 import { PermissionsService } from '../../common/permissions/permissions.service';
 import { RoutePermissionMapService } from '../../common/permissions/route-permission-map.service';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -75,6 +76,7 @@ describe('AuthService', () => {
   let jwt: { signAsync: jest.Mock; verifyAsync: jest.Mock; decode: jest.Mock };
   let permissions: { invalidate: jest.Mock; rolesFor: jest.Mock };
   let mfa: { checkSecondFactor: jest.Mock; failureFor: jest.Mock };
+  let accountMail: { delivers: boolean; verifyEmail: jest.Mock };
 
   beforeEach(async () => {
     tx = makeTx();
@@ -102,6 +104,8 @@ describe('AuthService', () => {
     };
     permissions = { invalidate: jest.fn(), rolesFor: jest.fn().mockResolvedValue(new Map()) };
     mfa = { checkSecondFactor: jest.fn(), failureFor: jest.fn().mockImplementation(() => new UnauthorizedException({ code: 'MFA_INVALID_CODE' })) };
+    // No email provider unless a test sets one up.
+    accountMail = { delivers: false, verifyEmail: jest.fn().mockResolvedValue(false) };
 
     const moduleRef = await Test.createTestingModule({
       providers: [
@@ -110,6 +114,7 @@ describe('AuthService', () => {
         { provide: JwtService, useValue: jwt },
         { provide: PermissionsService, useValue: permissions },
         { provide: MfaService, useValue: mfa },
+        { provide: AccountMailService, useValue: accountMail },
         { provide: RoutePermissionMapService, useValue: { systemRolePresets: () => ({ front_desk: { reservations: ['create', 'read', 'update'] } }) } },
         {
           provide: ConfigService,
@@ -172,7 +177,9 @@ describe('AuthService', () => {
         expect.objectContaining({ data: expect.objectContaining({ branchId: null }) }),
       );
       expect(tx.auditLog.create).toHaveBeenCalled();
+      // No email provider: the sign-up page gets the token, as in development all along.
       expect(result.verificationToken).toBe('signed.jwt.token');
+      expect(result.emailed).toBe(false);
       expect(result.tenantId).toBe(TENANT_ID);
     });
 
@@ -184,6 +191,49 @@ describe('AuthService', () => {
           data: expect.objectContaining({ passwordHash: 'hashed-password' }),
         }),
       );
+    });
+  });
+
+  describe('email confirmation by email', () => {
+    const registerDto = { email: 'owner@acme.test', password: 'Pw1aaaaa', name: 'Ada', groupName: 'Acme Hotels', country: 'NG' };
+
+    it('once a provider is set up, emails the link and never returns the token', async () => {
+      accountMail.delivers = true;
+      accountMail.verifyEmail.mockResolvedValue(true);
+      const result = await service.register(registerDto);
+      expect(result.verificationToken).toBeNull();
+      expect(result.emailed).toBe(true);
+      expect(accountMail.verifyEmail).toHaveBeenCalledWith('owner@acme.test', 'Ada', expect.stringContaining('/verify-email?token=signed.jwt.token'));
+    });
+
+    it('sends the link again in the background, answering the same for any address', async () => {
+      accountMail.delivers = true;
+      await expect(service.resendVerification('nobody@acme.test')).resolves.toEqual({ emailEnabled: true, verificationToken: null });
+
+      prisma.userEmailIndex.findUnique.mockResolvedValue({ email: 'owner@acme.test', tenantId: TENANT_ID, userId: USER_ID });
+      tx.user.findFirst.mockResolvedValue({ id: USER_ID, tenantId: TENANT_ID, email: 'owner@acme.test', name: 'Ada', emailVerified: false, passwordHash: 'h' });
+      await service.emailVerificationLink('owner@acme.test');
+      expect(accountMail.verifyEmail).toHaveBeenCalledWith('owner@acme.test', 'Ada', expect.stringContaining('/verify-email?token='));
+    });
+
+    it('sends nothing to an address that is already confirmed', async () => {
+      prisma.userEmailIndex.findUnique.mockResolvedValue({ email: 'owner@acme.test', tenantId: TENANT_ID, userId: USER_ID });
+      tx.user.findFirst.mockResolvedValue({ id: USER_ID, tenantId: TENANT_ID, email: 'owner@acme.test', name: 'Ada', emailVerified: true });
+      await service.emailVerificationLink('owner@acme.test');
+      expect(accountMail.verifyEmail).not.toHaveBeenCalled();
+    });
+
+    it('without email, gives the token back only for the account’s own password', async () => {
+      prisma.userEmailIndex.findUnique.mockResolvedValue({ email: 'owner@acme.test', tenantId: TENANT_ID, userId: USER_ID });
+      tx.user.findFirst.mockResolvedValue({ id: USER_ID, tenantId: TENANT_ID, email: 'owner@acme.test', name: 'Ada', emailVerified: false, passwordHash: 'h' });
+
+      (bcrypt.compare as jest.Mock).mockResolvedValue(false);
+      await expect(service.resendVerification('owner@acme.test', 'wrong')).resolves.toEqual({ emailEnabled: false, verificationToken: null });
+      await expect(service.resendVerification('owner@acme.test')).resolves.toEqual({ emailEnabled: false, verificationToken: null });
+
+      (bcrypt.compare as jest.Mock).mockResolvedValue(true);
+      await expect(service.resendVerification('owner@acme.test', 'Pw1aaaaa')).resolves.toEqual({ emailEnabled: false, verificationToken: 'signed.jwt.token' });
+      expect(accountMail.verifyEmail).not.toHaveBeenCalled();
     });
   });
 
@@ -413,7 +463,7 @@ describe('AuthService', () => {
       expect(tx.inviteToken.update).toHaveBeenCalledWith(
         expect.objectContaining({ data: expect.objectContaining({ acceptedAt: expect.any(Date) }) }),
       );
-      expect(result.accessToken).toBe('signed.jwt.token');
+      expect((result as LoginResult).accessToken).toBe('signed.jwt.token');
     });
 
     it('rejects a duplicate email with EMAIL_TAKEN when it belongs to a different tenant', async () => {
@@ -436,6 +486,69 @@ describe('AuthService', () => {
         service.acceptInvite(`${TENANT_ID}.${'a'.repeat(96)}`, { name: 'Chidi', password: 'Pw1aaaaa' }),
       ).rejects.toThrow(ConflictException);
       expect(tx.user.create).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('invitations to someone who already has an account here', () => {
+    const TOKEN = `${TENANT_ID}.${'a'.repeat(96)}`;
+    const invite = { id: 'inv', email: 'owner@acme.test', roleId: 'role-fd', branchId: 'branch-1', acceptedAt: null, expiresAt: new Date(Date.now() + 60_000) };
+    const existing = { id: USER_ID, tenantId: TENANT_ID, email: 'owner@acme.test', name: 'Ada', passwordHash: 'their-hash', deletedAt: null, emailVerified: true };
+
+    beforeEach(() => {
+      tx.inviteToken.findUnique.mockResolvedValue(invite);
+      tx.user.findFirst.mockResolvedValue(existing);
+    });
+
+    it('never signs anyone in with a password that isn’t the account’s own', async () => {
+      (bcrypt.compare as jest.Mock).mockResolvedValue(false);
+      await expect(service.acceptInvite(TOKEN, { password: 'Anything1' })).rejects.toThrow(UnauthorizedException);
+      expect(bcrypt.compare).toHaveBeenCalledWith('Anything1', 'their-hash');
+      expect(tx.userBranchRole.create).not.toHaveBeenCalled();
+      expect(tx.inviteToken.update).not.toHaveBeenCalled();
+      expect(tx.refreshToken.create).not.toHaveBeenCalled();
+    });
+
+    it('with the right password, adds the role and sends them to sign in as usual — no session handed out', async () => {
+      (bcrypt.compare as jest.Mock).mockResolvedValue(true);
+      const result = await service.acceptInvite(TOKEN, { password: 'Pw1aaaaa' });
+      expect(result).toEqual({ joined: true, email: 'owner@acme.test' });
+      expect(tx.userBranchRole.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ userId: USER_ID, roleId: 'role-fd', branchId: 'branch-1' }) }));
+      expect(tx.inviteToken.update).toHaveBeenCalled();
+      expect(tx.refreshToken.create).not.toHaveBeenCalled();
+      expect(tx.user.create).not.toHaveBeenCalled();
+    });
+
+    it('refuses a deactivated account', async () => {
+      tx.user.findFirst.mockResolvedValue({ ...existing, deletedAt: new Date() });
+      await expect(service.acceptInvite(TOKEN, { password: 'Pw1aaaaa' })).rejects.toThrow(ConflictException);
+      expect(tx.userBranchRole.create).not.toHaveBeenCalled();
+    });
+
+    it('asks someone new for their name and a strong password', async () => {
+      tx.user.findFirst.mockResolvedValue(null);
+      await expect(service.acceptInvite(TOKEN, { password: 'Pw1aaaaa' })).rejects.toThrow(BadRequestException);
+      await expect(service.acceptInvite(TOKEN, { name: 'Chidi', password: 'weakpass' })).rejects.toThrow(BadRequestException);
+      expect(tx.user.create).not.toHaveBeenCalled();
+    });
+
+    it('previews who, where and as what — and whether they already have an account', async () => {
+      tx.inviteToken.findUnique.mockResolvedValue({ ...invite, role: { name: 'front_desk' }, branch: { name: 'Lekki' }, tenant: { groupName: 'Acme Hotels' } });
+      tx.user.findFirst.mockResolvedValue({ deletedAt: null });
+      await expect(service.previewInvite(TOKEN)).resolves.toEqual({
+        email: 'owner@acme.test',
+        organisation: 'Acme Hotels',
+        branch: 'Lekki',
+        role: 'front_desk',
+        expiresAt: invite.expiresAt,
+        existingAccount: true,
+      });
+      tx.user.findFirst.mockResolvedValue(null);
+      await expect(service.previewInvite(TOKEN)).resolves.toMatchObject({ existingAccount: false });
+    });
+
+    it('previews nothing for a used or expired invitation', async () => {
+      tx.inviteToken.findUnique.mockResolvedValue({ ...invite, acceptedAt: new Date(), role: { name: 'front_desk' }, branch: null, tenant: { groupName: 'Acme' } });
+      await expect(service.previewInvite(TOKEN)).rejects.toThrow(BadRequestException);
     });
   });
 

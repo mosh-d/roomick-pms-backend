@@ -72,6 +72,7 @@ its connection string.
 | `BACKUP_STORAGE_DIR` | `/var/roomick/backups` |
 | `SENTRY_DSN` | optional; error tracking stays off entirely while unset |
 | `PUBLIC_API_BASE_URL` | this API's public address, e.g. `https://api.yourdomain` — the open pixel, links and unsubscribe link in a marketing email point here (without it they point at localhost) |
+| `PUBLIC_WEB_BASE_URL` | the web app's public address — the Vercel URL, e.g. `https://roomick.vercel.app` (it's `https://<project name>.vercel.app`, so it's known before the frontend is deployed). Staff invitations, password-reset links, email confirmation at sign-up and a guest's "Manage your booking" link all point here. **Required** — the API refuses to start in production without it |
 | `SMTP_HOST` | your email provider's SMTP server, e.g. `smtp.resend.com`. While unset, no email is sent — every message is only written to the log |
 | `SMTP_PORT` | `587` (STARTTLS, the default) or `465` (TLS from the start) |
 | `SMTP_USER` / `SMTP_PASS` | the SMTP username and password (for Resend: `resend` and an API key) |
@@ -116,7 +117,8 @@ Import `roomick-pms-frontend`. Next.js is detected automatically; no
 The `/api/v1` suffix matters — `main.ts` sets a global `api` prefix plus URI
 versioning, so every route lives under it.
 
-Once the Vercel domain exists, go back and set `CORS_ORIGINS` on Render to it.
+Once the Vercel domain exists, go back and set `CORS_ORIGINS` and
+`PUBLIC_WEB_BASE_URL` on Render to it.
 Skipping that produces a frontend that loads fine and fails every request with
 an opaque CORS error in the console.
 

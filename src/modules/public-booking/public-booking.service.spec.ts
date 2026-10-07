@@ -1,3 +1,4 @@
+import { BadRequestException } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -160,7 +161,7 @@ describe('PublicBookingService', () => {
       });
       const result = await service.getProperty(SLUG);
       expect(Object.keys(result).sort()).toEqual([
-        'address', 'brandName', 'cancellationPolicy', 'category', 'checkInTime', 'checkOutTime', 'currency', 'name', 'slug', 'timezone',
+        'address', 'bookingTerms', 'brandName', 'cancellationPolicy', 'category', 'checkInTime', 'checkOutTime', 'currency', 'name', 'privacyNotice', 'slug', 'timezone',
       ]);
       expect(result.checkInTime).toBe('14:00');
       expect(result.checkOutTime).toBe('11:00');
@@ -178,6 +179,48 @@ describe('PublicBookingService', () => {
         freeCancellationHours: 24,
         allowOnlineCancellation: true,
       });
+    });
+  });
+
+  describe('privacy notice and booking terms', () => {
+    const published = { privacyNotice: 'We keep your details for your stay only.', bookingTerms: 'Payment on arrival.' };
+    const validDto = { roomTypeId: ROOM_TYPE_ID, checkInDate: futureDate(5), checkOutDate: futureDate(8), adults: 2, guestName: 'Ada Okafor', guestEmail: 'ada@example.com' };
+
+    beforeEach(() => {
+      reservationsService.createReservation.mockResolvedValue({ id: 'res-1', guestId: 'guest-1' });
+      tx.reservation.findFirstOrThrow.mockResolvedValue({
+        confirmationNumber: 'RES-2026-00001', checkInDate: new Date(validDto.checkInDate), checkOutDate: new Date(validDto.checkOutDate),
+        confirmedRate: { toFixed: () => '90000.00' }, roomType: { name: 'Standard' }, guest: { name: 'Ada Okafor' }, branch: { currency: 'NGN' },
+      });
+    });
+
+    it('shows guests the property’s own words — and nothing when there are none', async () => {
+      tx.branch.findFirstOrThrow.mockResolvedValue({
+        name: 'Grand Hotel', category: 'hotel', currency: 'NGN', timezone: 'Africa/Lagos',
+        checkInTime: new Date('1970-01-01T14:00:00.000Z'), checkOutTime: new Date('1970-01-01T11:00:00.000Z'),
+        address: {}, cancellationPolicy: null, brand: { name: 'Grand Group' }, privacyNotice: null, bookingTerms: 'Payment on arrival.',
+      });
+      await expect(service.getProperty(SLUG)).resolves.toMatchObject({ privacyNotice: null, bookingTerms: 'Payment on arrival.' });
+    });
+
+    it('books nobody who hasn’t accepted them, once published — before anything is held', async () => {
+      tx.branch.findFirstOrThrow.mockResolvedValue(published);
+      await expect(service.createReservation(SLUG, validDto)).rejects.toThrow(BadRequestException);
+      await expect(service.createReservation(SLUG, { ...validDto, acceptTerms: false })).rejects.toThrow(BadRequestException);
+      expect(reservationsService.createReservation).not.toHaveBeenCalled();
+    });
+
+    it('records when the guest accepted them', async () => {
+      tx.branch.findFirstOrThrow.mockResolvedValue(published);
+      await service.createReservation(SLUG, { ...validDto, acceptTerms: true });
+      expect(tx.reservation.update).toHaveBeenCalledWith({ where: { id: 'res-1' }, data: { termsAcceptedAt: expect.any(Date) } });
+    });
+
+    it('asks for nothing at a property that has published neither', async () => {
+      tx.branch.findFirstOrThrow.mockResolvedValue({ privacyNotice: null, bookingTerms: null });
+      await service.createReservation(SLUG, validDto);
+      expect(reservationsService.createReservation).toHaveBeenCalled();
+      expect(tx.reservation.update).not.toHaveBeenCalled();
     });
   });
 

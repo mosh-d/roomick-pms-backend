@@ -20,7 +20,8 @@ import { CurrentTenant, CurrentUser, Public } from '../../common/decorators';
 import { Roles, SystemRole } from '../../common/decorators/roles.decorator';
 import { ErrorCode } from '../../common/errors/error-codes';
 import { JwtPayload } from '../../common/types/request-context';
-import { AuthService, LoginResult, MfaChallenge, MfaLoginResult } from './auth.service';
+import { AuthService, InviteJoined, InvitePreview, LoginResult, MfaChallenge, MfaLoginResult } from './auth.service';
+import { PasswordService } from './password.service';
 import { MfaService, MfaStatus } from './mfa.service';
 import { MfaCodeDto, MfaDisableDto, MfaVerifyDto } from './dto/mfa.dto';
 import { AcceptInviteDto } from './dto/accept-invite.dto';
@@ -28,7 +29,8 @@ import { LoginDto } from './dto/login.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
 import { RegisterDto } from './dto/register.dto';
 import { CreateRoleDto, UpdateRoleDto, UpdateRolePermissionsDto } from './dto/update-role-permissions.dto';
-import { VerifyEmailDto } from './dto/verify-email.dto';
+import { ChangePasswordDto, EmailOnlyDto, ResetPasswordDto } from './dto/password.dto';
+import { ResendVerificationDto, VerifyEmailDto } from './dto/verify-email.dto';
 
 @ApiTags('auth')
 @Controller('auth')
@@ -36,6 +38,7 @@ export class AuthController {
   constructor(
     private readonly authService: AuthService,
     private readonly mfaService: MfaService,
+    private readonly passwordService: PasswordService,
   ) {}
 
   @Public()
@@ -60,6 +63,43 @@ export class AuthController {
   @ApiOperation({ summary: 'Confirm owner/staff email with the token from the signup email' })
   verifyEmail(@Body() dto: VerifyEmailDto): Promise<{ verified: true }> {
     return this.authService.verifyEmail(dto.token);
+  }
+
+  @Public()
+  // As tight as register: every call can send an email.
+  @Throttle({ default: { limit: 5, ttl: 900_000 } })
+  @Post('resend-verification')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Send the email confirmation link again — the same answer for any address' })
+  resendVerification(@Body() dto: ResendVerificationDto): ReturnType<AuthService['resendVerification']> {
+    return this.authService.resendVerification(dto.email, dto.password);
+  }
+
+  @Public()
+  @Throttle({ default: { limit: 5, ttl: 900_000 } })
+  @Post('forgot-password')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Email a password-reset link — the same answer for any address' })
+  forgotPassword(@Body() dto: EmailOnlyDto): { emailEnabled: boolean } {
+    return this.passwordService.forgot(dto.email);
+  }
+
+  @Public()
+  @Throttle({ default: { limit: 10, ttl: 900_000 } })
+  @Post('reset-password')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Choose a new password with a reset link — ends every session the account had' })
+  resetPassword(@Body() dto: ResetPasswordDto): Promise<{ reset: true }> {
+    return this.passwordService.reset(dto.token, dto.password);
+  }
+
+  @Post('change-password')
+  @HttpCode(HttpStatus.OK)
+  @ApiBearerAuth()
+  @Throttle({ default: { limit: 10, ttl: 900_000 } })
+  @ApiOperation({ summary: 'Change my own password — ends my other sessions and returns a fresh one for this browser' })
+  changePassword(@CurrentUser() user: JwtPayload, @Body() dto: ChangePasswordDto): Promise<LoginResult> {
+    return this.passwordService.changePassword(user, dto.currentPassword, dto.newPassword);
   }
 
   @Public()
@@ -99,13 +139,21 @@ export class AuthController {
   }
 
   @Public()
+  @Throttle({ default: { limit: 30, ttl: 60_000 } })
+  @Get('invites/:token')
+  @ApiOperation({ summary: 'What an invitation is for — who, where and as what — before accepting it' })
+  previewInvite(@Param('token') token: string): Promise<InvitePreview> {
+    return this.authService.previewInvite(token);
+  }
+
+  @Public()
   @Throttle({ default: { limit: 10, ttl: 60_000 } })
   @Post('accept-invite/:token')
-  @ApiOperation({ summary: 'Accept a staff invite — creates the account and logs in' })
+  @ApiOperation({ summary: 'Accept a staff invite — someone new gets an account and is signed in; someone with an account here gives its password and then signs in as usual' })
   acceptInvite(
     @Param('token') token: string,
     @Body() dto: AcceptInviteDto,
-  ): Promise<LoginResult> {
+  ): Promise<LoginResult | InviteJoined> {
     return this.authService.acceptInvite(token, dto);
   }
 

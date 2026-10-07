@@ -5,6 +5,7 @@ import { TenantContextService } from './context/tenant-context.service';
 import { EncryptionService } from './crypto/encryption.service';
 import { DOCUMENT_STORAGE_ADAPTER } from './documents/document-storage.interface';
 import { LocalFilesystemDocumentStorage } from './documents/local-filesystem-document-storage';
+import { AccountMailService } from './mail/account-mail.service';
 import { LogMailTransport } from './mail/log-mail-transport';
 import { MAIL_TRANSPORT, MailTransport } from './mail/mail-transport.interface';
 import { SmtpMailTransport, smtpSettingsFromEnv } from './mail/smtp-mail-transport';
@@ -20,6 +21,7 @@ import { RoutePermissionMapService } from './permissions/route-permission-map.se
   providers: [
     // Signs a request in with an API key — `JwtAuthGuard` is global, so this is too.
     ApiKeyAuthService,
+    AccountMailService,
     TenantContextService,
     EncryptionService,
     MetricsService,
@@ -37,6 +39,6 @@ import { RoutePermissionMapService } from './permissions/route-permission-map.se
       },
     },
   ],
-  exports: [ApiKeyAuthService, TenantContextService, EncryptionService, MetricsService, PermissionsService, PageAccessService, RoutePermissionMapService, DOCUMENT_STORAGE_ADAPTER, MAIL_TRANSPORT],
+  exports: [ApiKeyAuthService, AccountMailService, TenantContextService, EncryptionService, MetricsService, PermissionsService, PageAccessService, RoutePermissionMapService, DOCUMENT_STORAGE_ADAPTER, MAIL_TRANSPORT],
 })
 export class CommonModule {}

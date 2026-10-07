@@ -8,6 +8,7 @@ import { CreateBrandDto, UpdateBrandDto } from './dto/brand.dto';
 import {
   CreateBranchDto,
   CancellationPolicyDto,
+  GuestTermsDto,
   NoShowPolicyDto,
   RegCardTemplateDto,
   UpdateBranchDto,
@@ -127,6 +128,18 @@ export class PropertyController {
     @Body() dto: CancellationPolicyDto,
   ): ReturnType<PropertyService['setCancellationPolicy']> {
     return this.propertyService.setCancellationPolicy(tenantId, branchId, dto, user.sub);
+  }
+
+  @Patch('branches/:branchId/policies/guest-terms')
+  @Roles(SystemRole.Owner, SystemRole.Manager)
+  @ApiOperation({ summary: 'Set the privacy notice and booking terms guests see — and accept — on the booking pages' })
+  setGuestTerms(
+    @CurrentTenant() tenantId: string,
+    @CurrentUser() user: JwtPayload,
+    @Param('branchId', ParseUUIDPipe) branchId: string,
+    @Body() dto: GuestTermsDto,
+  ): ReturnType<PropertyService['setGuestTerms']> {
+    return this.propertyService.setGuestTerms(tenantId, branchId, dto, user.sub);
   }
 
   @Get('branches/:branchId/registration-card-template')

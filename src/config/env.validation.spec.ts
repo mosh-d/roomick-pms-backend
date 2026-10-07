@@ -29,3 +29,15 @@ describe('envValidationSchema — email settings', () => {
     expect(validate({ SMTP_HOST: 'smtp.resend.com', MAIL_FROM: 'a@b.example', SMTP_PORT: '70000' }).error?.message).toMatch(/SMTP_PORT/);
   });
 });
+
+describe('envValidationSchema — the web app’s address', () => {
+  it('is needed in production, where links in emails would otherwise point at localhost', () => {
+    expect(validate({ NODE_ENV: 'production' }).error?.message).toMatch(/PUBLIC_WEB_BASE_URL/);
+    expect(validate({ NODE_ENV: 'production', PUBLIC_WEB_BASE_URL: 'https://app.roomick.example' }).error).toBeUndefined();
+  });
+
+  it('is optional in development, and must be a web address when given', () => {
+    expect(validate({}).error).toBeUndefined();
+    expect(validate({ PUBLIC_WEB_BASE_URL: 'not a url' }).error?.message).toMatch(/PUBLIC_WEB_BASE_URL/);
+  });
+});

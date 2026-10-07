@@ -13,6 +13,8 @@ import { Prisma, Role, User } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { ErrorCode } from '../../common/errors/error-codes';
+import { AccountMailService } from '../../common/mail/account-mail.service';
+import { webUrl } from '../../common/utils/web-url';
 import { PERMISSION_ACTIONS, PERMISSION_MODULES, PermissionModule, parsePermissions } from '../../common/permissions/permission-catalogue';
 import { PermissionsService } from '../../common/permissions/permissions.service';
 import { RoutePermissionMapService } from '../../common/permissions/route-permission-map.service';
@@ -72,6 +74,26 @@ export interface MfaLoginResult extends LoginResult {
   recoveryCodesLeft: number;
 }
 
+/** What the accept page shows before anything is typed. */
+export interface InvitePreview {
+  email: string;
+  organisation: string;
+  branch: string | null;
+  role: string;
+  expiresAt: Date;
+  /** This email already has an account here — they give its password rather than choose one. */
+  existingAccount: boolean;
+}
+
+/** Someone with an account here accepted: the role is theirs, and they sign in as usual. */
+export interface InviteJoined {
+  joined: true;
+  email: string;
+}
+
+/** At least 8 characters with an upper-case letter, a lower-case letter and a number — the sign-up rule. */
+export const STRONG_PASSWORD = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).{8,}$/;
+
 interface MfaChallengePayload {
   sub: string;
   tenantId: string;
@@ -113,6 +135,7 @@ export class AuthService {
     private readonly permissionsService: PermissionsService,
     private readonly routePermissionMap: RoutePermissionMapService,
     private readonly mfaService: MfaService,
+    private readonly accountMail: AccountMailService,
   ) {}
 
   // -------------------------------------------------------------------------
@@ -122,7 +145,10 @@ export class AuthService {
     tenantId: string;
     userId: string;
     subdomain: string;
-    verificationToken: string;
+    /** Only while no email provider is set up — see below. */
+    verificationToken: string | null;
+    /** The confirmation link was emailed. */
+    emailed: boolean;
   }> {
     // Email is the real, global uniqueness check now (see UserEmailIndex in
     // schema.prisma) — subdomain no longer has a user-facing collision to
@@ -195,15 +221,66 @@ export class AuthService {
       return user;
     });
 
-    // Email dispatch is a stubbed adapter in MVP — the token is returned/logged
-    // so the flow is testable end-to-end. Wire a real sender in P5 comms work.
-    const verificationToken = await this.jwt.signAsync(
-      { sub: owner.id, tenantId: tenant.id, tokenType: 'email_verify' } satisfies EmailVerifyPayload,
-      { secret: this.config.getOrThrow<string>('JWT_ACCESS_SECRET'), expiresIn: '72h' },
-    );
-    this.logger.log(`[stub email] verification token for ${dto.email} issued`);
+    // The confirmation link goes by email. Until an email provider is set up
+    // there's no inbox to send it to, so — as in development all along — the
+    // token comes back for the sign-up page to use; once one is, it only ever
+    // goes by email, and the address is really proven.
+    const verificationToken = await this.verificationToken(owner.id, tenant.id);
+    const emailed = await this.accountMail.verifyEmail(dto.email, dto.name, this.verificationLink(verificationToken));
+    return {
+      tenantId: tenant.id,
+      userId: owner.id,
+      subdomain: tenant.subdomain,
+      verificationToken: this.accountMail.delivers ? null : verificationToken,
+      emailed,
+    };
+  }
 
-    return { tenantId: tenant.id, userId: owner.id, subdomain: tenant.subdomain, verificationToken };
+  /**
+   * "Send the link again", from sign-up or the sign-in page. With email set
+   * up it answers at once and the same for any address — the sending happens
+   * after the response, so neither the answer nor its timing says whether
+   * there's an unconfirmed account. Without email there's nowhere to send
+   * it, so — like sign-up itself — the token comes back instead, but only to
+   * someone who also gives the account's password.
+   */
+  async resendVerification(email: string, password?: string): Promise<{ emailEnabled: boolean; verificationToken: string | null }> {
+    if (this.accountMail.delivers) {
+      void this.emailVerificationLink(email).catch((err: unknown) => {
+        this.logger.error(`Resending the confirmation link to ${email} failed: ${err instanceof Error ? err.message : String(err)}`);
+      });
+      return { emailEnabled: true, verificationToken: null };
+    }
+    const user = await this.unverifiedUser(email);
+    const passwordOk = await bcrypt.compare(password ?? '', user?.passwordHash ?? DUMMY_HASH);
+    if (!user || !password || !passwordOk) return { emailEnabled: false, verificationToken: null };
+    return { emailEnabled: false, verificationToken: await this.verificationToken(user.id, user.tenantId) };
+  }
+
+  /** The work behind `resendVerification` with email set up — exported for its tests, never called by a route directly. */
+  async emailVerificationLink(email: string): Promise<void> {
+    const user = await this.unverifiedUser(email);
+    if (!user) return;
+    const token = await this.verificationToken(user.id, user.tenantId);
+    await this.accountMail.verifyEmail(user.email, user.name, this.verificationLink(token));
+  }
+
+  private async unverifiedUser(email: string): Promise<User | null> {
+    const indexRow = await this.prisma.userEmailIndex.findUnique({ where: { email } });
+    if (!indexRow) return null;
+    const user = await this.prisma.withTenant(indexRow.tenantId, (tx) => tx.user.findFirst({ where: { id: indexRow.userId, deletedAt: null } }));
+    return user && !user.emailVerified ? user : null;
+  }
+
+  private verificationToken(userId: string, tenantId: string): Promise<string> {
+    return this.jwt.signAsync({ sub: userId, tenantId, tokenType: 'email_verify' } satisfies EmailVerifyPayload, {
+      secret: this.config.getOrThrow<string>('JWT_ACCESS_SECRET'),
+      expiresIn: '72h',
+    });
+  }
+
+  private verificationLink(token: string): string {
+    return webUrl(`/verify-email?token=${encodeURIComponent(token)}`);
   }
 
   async verifyEmail(token: string): Promise<{ verified: true }> {
@@ -452,11 +529,41 @@ export class AuthService {
   // Invites
   // -------------------------------------------------------------------------
   /**
-   * Public invite tokens are `<tenantId>.<secret>` — the tenant prefix lets a
-   * pre-auth request establish RLS context; the secret half is what's stored
-   * in invite_tokens and does the actual authentication.
+   * What the accept page shows before anyone types anything: who the
+   * invitation is for, where, and as what — and whether that email already
+   * has an account here (then they give its password rather than choose one).
    */
-  async acceptInvite(publicToken: string, dto: AcceptInviteDto): Promise<LoginResult> {
+  async previewInvite(publicToken: string): Promise<InvitePreview> {
+    const { tenantId, secret } = this.parseInviteToken(publicToken);
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const invite = await tx.inviteToken.findUnique({
+        where: { token: secret },
+        include: { role: { select: { name: true } }, branch: { select: { name: true } }, tenant: { select: { groupName: true } } },
+      });
+      if (!invite || invite.acceptedAt !== null || invite.expiresAt < new Date()) {
+        throw new BadRequestException({ code: ErrorCode.INVITE_INVALID, message: 'This invitation has expired or was already used — ask your manager for a new one' });
+      }
+      const existing = await tx.user.findFirst({ where: { tenantId, email: invite.email }, select: { deletedAt: true } });
+      return {
+        email: invite.email,
+        organisation: invite.tenant.groupName,
+        branch: invite.branch?.name ?? null,
+        role: invite.role.name,
+        expiresAt: invite.expiresAt,
+        existingAccount: existing !== null && existing.deletedAt === null,
+      };
+    });
+  }
+
+  /**
+   * Someone new chooses their name and password and is signed straight in.
+   * Someone who already has an account here — invited to another branch —
+   * proves it with that account's own password, and then signs in as usual
+   * (two-step sign-in included): an invitation adds a role, it is never a way
+   * into somebody's account. (It used to be — accepting an invite sent to an
+   * existing address signed in as that person with any password at all.)
+   */
+  async acceptInvite(publicToken: string, dto: AcceptInviteDto): Promise<LoginResult | InviteJoined> {
     const { tenantId, secret } = this.parseInviteToken(publicToken);
 
     return this.prisma.withTenant(tenantId, async (tx) => {
@@ -464,73 +571,84 @@ export class AuthService {
       if (!invite || invite.acceptedAt !== null || invite.expiresAt < new Date()) {
         throw new BadRequestException({
           code: ErrorCode.INVITE_INVALID,
-          message: 'Invite is invalid, expired or already used',
+          message: 'This invitation has expired or was already used — ask your manager for a new one',
         });
       }
 
-      let user = await tx.user.findFirst({
-        where: { tenantId, email: invite.email, deletedAt: null },
-      });
-      if (!user) {
-        // Email is global now (see UserEmailIndex) — a real behavior
-        // change, not incidental: before this, the same address could be
-        // staff at multiple independent tenants; now it can't. Checked
-        // here, not left to the DB's unique constraint, so this comes back
-        // as a clean EMAIL_TAKEN instead of a raw 500.
-        const existingElsewhere = await tx.userEmailIndex.findUnique({ where: { email: invite.email } });
-        if (existingElsewhere && existingElsewhere.tenantId !== tenantId) {
-          throw new ConflictException({
-            code: ErrorCode.EMAIL_TAKEN,
-            message: 'This email already belongs to an account in a different organization',
-          });
+      const existing = await tx.user.findFirst({ where: { tenantId, email: invite.email } });
+      if (existing?.deletedAt) {
+        throw new ConflictException({ code: ErrorCode.CONFLICT, message: 'This account is deactivated — ask a manager to reactivate it on Staff Management' });
+      }
+      if (existing) {
+        const passwordOk = await bcrypt.compare(dto.password, existing.passwordHash ?? DUMMY_HASH);
+        if (!passwordOk) {
+          throw new UnauthorizedException({ code: ErrorCode.INVALID_CREDENTIALS, message: 'That isn’t the password for this account' });
         }
+        await this.attachInvitedRole(tx, tenantId, existing.id, invite);
+        return { joined: true as const, email: existing.email };
+      }
 
-        const passwordHash = await bcrypt.hash(dto.password, BCRYPT_COST);
-        user = await tx.user.create({
-          data: {
-            tenantId,
-            email: invite.email,
-            passwordHash,
-            name: dto.name,
-            phone: dto.phone,
-            emailVerified: true, // receiving the invite email proves ownership
-          },
-        });
-        await tx.userEmailIndex.create({
-          data: { email: invite.email, tenantId, userId: user.id },
+      if (!dto.name || dto.name.trim().length < 2) {
+        throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: 'Enter your name' });
+      }
+      if (!STRONG_PASSWORD.test(dto.password)) {
+        throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: 'The password needs at least 8 characters, with an upper-case letter, a lower-case letter and a number' });
+      }
+      // Email is global now (see UserEmailIndex) — a real behavior
+      // change, not incidental: before this, the same address could be
+      // staff at multiple independent tenants; now it can't. Checked
+      // here, not left to the DB's unique constraint, so this comes back
+      // as a clean EMAIL_TAKEN instead of a raw 500.
+      const existingElsewhere = await tx.userEmailIndex.findUnique({ where: { email: invite.email } });
+      if (existingElsewhere && existingElsewhere.tenantId !== tenantId) {
+        throw new ConflictException({
+          code: ErrorCode.EMAIL_TAKEN,
+          message: 'This email already belongs to an account in a different organization',
         });
       }
 
-      // Idempotent role attach (re-inviting existing staff to a new branch is legal).
-      const existingAssignment = await tx.userBranchRole.findFirst({
-        where: { userId: user.id, roleId: invite.roleId, branchId: invite.branchId },
+      const passwordHash = await bcrypt.hash(dto.password, BCRYPT_COST);
+      const user = await tx.user.create({
+        data: {
+          tenantId,
+          email: invite.email,
+          passwordHash,
+          name: dto.name.trim(),
+          phone: dto.phone,
+          emailVerified: true, // the link reached this address, which proves it
+        },
       });
-      if (!existingAssignment) {
-        await tx.userBranchRole.create({
-          data: {
-            tenantId,
-            userId: user.id,
-            roleId: invite.roleId,
-            branchId: invite.branchId,
-          },
-        });
-      }
-
-      await tx.inviteToken.update({
-        where: { id: invite.id },
-        data: { acceptedAt: new Date() },
-      });
-      await this.audit(tx, tenantId, user.id, 'auth.accept_invite', 'user', user.id, {
-        inviteId: invite.id,
-        branchId: invite.branchId,
+      await tx.userEmailIndex.create({
+        data: { email: invite.email, tenantId, userId: user.id },
       });
 
-      const roles = await this.loadRolesClaim(tx, user.id);
-      return this.buildLoginResult(tx, user, roles);
+      await this.attachInvitedRole(tx, tenantId, user.id, invite);
+      return this.startSession(tx, user);
     });
   }
 
-  /** Generates the stored secret + public token for an invite row. */
+  /** The invited role, once — re-inviting someone to a branch they already work at changes nothing. */
+  private async attachInvitedRole(tx: TenantTx, tenantId: string, userId: string, invite: { id: string; roleId: string; branchId: string | null }): Promise<void> {
+    const existingAssignment = await tx.userBranchRole.findFirst({ where: { userId, roleId: invite.roleId, branchId: invite.branchId } });
+    if (!existingAssignment) {
+      await tx.userBranchRole.create({ data: { tenantId, userId, roleId: invite.roleId, branchId: invite.branchId } });
+    }
+    await tx.inviteToken.update({ where: { id: invite.id }, data: { acceptedAt: new Date() } });
+    await this.audit(tx, tenantId, userId, 'auth.accept_invite', 'user', userId, { inviteId: invite.id, branchId: invite.branchId });
+  }
+
+  /** A fresh session for someone just proven — their roles read now, inside the caller's transaction. */
+  async startSession(tx: TenantTx, user: User): Promise<LoginResult> {
+    const roles = await this.loadRolesClaim(tx, user.id);
+    return this.buildLoginResult(tx, user, roles);
+  }
+
+  /**
+   * Generates the stored secret + public token for an invite row. Public
+   * invite tokens are `<tenantId>.<secret>` — the tenant prefix lets a
+   * pre-auth request establish RLS context; the secret half is what's stored
+   * in invite_tokens and does the actual authentication.
+   */
   createInviteSecret(tenantId: string): { secret: string; publicToken: string } {
     const secret = randomBytes(48).toString('hex');
     return { secret, publicToken: `${tenantId}.${secret}` };

@@ -11,6 +11,7 @@ import { CreateBrandDto, UpdateBrandDto } from './dto/brand.dto';
 import {
   CreateBranchDto,
   CancellationPolicyDto,
+  GuestTermsDto,
   NoShowPolicyDto,
   RegCardTemplateDto,
   UpdateBranchDto,
@@ -240,6 +241,33 @@ export class PropertyService {
         data: { cancellationPolicy: policy },
       });
       await this.audit(tx, tenantId, actorId, 'branch.cancellation_policy_updated', 'branch', branchId, policy);
+      return updated;
+    });
+  }
+
+  /**
+   * The privacy notice and booking terms shown on the booking pages. Blank
+   * means none: the page then asks nobody to accept anything. A field left
+   * out of the request stays as it is.
+   */
+  async setGuestTerms(tenantId: string, branchId: string, dto: GuestTermsDto, actorId: string): Promise<Branch> {
+    const clean = (text: string | null | undefined): string | null | undefined => (text === undefined ? undefined : text?.trim() || null);
+    const changes = { privacyNotice: clean(dto.privacyNotice), bookingTerms: clean(dto.bookingTerms) };
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const before = await this.assertBranch(tx, branchId);
+      const updated = await tx.branch.update({ where: { id: branchId }, data: changes });
+      await tx.auditLog.create({
+        data: {
+          tenantId,
+          branchId,
+          userId: actorId,
+          action: 'branch.guest_terms_updated',
+          entityType: 'branch',
+          entityId: branchId,
+          before: { privacyNotice: before.privacyNotice, bookingTerms: before.bookingTerms },
+          after: { privacyNotice: updated.privacyNotice, bookingTerms: updated.bookingTerms },
+        },
+      });
       return updated;
     });
   }

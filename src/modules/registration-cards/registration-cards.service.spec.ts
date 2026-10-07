@@ -174,6 +174,12 @@ describe('RegistrationCardsService', () => {
       expect(tx.registrationCard.update).not.toHaveBeenCalled();
     });
 
+    it('rejects signing a card whose guest details were removed after the retention period', async () => {
+      tx.registrationCard.findFirst.mockResolvedValue({ id: 'card-1', signedAt: null, purgedAt: new Date(), branchId: BRANCH_ID, reservationId: RESERVATION_ID });
+      await expect(service.signCard(TENANT_ID, 'card-1', { signatureData: SIGNATURE_PNG }, ACTOR_ID)).rejects.toThrow(/retention period/);
+      expect(tx.registrationCard.update).not.toHaveBeenCalled();
+    });
+
     it('generates and encrypts a PDF, persisting the storage URL as documentUrl', async () => {
       tx.registrationCard.findFirst.mockResolvedValue({ id: 'card-1', signedAt: null, branchId: BRANCH_ID, reservationId: RESERVATION_ID });
       const card = await service.signCard(TENANT_ID, 'card-1', { signatureData: SIGNATURE_PNG }, ACTOR_ID);

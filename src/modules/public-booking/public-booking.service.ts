@@ -57,6 +57,9 @@ export interface PublicPropertyInfo {
   brandName: string;
   /** Guest-facing by nature — a guest has to be able to read the terms before booking. */
   cancellationPolicy: { summary: string; freeCancellationHours: number; allowOnlineCancellation: boolean };
+  /** The property's own words, as the owner wrote them; null when there are none. A booking needs them accepted when either is set. */
+  privacyNotice: string | null;
+  bookingTerms: string | null;
 }
 
 export interface PublicQuote {
@@ -308,6 +311,8 @@ export class PublicBookingService {
           checkOutTime: true,
           address: true,
           cancellationPolicy: true,
+          privacyNotice: true,
+          bookingTerms: true,
           brand: { select: { name: true } },
         },
       });
@@ -330,6 +335,8 @@ export class PublicBookingService {
           freeCancellationHours: cancellation.freeCancellationHours,
           allowOnlineCancellation: cancellation.allowOnlineCancellation,
         },
+        privacyNotice: branch.privacyNotice,
+        bookingTerms: branch.bookingTerms,
       };
     });
   }
@@ -468,6 +475,18 @@ export class PublicBookingService {
   async createReservation(slug: string, dto: PublicCreateReservationDto): Promise<PublicBookingConfirmation> {
     const { tenantId, branchId } = await this.resolveBookableBranch(slug);
     this.assertNotInThePast(dto.checkInDate);
+    // A property that has published terms or a privacy notice books only a
+    // guest who agreed to them — checked before anything is held.
+    const terms = await this.prisma.withTenant(tenantId, (tx) =>
+      tx.branch.findFirstOrThrow({ where: { id: branchId }, select: { privacyNotice: true, bookingTerms: true } }),
+    );
+    const termsRequired = Boolean(terms.privacyNotice || terms.bookingTerms);
+    if (termsRequired && dto.acceptTerms !== true) {
+      throw new BadRequestException({
+        code: ErrorCode.VALIDATION_FAILED,
+        message: 'Please read and accept the booking terms and privacy notice to book',
+      });
+    }
 
     const reservation = await this.reservationsService.createReservation(
       tenantId,
@@ -492,6 +511,11 @@ export class PublicBookingService {
     // of a marketing preference.
     if (dto.marketingOptIn) {
       await this.prisma.withTenant(tenantId, (tx) => this.recordMarketingOptIn(tx, reservation.guestId, 'booking_engine'));
+    }
+    // When they agreed. Which words they agreed to is in the audit log: every
+    // change to the terms is recorded there, before and after, with its time.
+    if (termsRequired) {
+      await this.prisma.withTenant(tenantId, (tx) => tx.reservation.update({ where: { id: reservation.id }, data: { termsAcceptedAt: new Date() } }));
     }
 
     return this.toConfirmation(tenantId, reservation);

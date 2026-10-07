@@ -78,6 +78,11 @@ services:
       # This API's public address — marketing emails' pixel, links and unsubscribe point here.
       - key: PUBLIC_API_BASE_URL
         sync: false
+      # The web app's public address (the Vercel URL) — staff invitations,
+      # password resets, email confirmation and guests' "Manage your booking"
+      # links point here. Required: the API won't start in production without it.
+      - key: PUBLIC_WEB_BASE_URL
+        sync: false
       # Email: nothing is sent until SMTP_HOST is set (any provider's SMTP —
       # Resend, Postmark, Amazon SES…). MAIL_FROM is required with it.
       - key: SMTP_HOST

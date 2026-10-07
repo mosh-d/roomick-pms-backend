@@ -136,6 +136,9 @@ export class RegistrationCardsService {
       if (card.signedAt) {
         throw new ConflictException({ code: ErrorCode.CONFLICT, message: 'This card is already signed' });
       }
+      if (card.purgedAt) {
+        throw new ConflictException({ code: ErrorCode.CONFLICT, message: 'This card’s guest details were removed after the retention period — it can’t be signed now' });
+      }
       const signed = await tx.registrationCard.update({
         where: { id: cardId },
         data: { signatureData: dto.signatureData, signedAt: new Date(), witnessedBy: actorId },

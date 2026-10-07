@@ -25,6 +25,15 @@ export const envValidationSchema = Joi.object({
   // unsubscribe link in a marketing email are absolute URLs, and they are baked into a
   // message that outlives any request. Defaults to http://localhost:<PORT> for local dev.
   PUBLIC_API_BASE_URL: Joi.string().uri().allow('').optional(),
+  // Where people reach the web app — the links in invitation, password reset and
+  // verification emails, and a guest's "Manage your booking", point here. Required in
+  // production, where defaulting to localhost would send people nowhere; local
+  // development defaults to http://localhost:3001.
+  PUBLIC_WEB_BASE_URL: Joi.when('NODE_ENV', {
+    is: 'production',
+    then: Joi.string().uri({ scheme: ['https', 'http'] }).required(),
+    otherwise: Joi.string().uri({ scheme: ['https', 'http'] }).allow('').optional(),
+  }),
   // Optional — email goes out through this SMTP server once SMTP_HOST is set (any
   // provider: Resend, Postmark, Amazon SES, Mailtrap…); without it every message is
   // only written to the log. Port 465 is implicit TLS, anything else upgrades with STARTTLS.

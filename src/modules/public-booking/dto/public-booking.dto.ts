@@ -121,6 +121,13 @@ export class PublicCreateReservationDto {
   @IsOptional()
   @IsBoolean()
   marketingOptIn?: boolean;
+
+  @ApiPropertyOptional({
+    description: 'The guest ticked "I agree to the booking terms and privacy notice". Required when the property has published either.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  acceptTerms?: boolean;
 }
 
 /**

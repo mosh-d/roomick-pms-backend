@@ -1,6 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { GdprType } from '@prisma/client';
-import { IsIn, IsOptional, IsString, IsUUID, MaxLength } from 'class-validator';
+import { IsIn, IsInt, IsOptional, IsString, IsUUID, Max, MaxLength, Min, ValidateIf } from 'class-validator';
 
 export class CreateGdprRequestDto {
   @ApiProperty()
@@ -39,4 +39,14 @@ export class UpdateGdprRequestStatusDto {
   @IsString()
   @MaxLength(1000)
   notes?: string;
+}
+
+/** How long registration cards and guest ID documents are kept after a stay. */
+export class RetentionDto {
+  @ApiProperty({ nullable: true, example: 24, description: 'Months, 6 to 240; null keeps everything (the default)' })
+  @ValidateIf((o: RetentionDto) => o.months !== null)
+  @IsInt()
+  @Min(6)
+  @Max(240)
+  months!: number | null;
 }

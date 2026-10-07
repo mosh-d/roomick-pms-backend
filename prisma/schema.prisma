@@ -295,31 +295,35 @@ enum GdprStatus {
 // ---------------------------------------------------------------------------
 
 model Tenant {
-  id            String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  id                      String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   // Backend-internal identifier only — auto-generated at registration
   // (slugified groupName, retried with a random suffix on collision, see
   // AuthService.register), never user-typed or shown. Login no longer
   // uses it at all (see UserEmailIndex below); nothing else in the app
   // consumes it as a real subdomain/URL either.
-  subdomain     String       @unique @db.VarChar(63)
-  groupName     String       @db.VarChar(200)
-  brandMode     BrandMode
-  status        TenantStatus @default(trial)
-  trialEndsAt   DateTime?    @db.Timestamptz(6)
+  subdomain               String       @unique @db.VarChar(63)
+  groupName               String       @db.VarChar(200)
+  brandMode               BrandMode
+  status                  TenantStatus @default(trial)
+  trialEndsAt             DateTime?    @db.Timestamptz(6)
   // Owner-supplied country at signup (ISO 3166-1 alpha-2, e.g. "NG") —
   // reporting/analytics only for now (which countries onboard from), not
   // consumed by any business logic yet. Optional: not every signup is
   // guaranteed to supply it.
-  country       String?      @db.VarChar(2)
+  country                 String?      @db.VarChar(2)
   // Demo tenants (self-serve "try it" signups, not a sales-assisted trial):
   // auto-expire and get swept by a scheduled job (see
   // TenantsService.deleteOrganization / the demo-cleanup cron), or a user
   // can trigger the same deletion early via DELETE /tenants/:id. Real
   // tenants never set these.
-  isDemo        Boolean      @default(false)
-  demoExpiresAt DateTime?    @db.Timestamptz(6)
-  createdAt     DateTime     @default(now()) @db.Timestamptz(6)
-  updatedAt     DateTime     @updatedAt @db.Timestamptz(6)
+  isDemo                  Boolean      @default(false)
+  // How long registration cards and guest ID documents are kept after a
+  // stay ends, in months; NULL keeps them. Set on Security & Roles →
+  // Document Retention, applied nightly (RetentionService).
+  documentRetentionMonths Int?         @db.SmallInt
+  demoExpiresAt           DateTime?    @db.Timestamptz(6)
+  createdAt               DateTime     @default(now()) @db.Timestamptz(6)
+  updatedAt               DateTime     @updatedAt @db.Timestamptz(6)
 
   users                    User[]
   roles                    Role[]
@@ -378,6 +382,7 @@ model Tenant {
   campaignRecipients       CampaignRecipient[]
   integrationConnections   IntegrationConnection[]
   refreshTokens            RefreshToken[]
+  passwordResetTokens      PasswordResetToken[]
   reportTemplates          ReportTemplate[]
   branchPageAccess         BranchPageAccess[]
 
@@ -409,41 +414,42 @@ model User {
 
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict)
 
-  branchRoles                UserBranchRole[]    @relation("UserBranchRoleUser")
-  branchRolesAssigned        UserBranchRole[]    @relation("UserBranchRoleAssignedBy")
+  branchRoles                UserBranchRole[]     @relation("UserBranchRoleUser")
+  branchRolesAssigned        UserBranchRole[]     @relation("UserBranchRoleAssignedBy")
   inviteTokensSent           InviteToken[]
   roomsStatusChanged         Room[]
   roomBlocksCreated          RoomBlock[]
   reservationsCreated        Reservation[]
   rateAuditLogs              RateAuditLog[]
-  noShowsWaived              NoShowRecord[]      @relation("NoShowWaivedBy")
-  noShowsMarked              NoShowRecord[]      @relation("NoShowMarkedBy")
+  noShowsWaived              NoShowRecord[]       @relation("NoShowWaivedBy")
+  noShowsMarked              NoShowRecord[]       @relation("NoShowMarkedBy")
   walkRecordsApproved        WalkRecord[]
-  lineItemsPosted            LineItem[]          @relation("LineItemPostedBy")
-  lineItemsVoided            LineItem[]          @relation("LineItemVoidedBy")
-  folioTransfersApproved     FolioTransfer[]     @relation("TransferApprovedBy")
-  folioTransfersReversed     FolioTransfer[]     @relation("TransferReversedBy")
-  paymentsRecorded           Payment[]           @relation("PaymentRecordedBy")
-  paymentsVoided             Payment[]           @relation("PaymentVoidedBy")
-  refundsRequested           Refund[]            @relation("RefundRequestedBy")
-  refundsApproved            Refund[]            @relation("RefundApprovedBy")
-  refundsPaidOut             Refund[]            @relation("RefundPaidOutBy")
-  reportTemplates            ReportTemplate[]    @relation("ReportTemplateCreatedBy")
-  housekeepingTasksAssigned  HousekeepingTask[]  @relation("HkAssignee")
-  housekeepingTasksCompleted HousekeepingTask[]  @relation("HkCompletedBy")
+  lineItemsPosted            LineItem[]           @relation("LineItemPostedBy")
+  lineItemsVoided            LineItem[]           @relation("LineItemVoidedBy")
+  folioTransfersApproved     FolioTransfer[]      @relation("TransferApprovedBy")
+  folioTransfersReversed     FolioTransfer[]      @relation("TransferReversedBy")
+  paymentsRecorded           Payment[]            @relation("PaymentRecordedBy")
+  paymentsVoided             Payment[]            @relation("PaymentVoidedBy")
+  refundsRequested           Refund[]             @relation("RefundRequestedBy")
+  refundsApproved            Refund[]             @relation("RefundApprovedBy")
+  refundsPaidOut             Refund[]             @relation("RefundPaidOutBy")
+  reportTemplates            ReportTemplate[]     @relation("ReportTemplateCreatedBy")
+  housekeepingTasksAssigned  HousekeepingTask[]   @relation("HkAssignee")
+  housekeepingTasksCompleted HousekeepingTask[]   @relation("HkCompletedBy")
   shifts                     Shift[]
   shiftIssuesResolved        ShiftIssue[]
-  maintenanceOrdersReported  MaintenanceOrder[]  @relation("MaintReportedBy")
-  maintenanceOrdersAssigned  MaintenanceOrder[]  @relation("MaintAssignedTo")
+  maintenanceOrdersReported  MaintenanceOrder[]   @relation("MaintReportedBy")
+  maintenanceOrdersAssigned  MaintenanceOrder[]   @relation("MaintAssignedTo")
   registrationCardsWitnessed RegistrationCard[]
   overbookingConfigsUpdated  OverbookingConfig[]
-  outletAssignments          UserOutlet[]        @relation("UserOutletUser")
-  outletAssignmentsMade      UserOutlet[]        @relation("UserOutletAssignedBy")
+  outletAssignments          UserOutlet[]         @relation("UserOutletUser")
+  outletAssignmentsMade      UserOutlet[]         @relation("UserOutletAssignedBy")
   nightAuditsTriggered       NightAuditLog[]
   communicationsSent         CommunicationLog[]
   auditLogs                  AuditLog[]
   guestNotesAuthored         GuestNote[]
   refreshTokens              RefreshToken[]
+  passwordResetTokens        PasswordResetToken[]
 
   // Global, not per-tenant: login is plain email+password now (no
   // subdomain/tenant header to disambiguate), so one email can only ever
@@ -668,6 +674,10 @@ model Branch {
   // someone else to claim.
   bookingSlug          String? @unique @db.VarChar(63)
   bookingEngineEnabled Boolean @default(false)
+  // Shown on the public booking pages; a guest booking online accepts them
+  // (Reservation.termsAcceptedAt). NULL = none given yet.
+  privacyNotice        String?
+  bookingTerms         String?
 
   createdAt DateTime  @default(now()) @db.Timestamptz(6)
   updatedAt DateTime  @updatedAt @db.Timestamptz(6)
@@ -1268,6 +1278,9 @@ model Reservation {
   // gave.
   estimatedArrivalTime  String?            @db.VarChar(5)
   houseRulesAcceptedAt  DateTime?          @db.Timestamptz(6)
+  // A guest booking online accepted the property's booking terms and read
+  // its privacy notice then. NULL for staff bookings, or when there were none.
+  termsAcceptedAt       DateTime?          @db.Timestamptz(6)
   // The branch's cancellation policy as it stood when this booking was made —
   // the terms that apply to it, however the branch's policy changes later.
   // NULL for bookings made before snapshots existed (they use the branch's
@@ -1795,6 +1808,9 @@ model RegistrationCard {
   documentUrl   String? // S3 URL of generated PDF (encrypted bucket)
   generatedAt   DateTime  @default(now()) @db.Timestamptz(6)
   retainUntil   DateTime? @db.Date // regulatory retention end date
+  // The guest's details, signature and PDF were removed once the tenant's
+  // retention period after the stay ran out.
+  purgedAt      DateTime? @db.Timestamptz(6)
 
   tenant          Tenant       @relation(fields: [tenantId], references: [id], onDelete: Restrict)
   branch          Branch       @relation(fields: [branchId], references: [id], onDelete: Restrict)
@@ -2290,6 +2306,33 @@ model BackupRecord {
 /// a revoked or expired one is refused. Before this the refresh token was a
 /// bare 30-day JWT the server never saw again — nothing could end a session
 /// early, and signing out only forgot it in the browser.
+/**
+ * A link that lets someone set a new password — emailed when they ask
+ * ("Forgot your password?"), or made by an owner or manager to hand over.
+ * Only the SHA-256 of the secret is kept; the link is `<tenantId>.<secret>`
+ * so a request with no sign-in can find its tenant. Single use, short-lived,
+ * and a newer one retires older ones.
+ */
+model PasswordResetToken {
+  id        String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String    @db.Uuid
+  userId    String    @db.Uuid
+  tokenHash String    @unique @db.Char(64)
+  expiresAt DateTime  @db.Timestamptz(6)
+  usedAt    DateTime? @db.Timestamptz(6)
+  /**
+   * The owner or manager who made it; NULL when the person asked by email.
+   */
+  createdBy String?   @db.Uuid
+  createdAt DateTime  @default(now()) @db.Timestamptz(6)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("password_reset_tokens")
+}
+
 model RefreshToken {
   id        String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   tenantId  String    @db.Uuid
