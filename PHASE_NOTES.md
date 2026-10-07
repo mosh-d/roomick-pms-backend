@@ -1,5 +1,46 @@
 # Phase Notes
 
+## Owner's to-do batch: overstays, sessions, returning guests, GDPR erasure (2026-10-07)
+
+From `docs/to-do.md` and the owner's go-ahead on GDPR erasure. Migration `20261003040000`.
+
+### Overstaying guests are charged, and keep their room
+The owner asked why three guests overdue since August showed nothing under Overdue Balances. They did owe — 7,000 and 30,000 on two of them — but two things were wrong underneath:
+- **The night audit stopped charging at the booked departure date.** A guest still checked in after it got no more nights. The in-house PMS charges by occupancy, not by booking, and now so does this: everyone `checked_in` on the audit date is charged, and a night past their departure is labelled `Night Audit — overstay` so it stands out on the bill.
+- **The room went back on sale while they were still in it.** Inventory counted a stay only up to its booked departure. A guest still checked in after their departure (past the branch's own check-out time on that day — the same moment Alerts calls them overdue) now holds the room every night from then on, until they're checked out or the stay is extended (`ReservationsService.holdingStays`; the in-house PMS's own rule). This feeds every availability check: new bookings, modifying, the calendar, overbooking exposure.
+- **Missed nights were never audited.** The hourly sweep only ever closed yesterday, so a night the server was down (the owner's local machine, most of September) was skipped for good. It now closes every unaudited night since the branch's last audit, oldest first, up to a week back (`NightAuditService.datesToAudit`). A branch idle longer than that, or never audited, starts from yesterday — no sudden weeks of charges; those can still be run by hand.
+- **Alerts:** an overdue checkout row now carries what the guest owes (`balanceDue`, `folioId`, `currency`, from `FoliosService.primaryFolioBalances`). They are still in-house, so — as in the in-house PMS — they aren't repeated under Overdue Balances, which stays for guests who have left.
+- **Night audit preflight:** "No blocking maintenance issues" and "Night shift is open" said "module not built yet" though both modules exist. They now check for urgent work orders still open, and an open night shift.
+
+### Sessions end
+"I'm always logged in, even after months of inactivity" — the refresh token was a bare 30-day JWT the server never saw again, renewed on every use, so any visit within a month kept the session alive forever, and signing out only forgot it in the browser. Now, as in the Five Clover PMS:
+- **Refresh tokens are server-side sessions** (`refresh_tokens`, RLS-scoped, stored as SHA-256 hashes): each renewal retires the token used and issues a new one, conditionally, so two racing renewals can't both succeed; a retired, expired or unknown token is refused ("Your session has ended — sign in again"). Each carries a random `jti`, so two sign-ins in the same second can't collide.
+- **A week's life** (`JWT_REFRESH_TTL` default `7d`, was `30d`; `.env.example` updated). The browser ends an idle session after an hour on top of that (see the frontend's notes) — the server can't tell a person from a page polling.
+- **`POST /auth/logout`** revokes the session behind a refresh token, audited as `auth.logout`. Silent for a token that isn't a session.
+- Sessions that ended or expired over a week ago are pruned daily at 4am (`SessionCleanupScheduler`).
+- **Everyone signs in once more** after this ships: refresh tokens issued before it have no session row.
+
+### Returning guests by phone
+`GET /guests/search` matched name and email only. It now matches phone too, digits to digits with a leading local 0 dropped — "0803 123" finds "+234 803 123 4567" — from four digits up, and returns `vipLevel` for the suggestion list's badge. It feeds the returning-guest suggestions on Walk-In Booking and Create Reservation.
+
+### GDPR erasure is carried out, not just tracked
+The owner approved the recommendation: anonymise the guest, keep the financial record. `POST /gdpr/data-requests/:id/erase` (owners only):
+- **Erased:** name (to "Erased guest"), email, phone, nationality, every ID-document field and the stored ID photo, preferences, tags, notes, VIP level, marketing consent; the name, contact details, signature and PDF on each registration card; staff notes about the guest; the text of every message to or from them; special requests on their stays; and a bill's payer name/email where those were the guest's own. The profile is soft-deleted, so it drops out of lists and search.
+- **Kept:** reservations, bills, payments, the loyalty ledger and the audit trail — attached to no one identifiable.
+- **Refused** while a stay is booked or in progress, or money is still owed (the GDPR's own legal-claims exception) — the message says what to do first. Erasing twice is refused.
+- Stored files (ID photo, card PDFs) are deleted only after the transaction commits; `DocumentStorageAdapter` gained `remove`. The request completes itself with a dated note. The audit entry (`gdpr.guest_erased`) records counts, never the erased details.
+- Access and portability requests are unchanged; a request can still be marked completed by hand for work done outside Roomick.
+
+### Verified
+- **Checks:** `tsc` and `npm run lint` clean; **972 tests** in 52 suites (new: overstay charging and labelling, the catch-up dates, the preflight checks, an overstayer holding inventory and a guest due out today not holding tonight, overdue balances on alerts, session rotation/refusal/race/sign-out, phone search, erasure and its refusals).
+- **Live API, 18/18**, against real Postgres:
+  - a refresh token lasts a week; it renews once and is refused the second time; signing out ends it on the server;
+  - "0803 1234" finds "+234 803 123 4567"; booking a picked returning guest puts it on their profile — still one guest;
+  - a guest still checked in on their departure night is charged it, labelled an overstay;
+  - with the departure moved into the past, the room is held every night from now on (2 rooms → 1 for sale), and Alerts shows the guest owing 200,000 — not again under Overdue Balances;
+  - preflight flags an urgent work order and a missing night shift, and passes once a night shift opens;
+  - an erasure request erases the guest (no longer found by name or phone) and completes itself; erasing twice is refused; a guest still in the hotel is refused with the reason; the audit entry holds counts only.
+
 ## Tax rules: fixed amounts, taxes included in the price, and changing a rule safely (2026-10-03)
 
 Closes the gap the tax builder was waiting on: until now a branch could only have percentage taxes added on top, set through the API. The reference's Tax Rule Builder asks for more — **Type: Inclusive / Exclusive** and **Tax Rate: Fixed Rate / Percentage** per rule — and both are real billing behaviour, not labels. Migrations `20261003020000` and `20261003030000`.
