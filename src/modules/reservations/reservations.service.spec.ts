@@ -1570,6 +1570,67 @@ describe('ReservationsService', () => {
     });
   });
 
+  describe('checkInGroup — group check-in', () => {
+    const BLOCK_ID = '12121212-1212-4121-8121-121212121212';
+    const R1 = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    const R2 = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+    const ROOM_A = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+    const ROOM_B = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+    const dto = { assignments: [{ reservationId: R1, roomId: ROOM_A }, { reservationId: R2, roomId: ROOM_B }] };
+
+    beforeEach(() => {
+      tx.groupBlock.findFirst.mockResolvedValue({ id: BLOCK_ID, branchId: BRANCH_ID, name: 'Shell Conference', contactName: 'Kemi (Shell travel)' });
+      tx.reservation.findMany.mockImplementation(({ where }: { where: { id?: { in: string[] } } }) =>
+        Promise.resolve(where.id?.in ? where.id.in.map((id) => ({ id })) : []),
+      );
+      Object.assign(tx.reservation, { updateMany: jest.fn().mockResolvedValue({ count: 2 }) });
+      Object.assign(foliosService, { createAdditionalFolioInTx: jest.fn().mockResolvedValue({ id: 'master-folio' }) });
+      tx.reservation.findFirst.mockImplementation(({ where }: { where: { id: string } }) =>
+        Promise.resolve(reservation({ id: where.id, status: 'confirmed', roomId: null, groupBlockId: BLOCK_ID })),
+      );
+      tx.room.findFirst.mockImplementation(({ where }: { where: { id: string } }) =>
+        Promise.resolve({ id: where.id, number: where.id === ROOM_A ? '201' : '202', branchId: BRANCH_ID, roomTypeId: TYPE_ID, occupancyStatus: 'vacant', heldStatus: null, deletedAt: null }),
+      );
+      tx.reservation.update.mockImplementation(({ where, data }: { where: { id: string }; data: Record<string, unknown> }) =>
+        Promise.resolve(reservation({ id: where.id, ...data, guest: { id: GUEST_ID, name: 'Delegate' }, room: { number: data.roomId === ROOM_A ? '201' : '202' } })),
+      );
+    });
+
+    it('refuses one room for two guests, and a guest listed twice', async () => {
+      await expect(service.checkInGroup(TENANT_ID, BLOCK_ID, { assignments: [{ reservationId: R1, roomId: ROOM_A }, { reservationId: R2, roomId: ROOM_A }] }, ACTOR_ID)).rejects.toThrow(/same room/);
+      await expect(service.checkInGroup(TENANT_ID, BLOCK_ID, { assignments: [{ reservationId: R1, roomId: ROOM_A }, { reservationId: R1, roomId: ROOM_B }] }, ACTOR_ID)).rejects.toThrow(/listed twice/);
+    });
+
+    it("refuses a reservation that isn't in the group", async () => {
+      tx.reservation.findMany.mockResolvedValueOnce([{ id: R1 }]);
+      await expect(service.checkInGroup(TENANT_ID, BLOCK_ID, dto, ACTOR_ID)).rejects.toThrow(/not in this group/);
+      expect(tx.reservation.update).not.toHaveBeenCalled();
+    });
+
+    it('checks every guest into their room', async () => {
+      const result = await service.checkInGroup(TENANT_ID, BLOCK_ID, dto, ACTOR_ID);
+      expect(result.checkedIn).toHaveLength(2);
+      expect(tx.reservation.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: R1 }, data: expect.objectContaining({ status: 'checked_in', roomId: ROOM_A }) }));
+      expect(tx.reservation.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: R2 }, data: expect.objectContaining({ status: 'checked_in', roomId: ROOM_B }) }));
+      expect(result.masterFolioId).toBeNull();
+    });
+
+    it("a master bill opens on the lead's stay, paid by the organiser, and every guest's room nights go to it — before any night is posted", async () => {
+      const result = await service.checkInGroup(TENANT_ID, BLOCK_ID, { ...dto, masterBill: { leadReservationId: R1 } }, ACTOR_ID);
+      expect((foliosService as unknown as { createAdditionalFolioInTx: jest.Mock }).createAdditionalFolioInTx).toHaveBeenCalledWith(
+        tx,
+        TENANT_ID,
+        R1,
+        { label: 'Group — Shell Conference', payerName: 'Kemi (Shell travel)' },
+        ACTOR_ID,
+      );
+      const updateMany = (tx.reservation as unknown as { updateMany: jest.Mock }).updateMany;
+      expect(updateMany).toHaveBeenCalledWith({ where: { id: { in: [R1, R2] } }, data: { billToFolioId: 'master-folio' } });
+      expect(updateMany.mock.invocationCallOrder[0]).toBeLessThan(foliosService.postRoomChargeForDate.mock.invocationCallOrder[0]);
+      expect(result.masterFolioId).toBe('master-folio');
+    });
+  });
+
   describe('checkIn — Manual Room Override', () => {
     const SUITE_ID = '66666666-6666-4666-8666-666666666666';
     const suiteRoom = { id: ROOM_ID, number: '401', branchId: BRANCH_ID, roomTypeId: SUITE_ID, occupancyStatus: 'vacant', heldStatus: null, deletedAt: null };

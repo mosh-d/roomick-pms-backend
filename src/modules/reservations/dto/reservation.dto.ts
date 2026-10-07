@@ -1,6 +1,9 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
+  ArrayMaxSize,
+  ArrayMinSize,
+  IsArray,
   IsBoolean,
   IsIn,
   IsInt,
@@ -181,6 +184,39 @@ export class CheckInDto {
   @IsString()
   @MaxLength(300)
   overrideReason?: string;
+}
+
+export class GroupCheckInAssignmentDto {
+  @ApiProperty()
+  @IsUUID()
+  reservationId!: string;
+
+  @ApiProperty({ description: "A ready room of the group's room type" })
+  @IsUUID()
+  roomId!: string;
+}
+
+export class GroupMasterBillDto {
+  @ApiProperty({ description: "The lead guest — the group's master bill opens on their stay" })
+  @IsUUID()
+  leadReservationId!: string;
+}
+
+/** Group check-in: each arriving guest with their room, and optionally one master bill for the group's rooms. */
+export class GroupCheckInDto {
+  @ApiProperty({ type: [GroupCheckInAssignmentDto] })
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(200)
+  @ValidateNested({ each: true })
+  @Type(() => GroupCheckInAssignmentDto)
+  assignments!: GroupCheckInAssignmentDto[];
+
+  @ApiPropertyOptional({ type: GroupMasterBillDto, description: "Bill every guest's room nights to one bill on the lead guest's stay" })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => GroupMasterBillDto)
+  masterBill?: GroupMasterBillDto;
 }
 
 /** Room Move / Room Upgrade for a checked-in guest. */

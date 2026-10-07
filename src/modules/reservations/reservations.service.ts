@@ -31,6 +31,7 @@ import {
   CheckInDto,
   CreateReservationDto,
   ExtendStayDto,
+  GroupCheckInDto,
   ListReservationsQueryDto,
   ModifyReservationDto,
   ReinstateNoShowDto,
@@ -673,100 +674,168 @@ export class ReservationsService {
   // Lifecycle
   // -------------------------------------------------------------------------
   async checkIn(tenantId: string, reservationId: string, dto: CheckInDto, actorId: string) {
-    return this.prisma.withTenant(tenantId, async (tx) => {
-      const reservation = await this.findReservationOrThrow(tx, reservationId);
-      if (reservation.status !== 'confirmed') {
-        throw new ConflictException({
-          code: ErrorCode.INVALID_STATUS_TRANSITION,
-          message: `Cannot check in a reservation with status "${reservation.status}"`,
+    return this.prisma.withTenant(tenantId, (tx) => this.checkInInTx(tx, tenantId, reservationId, dto, actorId));
+  }
+
+  /** `checkIn` inside a caller's transaction — group check-in checks a whole group in through here, all or none. */
+  async checkInInTx(tx: TenantTx, tenantId: string, reservationId: string, dto: CheckInDto, actorId: string) {
+    const reservation = await this.findReservationOrThrow(tx, reservationId);
+    if (reservation.status !== 'confirmed') {
+      throw new ConflictException({
+        code: ErrorCode.INVALID_STATUS_TRANSITION,
+        message: `Cannot check in a reservation with status "${reservation.status}"`,
+      });
+    }
+    // Invariant: `roomId` is only ever set AT check-in in this reduced
+    // scope (no pre-assign step exists yet) — so a room's live
+    // `occupancyStatus` alone is a complete "is anyone in here" signal.
+    // This breaks silently the moment a future pass adds a pre-assign
+    // step ahead of check-in; re-check this comment if that lands.
+    const roomId = reservation.roomId ?? dto.roomId;
+    if (!roomId) {
+      throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: 'roomId is required — this reservation has no room assigned yet' });
+    }
+
+    const room = await tx.room.findFirst({ where: { id: roomId, deletedAt: null } });
+    if (!room) {
+      throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Room not found' });
+    }
+
+    // Manual Room Override (ref: "Receptionist selects room manually"): a
+    // room of another type, with the reason on record. The stay moves to
+    // that type — so its inventory is counted where the guest really is —
+    // at the rate they booked, pinned so a later extension can't re-price
+    // it at the new type. The new type needs a room to spare for the stay.
+    const overrideReason = dto.overrideReason?.trim() || undefined;
+    const typeChanges = room.roomTypeId !== reservation.roomTypeId;
+    let override: Prisma.ReservationUncheckedUpdateInput = {};
+    if (typeChanges && room.branchId === reservation.branchId) {
+      const [booked, given] = await Promise.all([
+        this.assertRoomType(tx, reservation.branchId, reservation.roomTypeId),
+        this.assertRoomType(tx, reservation.branchId, room.roomTypeId),
+      ]);
+      if (!overrideReason) {
+        throw new BadRequestException({
+          code: ErrorCode.VALIDATION_FAILED,
+          message: `Room ${room.number} is a ${given.name} and this booking is for a ${booked.name} — give the reason for the override, or pick a ${booked.name} room`,
         });
       }
-      // Invariant: `roomId` is only ever set AT check-in in this reduced
-      // scope (no pre-assign step exists yet) — so a room's live
-      // `occupancyStatus` alone is a complete "is anyone in here" signal.
-      // This breaks silently the moment a future pass adds a pre-assign
-      // step ahead of check-in; re-check this comment if that lands.
-      const roomId = reservation.roomId ?? dto.roomId;
-      if (!roomId) {
-        throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: 'roomId is required — this reservation has no room assigned yet' });
+      await this.assertAvailableForStay(tx, reservation.branchId, room.roomTypeId, reservation.checkInDate, reservation.checkOutDate, reservationId);
+      override = {
+        roomTypeId: room.roomTypeId,
+        ...(reservation.overrideRate
+          ? {}
+          : {
+              overrideRate: new Prisma.Decimal(reservation.confirmedRate).div(this.stayNights(reservation)).toDecimalPlaces(2),
+              overrideReason: `Given a ${given.name} at check-in at the booked rate — ${overrideReason}`.slice(0, 500),
+            }),
+      };
+    }
+    await this.assertRoomCheckInReady(tx, room, reservation.branchId, typeChanges ? room.roomTypeId : reservation.roomTypeId, reservation.checkInDate, reservation.checkOutDate);
+
+    const updated = await tx.reservation.update({
+      where: { id: reservationId },
+      data: { status: 'checked_in', roomId, actualCheckIn: new Date(), ...override },
+      include: RESERVATION_INCLUDE,
+    });
+    await this.roomsService.applyReservationOccupancy(tx, tenantId, roomId, { occupancyStatus: 'occupied' }, actorId);
+
+    // Open the folio and accrue the ARRIVAL NIGHT only — not the whole
+    // stay. Each subsequent night is posted by night audit through the
+    // same `postRoomChargeForDate`, which refuses to double-post a date
+    // that's already billed. See its own comment for why the rate comes
+    // off the reservation rather than the room type.
+    const folio = await this.foliosService.ensurePrimaryFolio(tx, updated, actorId);
+    await this.foliosService.postRoomChargeForDate(tx, updated, folio, updated.checkInDate, 'Check-in', actorId);
+
+    if (dto.idDocument) {
+      await this.guestsService.recordIdDocumentInTx(tx, tenantId, reservation.branchId, updated.guestId, dto.idDocument, actorId);
+    }
+
+    // "Auto-generated when check-in is triggered" (ref) — a legal
+    // document, not an afterthought, so it's part of THIS transaction,
+    // not a fire-and-forget follow-up call.
+    const branch = await this.propertyService.assertBranch(tx, reservation.branchId);
+    await this.registrationCardsService.generateCardInTx(tx, tenantId, { ...updated, branch: { currency: updated.branch.currency, regCardTemplate: branch.regCardTemplate } }, actorId);
+
+    await this.audit(tx, tenantId, reservation.branchId, actorId, 'reservation.checked_in', reservationId, {
+      roomId,
+      ...(overrideReason ? { overrideReason } : {}),
+      ...(typeChanges ? { bookedRoomTypeId: reservation.roomTypeId, roomTypeId: room.roomTypeId } : {}),
+    });
+    await this.commsLogService.logAutomatedInTx(tx, tenantId, reservation.branchId, {
+      reservationId,
+      guestId: updated.guestId,
+      channel: 'email',
+      subject: `Welcome — ${updated.confirmationNumber}`,
+      body: `Welcome! You're checked in to room ${room.number} (${updated.roomType.name}). Check-out is ${updated.checkOutDate.toISOString().slice(0, 10)}.`,
+      trigger: 'checkin_receipt',
+    });
+    return updated;
+  }
+
+  /**
+   * Group check-in — a group block's arrivals checked in together, each
+   * into the room the desk gives them, all or none: one room that turns out
+   * to be taken leaves the whole group to try again, never half of it in.
+   *
+   * **Master bill** (optional): the group's room nights go on one bill on
+   * the lead guest's stay, paid by the group's organiser (the block's
+   * contact). Each guest's incidentals stay on their own bill. Every guest
+   * in this check-in is routed to it (`billToFolioId`), from tonight's night
+   * on — the arrival night included.
+   */
+  async checkInGroup(tenantId: string, blockId: string, dto: GroupCheckInDto, actorId: string) {
+    const reservationIds = dto.assignments.map((a) => a.reservationId);
+    const roomIds = dto.assignments.map((a) => a.roomId);
+    if (new Set(reservationIds).size !== reservationIds.length) {
+      throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: 'A guest is listed twice' });
+    }
+    if (new Set(roomIds).size !== roomIds.length) {
+      throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: 'Two guests have the same room — give each their own' });
+    }
+
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const block = await tx.groupBlock.findFirst({ where: { id: blockId } });
+      if (!block) throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Group block not found' });
+      const members = await tx.reservation.findMany({ where: { id: { in: reservationIds }, groupBlockId: blockId, deletedAt: null }, select: { id: true } });
+      if (members.length !== reservationIds.length) {
+        throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: 'Some of these reservations are not in this group' });
       }
 
-      const room = await tx.room.findFirst({ where: { id: roomId, deletedAt: null } });
-      if (!room) {
-        throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Room not found' });
+      let masterFolioId: string | null = null;
+      if (dto.masterBill) {
+        const lead = await tx.reservation.findFirst({ where: { id: dto.masterBill.leadReservationId, groupBlockId: blockId, deletedAt: null } });
+        if (!lead) throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: "The lead guest's stay is not in this group" });
+        const master = await this.foliosService.createAdditionalFolioInTx(
+          tx,
+          tenantId,
+          lead.id,
+          { label: `Group — ${block.name}`.slice(0, 100), payerName: block.contactName ?? undefined },
+          actorId,
+        );
+        masterFolioId = master.id;
+        await tx.reservation.updateMany({ where: { id: { in: reservationIds } }, data: { billToFolioId: master.id } });
       }
 
-      // Manual Room Override (ref: "Receptionist selects room manually"): a
-      // room of another type, with the reason on record. The stay moves to
-      // that type — so its inventory is counted where the guest really is —
-      // at the rate they booked, pinned so a later extension can't re-price
-      // it at the new type. The new type needs a room to spare for the stay.
-      const overrideReason = dto.overrideReason?.trim() || undefined;
-      const typeChanges = room.roomTypeId !== reservation.roomTypeId;
-      let override: Prisma.ReservationUncheckedUpdateInput = {};
-      if (typeChanges && room.branchId === reservation.branchId) {
-        const [booked, given] = await Promise.all([
-          this.assertRoomType(tx, reservation.branchId, reservation.roomTypeId),
-          this.assertRoomType(tx, reservation.branchId, room.roomTypeId),
-        ]);
-        if (!overrideReason) {
-          throw new BadRequestException({
-            code: ErrorCode.VALIDATION_FAILED,
-            message: `Room ${room.number} is a ${given.name} and this booking is for a ${booked.name} — give the reason for the override, or pick a ${booked.name} room`,
-          });
-        }
-        await this.assertAvailableForStay(tx, reservation.branchId, room.roomTypeId, reservation.checkInDate, reservation.checkOutDate, reservationId);
-        override = {
-          roomTypeId: room.roomTypeId,
-          ...(reservation.overrideRate
-            ? {}
-            : {
-                overrideRate: new Prisma.Decimal(reservation.confirmedRate).div(this.stayNights(reservation)).toDecimalPlaces(2),
-                overrideReason: `Given a ${given.name} at check-in at the booked rate — ${overrideReason}`.slice(0, 500),
-              }),
-        };
+      const checkedIn: Array<{ reservationId: string; confirmationNumber: string; guestName: string; roomNumber: string | null }> = [];
+      for (const assignment of dto.assignments) {
+        const stay = await this.checkInInTx(tx, tenantId, assignment.reservationId, { roomId: assignment.roomId }, actorId);
+        checkedIn.push({ reservationId: stay.id, confirmationNumber: stay.confirmationNumber, guestName: stay.guest.name, roomNumber: stay.room?.number ?? null });
       }
-      await this.assertRoomCheckInReady(tx, room, reservation.branchId, typeChanges ? room.roomTypeId : reservation.roomTypeId, reservation.checkInDate, reservation.checkOutDate);
 
-      const updated = await tx.reservation.update({
-        where: { id: reservationId },
-        data: { status: 'checked_in', roomId, actualCheckIn: new Date(), ...override },
-        include: RESERVATION_INCLUDE,
+      await tx.auditLog.create({
+        data: {
+          tenantId,
+          branchId: block.branchId,
+          userId: actorId,
+          action: 'group_block.checked_in',
+          entityType: 'group_block',
+          entityId: blockId,
+          after: { reservationIds, count: checkedIn.length, ...(masterFolioId ? { masterFolioId } : {}) },
+        },
       });
-      await this.roomsService.applyReservationOccupancy(tx, tenantId, roomId, { occupancyStatus: 'occupied' }, actorId);
-
-      // Open the folio and accrue the ARRIVAL NIGHT only — not the whole
-      // stay. Each subsequent night is posted by night audit through the
-      // same `postRoomChargeForDate`, which refuses to double-post a date
-      // that's already billed. See its own comment for why the rate comes
-      // off the reservation rather than the room type.
-      const folio = await this.foliosService.ensurePrimaryFolio(tx, updated, actorId);
-      await this.foliosService.postRoomChargeForDate(tx, updated, folio, updated.checkInDate, 'Check-in', actorId);
-
-      if (dto.idDocument) {
-        await this.guestsService.recordIdDocumentInTx(tx, tenantId, reservation.branchId, updated.guestId, dto.idDocument, actorId);
-      }
-
-      // "Auto-generated when check-in is triggered" (ref) — a legal
-      // document, not an afterthought, so it's part of THIS transaction,
-      // not a fire-and-forget follow-up call.
-      const branch = await this.propertyService.assertBranch(tx, reservation.branchId);
-      await this.registrationCardsService.generateCardInTx(tx, tenantId, { ...updated, branch: { currency: updated.branch.currency, regCardTemplate: branch.regCardTemplate } }, actorId);
-
-      await this.audit(tx, tenantId, reservation.branchId, actorId, 'reservation.checked_in', reservationId, {
-        roomId,
-        ...(overrideReason ? { overrideReason } : {}),
-        ...(typeChanges ? { bookedRoomTypeId: reservation.roomTypeId, roomTypeId: room.roomTypeId } : {}),
-      });
-      await this.commsLogService.logAutomatedInTx(tx, tenantId, reservation.branchId, {
-        reservationId,
-        guestId: updated.guestId,
-        channel: 'email',
-        subject: `Welcome — ${updated.confirmationNumber}`,
-        body: `Welcome! You're checked in to room ${room.number} (${updated.roomType.name}). Check-out is ${updated.checkOutDate.toISOString().slice(0, 10)}.`,
-        trigger: 'checkin_receipt',
-      });
-      return updated;
+      return { checkedIn, masterFolioId };
     });
   }
 

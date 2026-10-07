@@ -282,6 +282,21 @@ describe('BackupsService', () => {
       expect(tokenRow.userId).not.toBe('user-1');
     });
 
+    it("restores a stay's link to its group's master bill after both rows exist — the one FK that closes a cycle", async () => {
+      mockStoredSnapshot({
+        ...seedSnapshot(),
+        Reservation: [{ id: 'res-1', tenantId: TENANT_ID, branchId: 'branch-1', guestId: 'guest-1', roomTypeId: 'rt-1', roomId: null, confirmationNumber: 'RES-1', billToFolioId: 'folio-1' }],
+        Folio: [{ id: 'folio-1', tenantId: TENANT_ID, branchId: 'branch-1', reservationId: 'res-1', guestId: 'guest-1', label: 'Group — Shell' }],
+      });
+      const result = await service.runRestoreDrill('backup-1');
+      expect(result.ok).toBe(true);
+      const reservationRow = (tx.reservation.createMany.mock.calls[0][0].data as Array<Record<string, unknown>>)[0];
+      const folioRow = (tx.folio.createMany.mock.calls[0][0].data as Array<Record<string, unknown>>)[0];
+      expect(reservationRow.billToFolioId).toBeNull();
+      expect(folioRow.reservationId).toBe(reservationRow.id);
+      expect(tx.reservation.update).toHaveBeenCalledWith({ where: { id: reservationRow.id }, data: { billToFolioId: folioRow.id } });
+    });
+
     it('still cleans up the throwaway tenant even when an insert fails partway through', async () => {
       mockStoredSnapshot(seedSnapshot());
       tx.reservation.createMany.mockRejectedValueOnce(new Error('constraint violation'));

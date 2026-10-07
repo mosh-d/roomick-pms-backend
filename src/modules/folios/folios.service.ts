@@ -140,6 +140,7 @@ export class FoliosService {
       },
     });
     if (already) return null;
+    const billTo = await this.routedFolio(tx, reservation, folio);
 
     const nights = Math.max(
       1,
@@ -161,7 +162,7 @@ export class FoliosService {
     return this.writeChargeWithTaxes(tx, {
       tenantId: reservation.tenantId,
       branchId: reservation.branchId,
-      folioId: folio.id,
+      folioId: billTo.id,
       description,
       amount: perNight,
       chargeType: 'room',
@@ -169,6 +170,18 @@ export class FoliosService {
       stayReservationId: reservation.id,
       actorId,
     });
+  }
+
+  /**
+   * Where a stay's room nights are billed: the bill they're routed to — a
+   * group's master bill (`Reservation.billToFolioId`) — while it's open at
+   * the same property, else the bill given. A master bill that's been
+   * settled stops taking nights; they go back on the guest's own.
+   */
+  private async routedFolio(tx: TenantTx, reservation: Reservation, folio: Folio): Promise<Folio> {
+    if (!reservation.billToFolioId || reservation.billToFolioId === folio.id) return folio;
+    const routed = await tx.folio.findFirst({ where: { id: reservation.billToFolioId, deletedAt: null } });
+    return routed && routed.status !== 'settled' && routed.branchId === reservation.branchId ? routed : folio;
   }
 
   /**
@@ -542,38 +555,47 @@ export class FoliosService {
     input: { label: string; payerName?: string; corporateAccountId?: string },
     actorId: string,
   ): Promise<Folio> {
-    return this.prisma.withTenant(tenantId, async (tx) => {
-      const reservation = await tx.reservation.findFirst({ where: { id: reservationId, deletedAt: null } });
-      if (!reservation) {
-        throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Reservation not found' });
+    return this.prisma.withTenant(tenantId, (tx) => this.createAdditionalFolioInTx(tx, tenantId, reservationId, input, actorId));
+  }
+
+  /** `createAdditionalFolio` inside a caller's transaction — group check-in opens the group's master bill through here. */
+  async createAdditionalFolioInTx(
+    tx: TenantTx,
+    tenantId: string,
+    reservationId: string,
+    input: { label: string; payerName?: string; corporateAccountId?: string },
+    actorId: string,
+  ): Promise<Folio> {
+    const reservation = await tx.reservation.findFirst({ where: { id: reservationId, deletedAt: null } });
+    if (!reservation) {
+      throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Reservation not found' });
+    }
+    if (input.corporateAccountId) {
+      const account = await tx.corporateAccount.findFirst({ where: { id: input.corporateAccountId, isActive: true }, select: { id: true } });
+      if (!account) {
+        throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: 'That company account is not active — pick another, or leave it blank' });
       }
-      if (input.corporateAccountId) {
-        const account = await tx.corporateAccount.findFirst({ where: { id: input.corporateAccountId, isActive: true }, select: { id: true } });
-        if (!account) {
-          throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: 'That company account is not active — pick another, or leave it blank' });
-        }
-      }
-      const folio = await tx.folio.create({
-        data: {
-          tenantId,
-          branchId: reservation.branchId,
-          reservationId,
-          guestId: reservation.guestId,
-          label: input.label.trim(),
-          payerName: input.payerName?.trim() || null,
-          corporateAccountId: input.corporateAccountId ?? null,
-          status: 'open',
-          openedAt: new Date(),
-        },
-      });
-      await this.audit(tx, tenantId, reservation.branchId, actorId, 'folio.opened', folio.id, {
+    }
+    const folio = await tx.folio.create({
+      data: {
+        tenantId,
+        branchId: reservation.branchId,
         reservationId,
-        label: folio.label,
-        ...(folio.payerName ? { payerName: folio.payerName } : {}),
-        ...(folio.corporateAccountId ? { corporateAccountId: folio.corporateAccountId } : {}),
-      });
-      return folio;
+        guestId: reservation.guestId,
+        label: input.label.trim(),
+        payerName: input.payerName?.trim() || null,
+        corporateAccountId: input.corporateAccountId ?? null,
+        status: 'open',
+        openedAt: new Date(),
+      },
     });
+    await this.audit(tx, tenantId, reservation.branchId, actorId, 'folio.opened', folio.id, {
+      reservationId,
+      label: folio.label,
+      ...(folio.payerName ? { payerName: folio.payerName } : {}),
+      ...(folio.corporateAccountId ? { corporateAccountId: folio.corporateAccountId } : {}),
+    });
+    return folio;
   }
 
   /**

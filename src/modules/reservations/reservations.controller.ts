@@ -12,6 +12,7 @@ import {
   CheckInDto,
   CreateReservationDto,
   ExtendStayDto,
+  GroupCheckInDto,
   ListReservationsQueryDto,
   ModifyReservationDto,
   MoveRoomDto,
@@ -154,6 +155,20 @@ export class ReservationsController {
     @Body() dto: CheckInDto,
   ): ReturnType<ReservationsService['checkIn']> {
     return this.reservationsService.checkIn(tenantId, reservationId, dto, user.sub);
+  }
+
+  @Post('group-blocks/:blockId/check-in')
+  @BranchOf('groupBlock', 'blockId')
+  @Permission('reservations', 'update')
+  @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk)
+  @ApiOperation({ summary: "Group check-in — the group's arrivals into their rooms together, all or none; optionally one master bill for the group's room nights" })
+  checkInGroup(
+    @CurrentTenant() tenantId: string,
+    @CurrentUser() user: JwtPayload,
+    @Param('blockId', ParseUUIDPipe) blockId: string,
+    @Body() dto: GroupCheckInDto,
+  ): ReturnType<ReservationsService['checkInGroup']> {
+    return this.reservationsService.checkInGroup(tenantId, blockId, dto, user.sub);
   }
 
   @Post('reservations/:reservationId/check-out')

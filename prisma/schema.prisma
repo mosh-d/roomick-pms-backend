@@ -1149,6 +1149,10 @@ model Reservation {
   // with — kept so re-pricing (modify, extend stay) keeps the deal instead of
   // falling back to the public rate.
   corporateAccountId    String?            @db.Uuid
+  // Where this stay's room nights are billed instead of its own bill — a
+  // group's master bill, paid by the organiser. Incidentals stay on the
+  // guest's own bill. Ignored once that bill is settled.
+  billToFolioId         String?            @db.Uuid
   promoCode             String?            @db.VarChar(50)
   status                ReservationStatus  @default(confirmed)
   channel               ReservationChannel
@@ -1198,11 +1202,12 @@ model Reservation {
   createdByUser    User?             @relation(fields: [createdBy], references: [id], onDelete: SetNull)
   groupBlock       GroupBlock?       @relation(fields: [groupBlockId], references: [id], onDelete: SetNull)
   corporateAccount CorporateAccount? @relation(fields: [corporateAccountId], references: [id], onDelete: SetNull)
+  billToFolio      Folio?            @relation("RoomChargeRouting", fields: [billToFolioId], references: [id], onDelete: SetNull)
 
   rateAuditLogs              RateAuditLog[]
   noShowRecords              NoShowRecord[]
   walkRecords                WalkRecord[]
-  folios                     Folio[]
+  folios                     Folio[]             @relation("FolioOfReservation")
   roomNights                 LineItem[]          @relation("RoomNightStay")
   housekeepingTasksTriggered HousekeepingTask[]
   registrationCards          RegistrationCard[]
@@ -1367,16 +1372,18 @@ model Folio {
 
   tenant           Tenant            @relation(fields: [tenantId], references: [id], onDelete: Restrict)
   branch           Branch            @relation(fields: [branchId], references: [id], onDelete: Restrict)
-  reservation      Reservation       @relation(fields: [reservationId], references: [id], onDelete: Restrict)
+  reservation      Reservation       @relation("FolioOfReservation", fields: [reservationId], references: [id], onDelete: Restrict)
   guest            GuestProfile      @relation(fields: [guestId], references: [id], onDelete: Restrict)
   corporateAccount CorporateAccount? @relation(fields: [corporateAccountId], references: [id], onDelete: SetNull)
 
-  lineItems    LineItem[]
-  transfersOut FolioTransfer[] @relation("TransferSource")
-  transfersIn  FolioTransfer[] @relation("TransferTarget")
-  payments     Payment[]
-  refunds      Refund[]
-  posOrders    PosOrder[]
+  lineItems          LineItem[]
+  // Stays whose room nights are billed here (a group's master bill).
+  routedReservations Reservation[]   @relation("RoomChargeRouting")
+  transfersOut       FolioTransfer[] @relation("TransferSource")
+  transfersIn        FolioTransfer[] @relation("TransferTarget")
+  payments           Payment[]
+  refunds            Refund[]
+  posOrders          PosOrder[]
 
   @@index([reservationId])
   @@index([branchId, status])

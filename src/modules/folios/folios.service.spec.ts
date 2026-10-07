@@ -145,6 +145,18 @@ describe('FoliosService', () => {
       });
     });
 
+    it("bills the night to the group's master bill when the stay is routed to one", async () => {
+      tx.folio.findFirst.mockResolvedValueOnce(folio({ id: 'master', status: 'open' }));
+      await service.postRoomChargeForDate(tx as never, reservation({ billToFolioId: 'master' }) as never, folio() as never, new Date('2026-09-02T00:00:00.000Z'), 'Night Audit', ACTOR_ID);
+      expect(tx.lineItem.create.mock.calls[0][0].data.folioId).toBe('master');
+    });
+
+    it('once the master bill is settled, nights go back on the guest’s own bill', async () => {
+      tx.folio.findFirst.mockResolvedValueOnce(folio({ id: 'master', status: 'settled' }));
+      await service.postRoomChargeForDate(tx as never, reservation({ billToFolioId: 'master' }) as never, folio() as never, new Date('2026-09-02T00:00:00.000Z'), 'Night Audit', ACTOR_ID);
+      expect(tx.lineItem.create.mock.calls[0][0].data.folioId).toBe(FOLIO_ID);
+    });
+
     it('records the stay on the night it posts', async () => {
       await service.postRoomChargeForDate(tx as never, reservation() as never, folio() as never, new Date('2026-09-02T00:00:00.000Z'), 'Night Audit', ACTOR_ID);
       expect(tx.lineItem.create.mock.calls[0][0].data.stayReservationId).toBe(RESERVATION_ID);
