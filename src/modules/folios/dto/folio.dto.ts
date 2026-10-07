@@ -1,6 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
-import { ArrayMinSize, IsArray, IsIn, IsISO8601, IsNumber, IsOptional, IsPositive, IsString, IsUUID, MaxLength, MinLength } from 'class-validator';
+import { ArrayMinSize, IsArray, IsBoolean, IsIn, IsISO8601, IsNumber, IsOptional, IsPositive, IsString, IsUUID, MaxLength, MinLength, ValidateIf } from 'class-validator';
 import { ChargeType, PaymentMethod, PaymentPurpose } from '@prisma/client';
 
 /** `tax` and `correction` are excluded: tax rows are written by the engine, corrections by `POST /line-items/:id/correct`. Neither is a thing a human posts directly. */
@@ -58,24 +58,57 @@ export class CreateFolioDto {
   @MinLength(1)
   @MaxLength(100)
   label!: string;
+
+  @ApiPropertyOptional({ example: 'Dangote Group travel desk', description: 'Who pays this bill, when it is not the guest.' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  payerName?: string;
+
+  @ApiPropertyOptional({ description: "The company this bill goes to — an active corporate account." })
+  @IsOptional()
+  @IsUUID()
+  corporateAccountId?: string;
 }
 
+/** Split Billing and Folio Transfer: the charges picked, or every charge on the bill. */
 export class SplitFolioDto {
-  @ApiProperty({ description: 'Folio to move the selected line items into. Must belong to the same reservation.' })
+  @ApiProperty({ description: 'Folio to move the charges into. A split stays within one reservation; a transfer can go to any open bill at the property.' })
   @IsUUID()
   targetFolioId!: string;
 
-  @ApiProperty({ type: [String], description: 'Line items to move. Tax rows are independent ledger entries — include them alongside their parent charge if the tax should follow it.' })
+  @ApiPropertyOptional({
+    type: [String],
+    description: "Charges to move. Each one's tax lines and correction move with it; a tax line or correction can't be picked without its charge.",
+  })
+  @ValidateIf((dto: SplitFolioDto) => !dto.transferAll)
   @IsArray()
   @ArrayMinSize(1)
   @IsUUID('4', { each: true })
-  lineItemIds!: string[];
+  lineItemIds?: string[];
+
+  @ApiPropertyOptional({ description: 'Move every charge on the bill (its whole balance of charges) instead of picking them.' })
+  @IsOptional()
+  @IsBoolean()
+  transferAll?: boolean;
 
   @ApiProperty({ example: 'Room charges billed to the company account', description: 'Mandatory — a folio transfer without a stated reason is unauditable.' })
   @IsString()
   @MinLength(1)
   @MaxLength(300)
   reason!: string;
+}
+
+export class ListTransfersQueryDto {
+  @ApiPropertyOptional({ example: '2026-10-01' })
+  @IsOptional()
+  @IsISO8601({ strict: true })
+  from?: string;
+
+  @ApiPropertyOptional({ example: '2026-10-31' })
+  @IsOptional()
+  @IsISO8601({ strict: true })
+  to?: string;
 }
 
 export class CorrectLineItemDto {

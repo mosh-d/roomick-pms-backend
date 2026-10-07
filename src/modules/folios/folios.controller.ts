@@ -4,7 +4,7 @@ import { CurrentTenant, CurrentUser } from '../../common/decorators';
 import { Permission } from '../../common/decorators/permission.decorator';
 import { ALL_SYSTEM_ROLES, Roles, SystemRole } from '../../common/decorators/roles.decorator';
 import { JwtPayload } from '../../common/types/request-context';
-import { CorrectLineItemDto, CreateFolioDto, PostChargeDto, RecordPaymentDto, SplitFolioDto } from './dto/folio.dto';
+import { CorrectLineItemDto, CreateFolioDto, ListTransfersQueryDto, PostChargeDto, RecordPaymentDto, SplitFolioDto } from './dto/folio.dto';
 import { FoliosService } from './folios.service';
 import { BranchOf } from '../../common/decorators/branch-of.decorator';
 
@@ -112,7 +112,7 @@ export class FoliosController {
     @Param('reservationId', ParseUUIDPipe) reservationId: string,
     @Body() dto: CreateFolioDto,
   ): ReturnType<FoliosService['createAdditionalFolio']> {
-    return this.foliosService.createAdditionalFolio(tenantId, reservationId, dto.label, user.sub);
+    return this.foliosService.createAdditionalFolio(tenantId, reservationId, dto, user.sub);
   }
 
   @Post('folios/:folioId/split')
@@ -130,6 +130,47 @@ export class FoliosController {
     @Body() dto: SplitFolioDto,
   ): ReturnType<FoliosService['splitFolio']> {
     return this.foliosService.splitFolio(tenantId, folioId, dto, user.sub);
+  }
+
+  @Post('folios/:folioId/transfer')
+  @BranchOf('folio', 'folioId')
+  @Permission('folios', 'update')
+  @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.Accountant)
+  @ApiOperation({
+    summary:
+      "Folio Transfer — move charges (or every charge) onto any open bill at the property: room to room, guest to company. Manager, owner or accountant; within one stay the front desk uses /split.",
+  })
+  transferCharges(
+    @CurrentTenant() tenantId: string,
+    @CurrentUser() user: JwtPayload,
+    @Param('folioId', ParseUUIDPipe) folioId: string,
+    @Body() dto: SplitFolioDto,
+  ): ReturnType<FoliosService['transferCharges']> {
+    return this.foliosService.transferCharges(tenantId, folioId, dto, user.sub);
+  }
+
+  @Post('folio-transfers/:transferId/reverse')
+  @BranchOf('folioTransfer', 'transferId')
+  @Permission('folios', 'update')
+  @Roles(SystemRole.Owner, SystemRole.Manager)
+  @ApiOperation({ summary: 'Put a transfer back, within 24 hours, while its charges are still where it left them' })
+  reverseTransfer(
+    @CurrentTenant() tenantId: string,
+    @CurrentUser() user: JwtPayload,
+    @Param('transferId', ParseUUIDPipe) transferId: string,
+  ): ReturnType<FoliosService['reverseTransfer']> {
+    return this.foliosService.reverseTransfer(tenantId, transferId, user.sub);
+  }
+
+  @Get('branches/:branchId/folio-transfers')
+  @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk, SystemRole.Accountant)
+  @ApiOperation({ summary: 'Transfer History — every charge move at the branch, newest first' })
+  listBranchTransfers(
+    @CurrentTenant() tenantId: string,
+    @Param('branchId', ParseUUIDPipe) branchId: string,
+    @Query() query: ListTransfersQueryDto,
+  ): ReturnType<FoliosService['listBranchTransfers']> {
+    return this.foliosService.listBranchTransfers(tenantId, branchId, query);
   }
 
   @Get('folios/:folioId/transfer-history')

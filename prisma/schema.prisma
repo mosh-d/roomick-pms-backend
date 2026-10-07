@@ -1202,6 +1202,7 @@ model Reservation {
   noShowRecords              NoShowRecord[]
   walkRecords                WalkRecord[]
   folios                     Folio[]
+  roomNights                 LineItem[]          @relation("RoomNightStay")
   housekeepingTasksTriggered HousekeepingTask[]
   registrationCards          RegistrationCard[]
   communicationLogs          CommunicationLog[]
@@ -1407,12 +1408,18 @@ model LineItem {
   // corrected once; a second correction would reverse the charge (and now
   // its tax) twice.
   correctsLineItemId String?    @unique @db.Uuid
+  // Room nights only: the stay the night was for. The bill a night sits on
+  // can change — split onto a company folio, transferred to another room's
+  // bill — the stay it was for can't, and it's what stops a moved night
+  // being billed a second time at check-out.
+  stayReservationId  String?    @db.Uuid
 
-  tenant       Tenant  @relation(fields: [tenantId], references: [id], onDelete: Restrict)
-  folio        Folio   @relation(fields: [folioId], references: [id], onDelete: Restrict)
-  outlet       Outlet? @relation(fields: [outletId], references: [id], onDelete: Restrict)
-  postedByUser User?   @relation("LineItemPostedBy", fields: [postedBy], references: [id], onDelete: SetNull)
-  voidedByUser User?   @relation("LineItemVoidedBy", fields: [voidedBy], references: [id], onDelete: SetNull)
+  tenant          Tenant       @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  folio           Folio        @relation(fields: [folioId], references: [id], onDelete: Restrict)
+  stayReservation Reservation? @relation("RoomNightStay", fields: [stayReservationId], references: [id], onDelete: Restrict)
+  outlet          Outlet?      @relation(fields: [outletId], references: [id], onDelete: Restrict)
+  postedByUser    User?        @relation("LineItemPostedBy", fields: [postedBy], references: [id], onDelete: SetNull)
+  voidedByUser    User?        @relation("LineItemVoidedBy", fields: [voidedBy], references: [id], onDelete: SetNull)
 
   parentLineItem   LineItem?      @relation("TaxOfCharge", fields: [parentLineItemId], references: [id], onDelete: Restrict)
   taxLines         LineItem[]     @relation("TaxOfCharge")
@@ -1422,6 +1429,7 @@ model LineItem {
   noShowPenalties  NoShowRecord[] @relation("NoShowPenaltyLine")
 
   @@index([parentLineItemId])
+  @@index([stayReservationId, serviceDate])
   @@index([folioId, postedAt])
   @@index([folioId, chargeType])
   @@index([outletId])

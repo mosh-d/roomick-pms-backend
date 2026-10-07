@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
-import { AdjustmentType, ChargeType, Folio, LineItem, Payment, Prisma, Reservation } from '@prisma/client';
+import { AdjustmentType, ChargeType, Folio, FolioTransfer, LineItem, Payment, Prisma, Reservation } from '@prisma/client';
 import { ErrorCode } from '../../common/errors/error-codes';
 import { todayInTimezone, toBranchDate } from '../../common/utils/branch-date';
 import { PrismaService, TenantTx } from '../../prisma/prisma.service';
@@ -8,6 +8,35 @@ import { describeRule, PricedCharge, TaxesService } from '../taxes/taxes.service
 import { CorrectLineItemDto, PostChargeDto, RecordPaymentDto } from './dto/folio.dto';
 
 const ZERO = new Prisma.Decimal(0);
+
+/** A transfer can be put back for a day (ref: "Reverse transfer button (manager, 24h window)"). */
+const TRANSFER_REVERSAL_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/** Which charges move: the ones picked, or everything on the bill. */
+export interface MoveChargesInput {
+  targetFolioId: string;
+  lineItemIds?: string[];
+  transferAll?: boolean;
+  reason: string;
+}
+
+/** Both ends of a transfer, named the way the desk knows them — whose bill, which room — and who moved it. */
+const FOLIO_END = {
+  select: {
+    id: true,
+    label: true,
+    status: true,
+    reservationId: true,
+    guest: { select: { id: true, name: true } },
+    reservation: { select: { id: true, confirmationNumber: true, room: { select: { number: true } } } },
+  },
+} as const;
+const TRANSFER_INCLUDE = {
+  sourceFolio: FOLIO_END,
+  targetFolio: FOLIO_END,
+  approvedByUser: { select: { id: true, name: true } },
+  reversedByUser: { select: { id: true, name: true } },
+} as const;
 
 /** A folio's money, all derived — nothing here is ever stored (spec §4.5). */
 export interface FolioTotals {
@@ -96,8 +125,19 @@ export class FoliosService {
     label: string,
     actorId: string | null,
   ): Promise<LineItem | null> {
+    // Looked up by the stay, not the bill: a night split onto a company
+    // folio or transferred to another room's bill is still billed. Looking
+    // on this folio alone billed every moved night again at check-out. A
+    // room line with no stay recorded is one posted by hand, found where it
+    // sits, as before.
     const already = await tx.lineItem.findFirst({
-      where: { folioId: folio.id, chargeType: 'room', serviceDate, isVoid: false, deletedAt: null },
+      where: {
+        chargeType: 'room',
+        serviceDate,
+        isVoid: false,
+        deletedAt: null,
+        OR: [{ stayReservationId: reservation.id }, { stayReservationId: null, folioId: folio.id }],
+      },
     });
     if (already) return null;
 
@@ -126,6 +166,7 @@ export class FoliosService {
       amount: perNight,
       chargeType: 'room',
       serviceDate,
+      stayReservationId: reservation.id,
       actorId,
     });
   }
@@ -492,13 +533,25 @@ export class FoliosService {
    * can hold multiple folios — e.g. room charges → company folio,
    * incidentals → guest folio"). The primary folio is the one with a null
    * `label`; every extra one must be named, so the two are never
-   * ambiguous in a list.
+   * ambiguous in a list. It can name who pays it, and the company it's
+   * billed to.
    */
-  async createAdditionalFolio(tenantId: string, reservationId: string, label: string, actorId: string): Promise<Folio> {
+  async createAdditionalFolio(
+    tenantId: string,
+    reservationId: string,
+    input: { label: string; payerName?: string; corporateAccountId?: string },
+    actorId: string,
+  ): Promise<Folio> {
     return this.prisma.withTenant(tenantId, async (tx) => {
       const reservation = await tx.reservation.findFirst({ where: { id: reservationId, deletedAt: null } });
       if (!reservation) {
         throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Reservation not found' });
+      }
+      if (input.corporateAccountId) {
+        const account = await tx.corporateAccount.findFirst({ where: { id: input.corporateAccountId, isActive: true }, select: { id: true } });
+        if (!account) {
+          throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: 'That company account is not active — pick another, or leave it blank' });
+        }
       }
       const folio = await tx.folio.create({
         data: {
@@ -506,22 +559,45 @@ export class FoliosService {
           branchId: reservation.branchId,
           reservationId,
           guestId: reservation.guestId,
-          label,
+          label: input.label.trim(),
+          payerName: input.payerName?.trim() || null,
+          corporateAccountId: input.corporateAccountId ?? null,
           status: 'open',
           openedAt: new Date(),
         },
       });
-      await this.audit(tx, tenantId, reservation.branchId, actorId, 'folio.opened', folio.id, { reservationId, label });
+      await this.audit(tx, tenantId, reservation.branchId, actorId, 'folio.opened', folio.id, {
+        reservationId,
+        label: folio.label,
+        ...(folio.payerName ? { payerName: folio.payerName } : {}),
+        ...(folio.corporateAccountId ? { corporateAccountId: folio.corporateAccountId } : {}),
+      });
       return folio;
     });
   }
 
   /**
-   * Moves selected line items to another folio on the same reservation,
-   * recording a `FolioTransfer` as the audit trail (spec §5:
-   * "`POST /folios/:folioId/split` — move selected line items to a new
-   * folio").
-   *
+   * Moves selected line items to another folio on the same reservation —
+   * Split Billing (spec §5: "`POST /folios/:folioId/split` — move selected
+   * line items to a new folio"). The front desk's move: it never changes
+   * who the stay owes, only which of its bills a charge sits on.
+   */
+  async splitFolio(tenantId: string, sourceFolioId: string, dto: MoveChargesInput, actorId: string): Promise<FolioTransfer> {
+    return this.moveCharges(tenantId, sourceFolioId, dto, actorId, 'split');
+  }
+
+  /**
+   * Folio Transfer (ref: "Move individual charges or entire folio balances
+   * between folios mid-stay") — onto any open bill at the property: room
+   * to room, a guest's charges to a company's bill. Moving a charge onto
+   * someone else's bill is the manager's call (the route's roles); within
+   * one stay it's the same move Split Billing makes.
+   */
+  async transferCharges(tenantId: string, sourceFolioId: string, dto: MoveChargesInput, actorId: string): Promise<FolioTransfer> {
+    return this.moveCharges(tenantId, sourceFolioId, dto, actorId, 'transfer');
+  }
+
+  /**
    * **Reassigning `folioId` is not a violation of the append-only rule.**
    * That rule is about money: "no UPDATE of amounts, no DELETE"
    * (§4.5). No amount changes here and the combined balance across both
@@ -529,22 +605,26 @@ export class FoliosService {
    * unmodified charge belongs to. `FolioTransfer.lineItemIds` snapshots
    * exactly what moved, which is the shape the schema was built for.
    *
-   * **Tax travels with its charge.** Tax lines record the charge they were
-   * computed on (`parentLineItemId`), so moving a charge moves its tax lines
-   * too, whether or not the caller listed them — previously they stayed put
-   * unless selected by hand, leaving a charge on one bill and its VAT on
-   * another. A linked tax line can't be moved without its charge. Tax lines
-   * posted before the link existed have no parent and still move only when
-   * selected, exactly as before.
+   * **A charge moves with everything hanging off it** — its tax lines
+   * (`parentLineItemId`), its correction (`correctsLineItemId`) and the
+   * correction's own tax reversals — whether or not the caller listed them.
+   * Tax used to stay put unless selected by hand, leaving a charge on one
+   * bill and its VAT on another, and a correction stayed behind as a credit
+   * on the wrong bill. A tax line or correction can't be moved without its
+   * charge. Lines posted before those links existed have none and move only
+   * when selected, exactly as before.
+   *
+   * A room night keeps its stay (`stayReservationId`) wherever it goes, so
+   * check-out never bills it again; a Point of Sale order charged to a room
+   * follows its charge to the new bill.
    */
-  async splitFolio(
-    tenantId: string,
-    sourceFolioId: string,
-    dto: { targetFolioId: string; lineItemIds: string[]; reason: string },
-    actorId: string,
-  ) {
+  private async moveCharges(tenantId: string, sourceFolioId: string, dto: MoveChargesInput, actorId: string, kind: 'split' | 'transfer'): Promise<FolioTransfer> {
     if (sourceFolioId === dto.targetFolioId) {
       throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: 'Source and target folio must be different' });
+    }
+    const requestedIds = dto.lineItemIds ?? [];
+    if (!dto.transferAll && requestedIds.length === 0) {
+      throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: 'Pick the charges to move, or move them all' });
     }
 
     return this.prisma.withTenant(tenantId, async (tx) => {
@@ -553,61 +633,67 @@ export class FoliosService {
       this.assertFolioOpen(source);
       this.assertFolioOpen(target);
 
-      // Both folios must belong to the same reservation — moving a charge
-      // onto an unrelated guest's bill is a `transfer`, a separate
-      // manager-approved operation (deferred), not a split.
-      if (source.reservationId !== target.reservationId) {
+      if (source.branchId !== target.branchId) {
+        throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: 'Charges can only move between bills at the same property' });
+      }
+      const sameStay = source.reservationId === target.reservationId;
+      if (kind === 'split' && !sameStay) {
         throw new BadRequestException({
           code: ErrorCode.VALIDATION_FAILED,
-          message: 'Both folios must belong to the same reservation',
+          message: "Both folios must belong to the same reservation — moving charges onto another stay's bill is a Folio Transfer",
         });
       }
 
-      const selected = await tx.lineItem.findMany({
-        where: { id: { in: dto.lineItemIds }, folioId: sourceFolioId, isVoid: false, deletedAt: null },
-      });
-      if (selected.length !== dto.lineItemIds.length) {
+      const selected = dto.transferAll
+        ? await tx.lineItem.findMany({ where: { folioId: sourceFolioId, isVoid: false, deletedAt: null }, orderBy: { postedAt: 'asc' } })
+        : await tx.lineItem.findMany({ where: { id: { in: requestedIds }, folioId: sourceFolioId, isVoid: false, deletedAt: null } });
+      if (dto.transferAll && selected.length === 0) {
+        throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: 'This bill has no charges to move' });
+      }
+      if (!dto.transferAll && selected.length !== requestedIds.length) {
         throw new BadRequestException({
           code: ErrorCode.VALIDATION_FAILED,
           message: 'One or more line items do not belong to this folio, or are voided',
         });
       }
 
-      const selectedIds = new Set(selected.map((item) => item.id));
-      const strandedTax = selected.some((item) => item.chargeType === 'tax' && item.parentLineItemId && !selectedIds.has(item.parentLineItemId));
-      if (strandedTax) {
+      const toMove = await this.withDependents(tx, sourceFolioId, selected);
+      const moving = new Set(toMove.map((item) => item.id));
+      const stranded = selected.some((item) => {
+        const anchor = this.anchorOf(item);
+        return anchor !== null && !moving.has(anchor);
+      });
+      if (stranded) {
         throw new BadRequestException({
           code: ErrorCode.VALIDATION_FAILED,
-          message: 'A tax line moves with the charge it belongs to — select the charge instead',
+          message: 'A tax line or correction moves with the charge it belongs to — select the charge instead',
         });
       }
-
-      const linkedTax = await tx.lineItem.findMany({
-        where: { parentLineItemId: { in: [...selectedIds] }, folioId: sourceFolioId, chargeType: 'tax', isVoid: false, deletedAt: null },
-      });
-      const toMove = [...selected, ...linkedTax.filter((tax) => !selectedIds.has(tax.id))];
       const movedIds = toMove.map((item) => item.id);
 
       const amount = toMove.reduce((sum, item) => sum.plus(item.amount), ZERO);
       await tx.lineItem.updateMany({ where: { id: { in: movedIds } }, data: { folioId: dto.targetFolioId } });
+      await tx.posOrder.updateMany({ where: { lineItemId: { in: movedIds } }, data: { folioId: dto.targetFolioId } });
 
       const transfer = await tx.folioTransfer.create({
         data: {
           tenantId,
           sourceFolioId,
           targetFolioId: dto.targetFolioId,
-          // What actually moved, including tax that came along with its
-          // charge — the transfer record must match the ledger, not the request.
+          // What actually moved, including what came along with its charge —
+          // the transfer record must match the ledger, not the request.
           lineItemIds: movedIds,
           amount,
           reason: dto.reason,
           approvedBy: actorId,
         },
       });
-      await this.audit(tx, tenantId, source.branchId, actorId, 'folio.split', sourceFolioId, {
+      await this.audit(tx, tenantId, source.branchId, actorId, kind === 'split' ? 'folio.split' : 'folio.transferred', sourceFolioId, {
         targetFolioId: dto.targetFolioId,
+        ...(sameStay ? {} : { fromReservationId: source.reservationId, toReservationId: target.reservationId }),
+        ...(dto.transferAll ? { transferAll: true } : {}),
         lineItemCount: toMove.length,
-        taxLinesMovedWithCharges: toMove.length - selected.length,
+        movedWithTheirCharges: toMove.length - selected.length,
         amount: amount.toFixed(2),
         reason: dto.reason,
       });
@@ -615,15 +701,116 @@ export class FoliosService {
     });
   }
 
-  /** Every transfer this folio was either the source or the target of (spec §5's `GET /folios/:folioId/transfer-history`). */
+  /**
+   * Puts a transfer back (ref: "Reverse transfer button (manager, 24h
+   * window)"): the same charges return to the bill they came from. After a
+   * day, or once one of them has moved on again or a bill is settled, it's
+   * a new transfer instead — a reversal must never pull a charge off a bill
+   * it has since been paid on or moved from.
+   */
+  async reverseTransfer(tenantId: string, transferId: string, actorId: string): Promise<FolioTransfer> {
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const transfer = await tx.folioTransfer.findFirst({ where: { id: transferId } });
+      if (!transfer) {
+        throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Transfer not found' });
+      }
+      if (transfer.reversedAt) {
+        throw new ConflictException({ code: ErrorCode.CONFLICT, message: 'This transfer has already been reversed' });
+      }
+      if (Date.now() - transfer.createdAt.getTime() > TRANSFER_REVERSAL_WINDOW_MS) {
+        throw new ConflictException({
+          code: ErrorCode.CONFLICT,
+          message: 'A transfer can be reversed within 24 hours — after that, move the charges back with a new transfer',
+        });
+      }
+      const source = await this.findFolioOrThrow(tx, transfer.sourceFolioId);
+      const target = await this.findFolioOrThrow(tx, transfer.targetFolioId);
+      this.assertFolioOpen(source);
+      this.assertFolioOpen(target);
+
+      const moved = await tx.lineItem.findMany({ where: { id: { in: transfer.lineItemIds } } });
+      if (moved.some((item) => item.folioId !== transfer.targetFolioId)) {
+        throw new ConflictException({
+          code: ErrorCode.CONFLICT,
+          message: 'Some of these charges have moved to another bill since — reverse that move first',
+        });
+      }
+      // Anything posted against them since (a correction, its tax) goes back with them.
+      const toReturn = await this.withDependents(tx, transfer.targetFolioId, moved);
+      const returnIds = toReturn.map((item) => item.id);
+      await tx.lineItem.updateMany({ where: { id: { in: returnIds } }, data: { folioId: transfer.sourceFolioId } });
+      await tx.posOrder.updateMany({ where: { lineItemId: { in: returnIds } }, data: { folioId: transfer.sourceFolioId } });
+
+      const reversed = await tx.folioTransfer.update({ where: { id: transferId }, data: { reversedAt: new Date(), reversedBy: actorId } });
+      await this.audit(tx, tenantId, source.branchId, actorId, 'folio.transfer_reversed', transfer.sourceFolioId, {
+        transferId,
+        fromFolioId: transfer.targetFolioId,
+        lineItemCount: returnIds.length,
+        amount: toReturn.reduce((sum, item) => sum.plus(item.amount), ZERO).toFixed(2),
+      });
+      return reversed;
+    });
+  }
+
+  /** Every transfer this folio was either the source or the target of (spec §5's `GET /folios/:folioId/transfer-history`), newest first. */
   async getTransferHistory(tenantId: string, folioId: string) {
     return this.prisma.withTenant(tenantId, async (tx) => {
       await this.findFolioOrThrow(tx, folioId);
       return tx.folioTransfer.findMany({
         where: { OR: [{ sourceFolioId: folioId }, { targetFolioId: folioId }] },
+        include: TRANSFER_INCLUDE,
         orderBy: { createdAt: 'desc' },
       });
     });
+  }
+
+  /** Transfer History (ref: "Full audit trail of all folio movements") — every move at the branch in a date range, newest first. */
+  async listBranchTransfers(tenantId: string, branchId: string, range: { from?: string; to?: string }) {
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const branch = await this.propertyService.assertBranch(tx, branchId);
+      const createdAt: Prisma.DateTimeFilter = {};
+      if (range.from) createdAt.gte = new Date(`${range.from}T00:00:00.000Z`);
+      if (range.to) createdAt.lt = new Date(new Date(`${range.to}T00:00:00.000Z`).getTime() + 86_400_000);
+      const transfers = await tx.folioTransfer.findMany({
+        where: { sourceFolio: { branchId }, ...(range.from || range.to ? { createdAt } : {}) },
+        include: TRANSFER_INCLUDE,
+        orderBy: { createdAt: 'desc' },
+        take: 500,
+      });
+      // The branch's ISO 4217 code with the money, as on every folio response.
+      return transfers.map((transfer) => ({ ...transfer, currency: branch.currency }));
+    });
+  }
+
+  /** `items` plus every line on `folioId` hanging off them — tax lines, corrections, a correction's tax reversals — in the order found. */
+  private async withDependents(tx: TenantTx, folioId: string, items: LineItem[]): Promise<LineItem[]> {
+    const result = [...items];
+    const seen = new Set(items.map((item) => item.id));
+    let frontier = [...seen];
+    while (frontier.length > 0) {
+      const found = await tx.lineItem.findMany({
+        where: {
+          folioId,
+          isVoid: false,
+          deletedAt: null,
+          OR: [{ parentLineItemId: { in: frontier } }, { correctsLineItemId: { in: frontier } }],
+        },
+      });
+      frontier = [];
+      for (const item of found) {
+        if (seen.has(item.id)) continue;
+        seen.add(item.id);
+        result.push(item);
+        frontier.push(item.id);
+      }
+    }
+    return result;
+  }
+
+  /** The line a tax line or correction belongs to — it can only move with it. `null` for a charge, and for lines posted before the links existed. */
+  private anchorOf(item: LineItem): string | null {
+    if (item.chargeType === 'tax' && item.parentLineItemId) return item.parentLineItemId;
+    return item.correctsLineItemId ?? null;
   }
 
   /** The ONLY place `FOLIO_NOT_SETTLED` is thrown. Check-out deliberately does not use it — see `ReservationsService.checkOut`. */
@@ -773,10 +960,16 @@ export class FoliosService {
     });
   }
 
+  /** A stay's bills, primary first, each with what it owes and the company it goes to — the folio tabs on a reservation. */
   async listFoliosForReservation(tenantId: string, reservationId: string) {
-    return this.prisma.withTenant(tenantId, (tx) =>
-      tx.folio.findMany({ where: { reservationId, deletedAt: null }, orderBy: { openedAt: 'asc' } }),
-    );
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const folios = await tx.folio.findMany({
+        where: { reservationId, deletedAt: null },
+        include: { corporateAccount: { select: { id: true, name: true } } },
+        orderBy: { openedAt: 'asc' },
+      });
+      return Promise.all(folios.map(async (folio) => ({ ...folio, balanceDue: (await this.computeTotals(tx, folio.id)).balanceDue })));
+    });
   }
 
   /**
@@ -863,6 +1056,8 @@ export class FoliosService {
       serviceDate: Date;
       /** The POS outlet that sold it; absent for everything posted at the desk or by the system. */
       outletId?: string;
+      /** Room nights only: the stay the night is for — see `LineItem.stayReservationId`. */
+      stayReservationId?: string;
       /** `null` = system-posted (the scheduled night audit) or a guest acting for themselves — `postedBy`'s own convention. */
       actorId: string | null;
     },
@@ -887,6 +1082,7 @@ export class FoliosService {
         chargeType: input.chargeType,
         serviceDate: input.serviceDate,
         outletId: input.outletId,
+        stayReservationId: input.stayReservationId,
         postedBy: input.actorId,
       },
     });

@@ -53,7 +53,15 @@ function makeTx() {
       updateMany: jest.fn().mockResolvedValue({ count: 2 }),
     },
     payment: { findMany: jest.fn().mockResolvedValue([]), create: jest.fn().mockResolvedValue({ id: 'pay-1' }) },
-    folioTransfer: { create: jest.fn().mockResolvedValue({ id: 'transfer-1' }), findMany: jest.fn().mockResolvedValue([]) },
+    folioTransfer: {
+      create: jest.fn().mockResolvedValue({ id: 'transfer-1' }),
+      findMany: jest.fn().mockResolvedValue([]),
+      findFirst: jest.fn().mockResolvedValue(null),
+      update: jest.fn().mockImplementation(({ data }: { data: Record<string, unknown> }) => Promise.resolve({ id: 'transfer-1', ...data })),
+    },
+    posOrder: { updateMany: jest.fn().mockResolvedValue({ count: 0 }) },
+    reservation: { findFirst: jest.fn().mockResolvedValue(null) },
+    corporateAccount: { findFirst: jest.fn().mockResolvedValue(null) },
     taxRule: { findMany: jest.fn().mockResolvedValue([]) },
     shift: { findFirst: jest.fn().mockResolvedValue(null) },
     auditLog: { create: jest.fn().mockResolvedValue({}) },
@@ -125,6 +133,21 @@ describe('FoliosService', () => {
       const result = await service.postRoomChargeForDate(tx as never, reservation() as never, folio() as never, new Date('2026-09-01T00:00:00.000Z'), 'Night Audit', ACTOR_ID);
       expect(result).toBeNull();
       expect(tx.lineItem.create).not.toHaveBeenCalled();
+    });
+
+    it('looks for the night by its stay, wherever it sits now — a night moved to another bill is not billed again', async () => {
+      await service.postRoomChargeForDate(tx as never, reservation() as never, folio() as never, new Date('2026-09-02T00:00:00.000Z'), 'Check-out', ACTOR_ID);
+      expect(tx.lineItem.findFirst).toHaveBeenCalledWith({
+        where: expect.objectContaining({
+          chargeType: 'room',
+          OR: [{ stayReservationId: RESERVATION_ID }, { stayReservationId: null, folioId: FOLIO_ID }],
+        }),
+      });
+    });
+
+    it('records the stay on the night it posts', async () => {
+      await service.postRoomChargeForDate(tx as never, reservation() as never, folio() as never, new Date('2026-09-02T00:00:00.000Z'), 'Night Audit', ACTOR_ID);
+      expect(tx.lineItem.create.mock.calls[0][0].data.stayReservationId).toBe(RESERVATION_ID);
     });
 
     it('tags the description with its source so a system post is distinguishable from a hand post', async () => {
@@ -453,6 +476,146 @@ describe('FoliosService', () => {
     it('rejects splitting out of a settled folio', async () => {
       tx.folio.findFirst.mockResolvedValue(folio({ status: 'settled' }));
       await expect(service.splitFolio(TENANT_ID, FOLIO_ID, dto, ACTOR_ID)).rejects.toThrow(ConflictException);
+    });
+  });
+
+  describe("transferCharges — onto another stay's bill", () => {
+    const TARGET_ID = '88888888-8888-4888-8888-888888888888';
+    const OTHER_STAY = '77777777-7777-4777-8777-777777777777';
+    const dto = { targetFolioId: TARGET_ID, lineItemIds: ['li-1'], reason: 'Room 102 pays for room 101' };
+    const charge = (overrides: Record<string, unknown> = {}) => ({
+      id: 'li-1',
+      folioId: FOLIO_ID,
+      amount: new Prisma.Decimal('20000'),
+      chargeType: 'room',
+      parentLineItemId: null,
+      correctsLineItemId: null,
+      ...overrides,
+    });
+
+    beforeEach(() => {
+      tx.folio.findFirst.mockImplementation(({ where }: { where: { id: string } }) =>
+        Promise.resolve(where.id === TARGET_ID ? folio({ id: TARGET_ID, reservationId: OTHER_STAY }) : folio()),
+      );
+      tx.lineItem.findMany.mockResolvedValue([]);
+    });
+
+    it("moves a charge onto another stay's bill, recording both stays", async () => {
+      tx.lineItem.findMany.mockResolvedValueOnce([charge()]);
+      await service.transferCharges(TENANT_ID, FOLIO_ID, dto, ACTOR_ID);
+      expect(tx.lineItem.updateMany).toHaveBeenCalledWith({ where: { id: { in: ['li-1'] } }, data: { folioId: TARGET_ID } });
+      const entry = tx.auditLog.create.mock.calls[0][0].data;
+      expect(entry.action).toBe('folio.transferred');
+      expect(entry.after).toMatchObject({ fromReservationId: RESERVATION_ID, toReservationId: OTHER_STAY, amount: '20000.00' });
+    });
+
+    it('a split still refuses another stay — that move is a transfer', async () => {
+      await expect(service.splitFolio(TENANT_ID, FOLIO_ID, dto, ACTOR_ID)).rejects.toThrow(/Folio Transfer/);
+    });
+
+    it('never moves charges to a bill at another property', async () => {
+      tx.folio.findFirst.mockImplementation(({ where }: { where: { id: string } }) =>
+        Promise.resolve(where.id === TARGET_ID ? folio({ id: TARGET_ID, reservationId: OTHER_STAY, branchId: 'other-branch' }) : folio()),
+      );
+      await expect(service.transferCharges(TENANT_ID, FOLIO_ID, dto, ACTOR_ID)).rejects.toThrow(/same property/);
+      expect(tx.lineItem.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('moving everything takes every charge on the bill, with what hangs off each', async () => {
+      tx.lineItem.findMany.mockResolvedValueOnce([charge(), charge({ id: 'li-2', chargeType: 'minibar', amount: new Prisma.Decimal('3000') })]);
+      tx.lineItem.findMany.mockResolvedValueOnce([charge({ id: 'li-1-vat', chargeType: 'tax', parentLineItemId: 'li-1', amount: new Prisma.Decimal('1500') })]);
+      await service.transferCharges(TENANT_ID, FOLIO_ID, { targetFolioId: TARGET_ID, transferAll: true, reason: dto.reason }, ACTOR_ID);
+      expect(tx.lineItem.updateMany).toHaveBeenCalledWith({ where: { id: { in: ['li-1', 'li-2', 'li-1-vat'] } }, data: { folioId: TARGET_ID } });
+      expect(tx.folioTransfer.create.mock.calls[0][0].data.amount.toFixed(2)).toBe('24500.00');
+    });
+
+    it('moving everything off an empty bill is refused', async () => {
+      await expect(service.transferCharges(TENANT_ID, FOLIO_ID, { targetFolioId: TARGET_ID, transferAll: true, reason: 'x' }, ACTOR_ID)).rejects.toThrow(/no charges/);
+    });
+
+    it("a corrected charge takes its correction and the correction's tax reversal with it", async () => {
+      tx.lineItem.findMany
+        .mockResolvedValueOnce([charge({ chargeType: 'minibar' })])
+        .mockResolvedValueOnce([
+          charge({ id: 'vat', chargeType: 'tax', parentLineItemId: 'li-1', amount: new Prisma.Decimal('1500') }),
+          charge({ id: 'fix', chargeType: 'correction', correctsLineItemId: 'li-1', amount: new Prisma.Decimal('-20000') }),
+        ])
+        .mockResolvedValueOnce([charge({ id: 'fix-vat', chargeType: 'tax', parentLineItemId: 'fix', correctsLineItemId: 'vat', amount: new Prisma.Decimal('-1500') })]);
+      await service.transferCharges(TENANT_ID, FOLIO_ID, dto, ACTOR_ID);
+      expect(tx.lineItem.updateMany).toHaveBeenCalledWith({ where: { id: { in: ['li-1', 'vat', 'fix', 'fix-vat'] } }, data: { folioId: TARGET_ID } });
+      expect(tx.folioTransfer.create.mock.calls[0][0].data.amount.toFixed(2)).toBe('0.00');
+    });
+
+    it('a correction picked without its charge is refused', async () => {
+      tx.lineItem.findMany.mockResolvedValueOnce([charge({ id: 'fix', chargeType: 'correction', correctsLineItemId: 'charge-staying' })]);
+      await expect(service.transferCharges(TENANT_ID, FOLIO_ID, { ...dto, lineItemIds: ['fix'] }, ACTOR_ID)).rejects.toThrow(/select the charge instead/);
+    });
+
+    it('a Point of Sale order follows its room charge to the new bill', async () => {
+      tx.lineItem.findMany.mockResolvedValueOnce([charge({ chargeType: 'fnb' })]);
+      await service.transferCharges(TENANT_ID, FOLIO_ID, dto, ACTOR_ID);
+      expect(tx.posOrder.updateMany).toHaveBeenCalledWith({ where: { lineItemId: { in: ['li-1'] } }, data: { folioId: TARGET_ID } });
+    });
+  });
+
+  describe('reverseTransfer — the 24-hour undo', () => {
+    const TARGET_ID = '88888888-8888-4888-8888-888888888888';
+    const transfer = (overrides: Record<string, unknown> = {}) => ({
+      id: 'transfer-1',
+      sourceFolioId: FOLIO_ID,
+      targetFolioId: TARGET_ID,
+      lineItemIds: ['li-1', 'li-1-vat'],
+      createdAt: new Date(Date.now() - 60 * 60 * 1000),
+      reversedAt: null,
+      ...overrides,
+    });
+
+    beforeEach(() => {
+      tx.folio.findFirst.mockImplementation(({ where }: { where: { id: string } }) => Promise.resolve(folio({ id: where.id })));
+      tx.lineItem.findMany.mockResolvedValue([]);
+    });
+
+    it('puts the charges back where they came from and marks the transfer reversed', async () => {
+      tx.folioTransfer.findFirst.mockResolvedValue(transfer());
+      tx.lineItem.findMany.mockResolvedValueOnce([
+        { id: 'li-1', folioId: TARGET_ID, amount: new Prisma.Decimal('20000'), chargeType: 'room', parentLineItemId: null, correctsLineItemId: null },
+        { id: 'li-1-vat', folioId: TARGET_ID, amount: new Prisma.Decimal('1500'), chargeType: 'tax', parentLineItemId: 'li-1', correctsLineItemId: null },
+      ]);
+      await service.reverseTransfer(TENANT_ID, 'transfer-1', ACTOR_ID);
+      expect(tx.lineItem.updateMany).toHaveBeenCalledWith({ where: { id: { in: ['li-1', 'li-1-vat'] } }, data: { folioId: FOLIO_ID } });
+      expect(tx.folioTransfer.update).toHaveBeenCalledWith({ where: { id: 'transfer-1' }, data: { reversedAt: expect.any(Date), reversedBy: ACTOR_ID } });
+    });
+
+    it('after a day it has to be a new transfer', async () => {
+      tx.folioTransfer.findFirst.mockResolvedValue(transfer({ createdAt: new Date(Date.now() - 25 * 60 * 60 * 1000) }));
+      await expect(service.reverseTransfer(TENANT_ID, 'transfer-1', ACTOR_ID)).rejects.toThrow(/24 hours/);
+    });
+
+    it('refuses once a charge has moved on again', async () => {
+      tx.folioTransfer.findFirst.mockResolvedValue(transfer());
+      tx.lineItem.findMany.mockResolvedValueOnce([{ id: 'li-1', folioId: 'somewhere-else' }]);
+      await expect(service.reverseTransfer(TENANT_ID, 'transfer-1', ACTOR_ID)).rejects.toThrow(/moved to another bill since/);
+      expect(tx.lineItem.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('refuses a second reversal', async () => {
+      tx.folioTransfer.findFirst.mockResolvedValue(transfer({ reversedAt: new Date() }));
+      await expect(service.reverseTransfer(TENANT_ID, 'transfer-1', ACTOR_ID)).rejects.toThrow(/already been reversed/);
+    });
+  });
+
+  describe('createAdditionalFolio', () => {
+    beforeEach(() => tx.reservation.findFirst.mockResolvedValue(reservation()));
+
+    it('names who pays it and the company it goes to', async () => {
+      tx.corporateAccount.findFirst.mockResolvedValue({ id: 'acct-1' });
+      await service.createAdditionalFolio(TENANT_ID, RESERVATION_ID, { label: ' Company ', payerName: 'Dangote travel desk', corporateAccountId: 'acct-1' }, ACTOR_ID);
+      expect(tx.folio.create.mock.calls[0][0].data).toMatchObject({ label: 'Company', payerName: 'Dangote travel desk', corporateAccountId: 'acct-1', status: 'open' });
+    });
+
+    it("refuses a company that isn't active", async () => {
+      await expect(service.createAdditionalFolio(TENANT_ID, RESERVATION_ID, { label: 'Company', corporateAccountId: 'acct-1' }, ACTOR_ID)).rejects.toThrow(BadRequestException);
+      expect(tx.folio.create).not.toHaveBeenCalled();
     });
   });
 
