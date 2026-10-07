@@ -6,6 +6,7 @@ import { ALL_SYSTEM_ROLES, Roles, SystemRole } from '../../common/decorators/rol
 import { JwtPayload } from '../../common/types/request-context';
 import { InboxQueryDto, InboxReplyDto, SendCommunicationDto } from './dto/comms-log.dto';
 import { CommsLogService } from './comms-log.service';
+import { BranchOf } from '../../common/decorators/branch-of.decorator';
 
 @ApiTags('comms-log')
 @ApiBearerAuth()
@@ -15,6 +16,7 @@ export class CommsLogController {
   constructor(private readonly commsLogService: CommsLogService) {}
 
   @Post('reservations/:reservationId/communications/send')
+  @BranchOf('reservation', 'reservationId')
   @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk)
   @ApiOperation({ summary: 'Log a one-off manual message to a guest (email or SMS) — sending itself is stubbed for MVP; this is the record' })
   sendManual(
@@ -27,6 +29,7 @@ export class CommsLogController {
   }
 
   @Get('reservations/:reservationId/communications')
+  @BranchOf('reservation', 'reservationId')
   @Roles(...ALL_SYSTEM_ROLES)
   @ApiOperation({ summary: 'Every communication logged against a reservation, newest first' })
   listForReservation(

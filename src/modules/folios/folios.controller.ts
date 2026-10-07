@@ -6,6 +6,7 @@ import { ALL_SYSTEM_ROLES, Roles, SystemRole } from '../../common/decorators/rol
 import { JwtPayload } from '../../common/types/request-context';
 import { CorrectLineItemDto, CreateFolioDto, PostChargeDto, RecordPaymentDto, SplitFolioDto } from './dto/folio.dto';
 import { FoliosService } from './folios.service';
+import { BranchOf } from '../../common/decorators/branch-of.decorator';
 
 @ApiTags('folios')
 @ApiBearerAuth()
@@ -15,6 +16,7 @@ export class FoliosController {
   constructor(private readonly foliosService: FoliosService) {}
 
   @Get('folios/:folioId')
+  @BranchOf('folio', 'folioId')
   @Roles(...ALL_SYSTEM_ROLES)
   @ApiOperation({ summary: 'Folio with line items, payments, and computed totals (balance is derived, never stored)' })
   getFolio(
@@ -25,6 +27,7 @@ export class FoliosController {
   }
 
   @Get('folios/:folioId/tax-breakdown')
+  @BranchOf('folio', 'folioId')
   @Roles(...ALL_SYSTEM_ROLES)
   @ApiOperation({ summary: 'Per-rule tax breakdown for a folio (§4.5 GROUP BY rule)' })
   getTaxBreakdown(
@@ -35,6 +38,7 @@ export class FoliosController {
   }
 
   @Get('reservations/:reservationId/folios')
+  @BranchOf('reservation', 'reservationId')
   @Roles(...ALL_SYSTEM_ROLES)
   @ApiOperation({ summary: 'Folios belonging to a reservation' })
   listForReservation(
@@ -60,6 +64,7 @@ export class FoliosController {
   }
 
   @Post('folios/:folioId/charges')
+  @BranchOf('folio', 'folioId')
   @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk, SystemRole.Accountant)
   @ApiOperation({ summary: 'Post a charge to a folio — taxes are computed and posted as their own line items' })
   postCharge(
@@ -72,6 +77,7 @@ export class FoliosController {
   }
 
   @Post('folios/:folioId/payments')
+  @BranchOf('folio', 'folioId')
   @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk, SystemRole.Accountant)
   @ApiOperation({ summary: 'Record a payment against a folio (deposits never post as line items)' })
   recordPayment(
@@ -84,6 +90,7 @@ export class FoliosController {
   }
 
   @Post('folios/:folioId/close')
+  @BranchOf('folio', 'folioId')
   @Permission('folios', 'update')
   @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk, SystemRole.Accountant)
   @ApiOperation({ summary: 'Close/settle a folio — only permitted at a zero or credit balance' })
@@ -96,6 +103,7 @@ export class FoliosController {
   }
 
   @Post('reservations/:reservationId/folios')
+  @BranchOf('reservation', 'reservationId')
   @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk, SystemRole.Accountant)
   @ApiOperation({ summary: 'Open an additional named folio on a reservation (e.g. room to company, incidentals to guest)' })
   createAdditionalFolio(
@@ -108,6 +116,7 @@ export class FoliosController {
   }
 
   @Post('folios/:folioId/split')
+  @BranchOf('folio', 'folioId')
   @Permission('folios', 'update')
   @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk, SystemRole.Accountant)
   @ApiOperation({
@@ -124,6 +133,7 @@ export class FoliosController {
   }
 
   @Get('folios/:folioId/transfer-history')
+  @BranchOf('folio', 'folioId')
   @Roles(...ALL_SYSTEM_ROLES)
   @ApiOperation({ summary: 'Transfers this folio was the source or target of' })
   getTransferHistory(
@@ -134,6 +144,7 @@ export class FoliosController {
   }
 
   @Post('line-items/:lineItemId/correct')
+  @BranchOf('lineItem', 'lineItemId')
   @Permission('folios', 'update')
   @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.Accountant)
   @ApiOperation({

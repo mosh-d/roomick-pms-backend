@@ -17,6 +17,7 @@ import { RestrictionsService, AvailabilityRestrictionSummary } from './restricti
 import { DemandForecastService, ForecastDay } from './demand-forecast.service';
 import { RateRecommendationsService, RateRecommendation } from './rate-recommendations.service';
 import { CompSetAnalysis, CompSetService } from './comp-set.service';
+import { BranchOf } from '../../common/decorators/branch-of.decorator';
 
 @ApiTags('revenue-management')
 @ApiBearerAuth()
@@ -53,6 +54,7 @@ export class RevenueManagementController {
   }
 
   @Delete('availability-restrictions/:restrictionId')
+  @BranchOf('availabilityRestriction', 'restrictionId')
   @ApiOperation({ summary: 'Remove a restriction' })
   async deleteRestriction(@CurrentTenant() tenantId: string, @Param('restrictionId', ParseUUIDPipe) restrictionId: string): Promise<{ ok: true }> {
     await this.restrictionsService.deleteRestriction(tenantId, restrictionId);

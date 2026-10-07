@@ -6,6 +6,7 @@ import { ALL_SYSTEM_ROLES, Roles, SystemRole } from '../../common/decorators/rol
 import { JwtPayload } from '../../common/types/request-context';
 import { AddShiftIssueDto, CloseShiftDto, OpenShiftDto, UpdateShiftIssueDto } from './dto/shift.dto';
 import { ShiftsService } from './shifts.service';
+import { BranchOf } from '../../common/decorators/branch-of.decorator';
 
 const FLOOR_STAFF = [SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk, SystemRole.PosStaff];
 
@@ -29,6 +30,7 @@ export class ShiftsController {
   }
 
   @Post('shifts/:shiftId/close')
+  @BranchOf('shift', 'shiftId')
   @Permission('shifts', 'update')
   @Roles(...FLOOR_STAFF)
   @ApiOperation({ summary: 'Close a shift — computes system cash total from linked payments, flags variance, requires an explanation past the branch threshold' })
@@ -42,6 +44,7 @@ export class ShiftsController {
   }
 
   @Get('shifts/:shiftId')
+  @BranchOf('shift', 'shiftId')
   @Roles(...ALL_SYSTEM_ROLES)
   @ApiOperation({ summary: 'A shift with its issues and linked payments' })
   getShift(@CurrentTenant() tenantId: string, @Param('shiftId', ParseUUIDPipe) shiftId: string): ReturnType<ShiftsService['getShift']> {
@@ -80,6 +83,7 @@ export class ShiftsController {
   }
 
   @Post('shifts/:shiftId/issues')
+  @BranchOf('shift', 'shiftId')
   @Roles(...FLOOR_STAFF)
   @ApiOperation({ summary: 'Log an issue against a shift' })
   addShiftIssue(
@@ -92,6 +96,7 @@ export class ShiftsController {
   }
 
   @Patch('shift-issues/:issueId')
+  @BranchOf('shiftIssue', 'issueId')
   @Roles(SystemRole.Owner, SystemRole.Manager)
   @ApiOperation({ summary: 'Resolve a shift issue, or explicitly carry it over to the next shift — never silently deleted' })
   updateShiftIssue(

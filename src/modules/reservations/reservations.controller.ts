@@ -20,6 +20,7 @@ import {
   WalkReservationDto,
 } from './dto/reservation.dto';
 import { ReservationsService } from './reservations.service';
+import { BranchOf } from '../../common/decorators/branch-of.decorator';
 
 @ApiTags('reservations')
 @ApiBearerAuth()
@@ -129,6 +130,7 @@ export class ReservationsController {
   }
 
   @Get('reservations/:reservationId')
+  @BranchOf('reservation', 'reservationId')
   @Roles(...ALL_SYSTEM_ROLES)
   @ApiOperation({ summary: 'Get a reservation' })
   getById(
@@ -139,6 +141,7 @@ export class ReservationsController {
   }
 
   @Post('reservations/:reservationId/check-in')
+  @BranchOf('reservation', 'reservationId')
   @Permission('reservations', 'update')
   @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk)
   @ApiOperation({ summary: 'Check in a confirmed reservation, assigning a room if none is set yet' })
@@ -152,6 +155,7 @@ export class ReservationsController {
   }
 
   @Post('reservations/:reservationId/check-out')
+  @BranchOf('reservation', 'reservationId')
   @Permission('reservations', 'update')
   @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk)
   @ApiOperation({ summary: 'Check out a checked-in reservation and release the room (marked dirty)' })
@@ -164,6 +168,7 @@ export class ReservationsController {
   }
 
   @Get('reservations/:reservationId/cancellation-quote')
+  @BranchOf('reservation', 'reservationId')
   @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk)
   @ApiOperation({ summary: "What cancelling now would cost under the branch's cancellation policy — the charge, its tax, and any refund due" })
   getCancellationQuote(
@@ -174,6 +179,7 @@ export class ReservationsController {
   }
 
   @Post('reservations/:reservationId/cancel')
+  @BranchOf('reservation', 'reservationId')
   @Permission('reservations', 'update')
   @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk)
   @ApiOperation({ summary: "Cancel a confirmed or waitlisted reservation — the branch's cancellation policy decides any charge" })
@@ -187,6 +193,7 @@ export class ReservationsController {
   }
 
   @Post('reservations/:reservationId/cancel-with-waiver')
+  @BranchOf('reservation', 'reservationId')
   @Permission('reservations', 'update')
   @Roles(SystemRole.Owner, SystemRole.Manager)
   @ApiOperation({ summary: 'Manager override — cancel without the cancellation charge; the waiver and its reason are audited' })
@@ -200,6 +207,7 @@ export class ReservationsController {
   }
 
   @Patch('reservations/:reservationId/modify')
+  @BranchOf('reservation', 'reservationId')
   @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk)
   @ApiOperation({ summary: 'Change dates, room type, or party size on a confirmed or waitlisted reservation (pre-check-in only)' })
   modifyReservation(
@@ -212,6 +220,7 @@ export class ReservationsController {
   }
 
   @Patch('reservations/:reservationId/extend-stay')
+  @BranchOf('reservation', 'reservationId')
   @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk)
   @ApiOperation({ summary: 'Push a checked-in guest\'s check-out date later — the one thing `modify` deliberately excludes for a checked-in stay' })
   extendStay(
@@ -224,6 +233,7 @@ export class ReservationsController {
   }
 
   @Patch('reservations/:reservationId/rate-override')
+  @BranchOf('reservation', 'reservationId')
   @Roles(SystemRole.Owner, SystemRole.Manager)
   @ApiOperation({ summary: 'Pin an absolute nightly rate on a confirmed or checked-in reservation — a manager-level override, not front desk' })
   setRateOverride(
@@ -236,6 +246,7 @@ export class ReservationsController {
   }
 
   @Post('reservations/:reservationId/promote')
+  @BranchOf('reservation', 'reservationId')
   @Permission('reservations', 'update')
   @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk)
   @ApiOperation({ summary: 'Promote a waitlisted reservation to confirmed, if a room has opened up' })
@@ -258,6 +269,7 @@ export class ReservationsController {
   }
 
   @Post('reservations/:reservationId/no-show')
+  @BranchOf('reservation', 'reservationId')
   @Permission('reservations', 'update')
   @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk)
   @ApiOperation({ summary: 'Mark a confirmed reservation as a no-show now — penalty applied per the branch policy, room released, folio settled if nothing is owed' })
@@ -270,6 +282,7 @@ export class ReservationsController {
   }
 
   @Post('no-show-records/:noShowRecordId/waive')
+  @BranchOf('noShowRecord', 'noShowRecordId')
   @Permission('reservations', 'update')
   @Roles(SystemRole.Owner, SystemRole.Manager)
   @ApiOperation({ summary: 'Waive a no-show penalty — reverses the charge if one was posted' })
@@ -282,6 +295,7 @@ export class ReservationsController {
   }
 
   @Post('reservations/:reservationId/reinstate')
+  @BranchOf('reservation', 'reservationId')
   @Permission('reservations', 'update')
   @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk)
   @ApiOperation({ summary: 'Reinstate a no-show with revised dates (late arrival) — optionally waives the penalty' })
@@ -295,6 +309,7 @@ export class ReservationsController {
   }
 
   @Post('reservations/:reservationId/walk')
+  @BranchOf('reservation', 'reservationId')
   @Permission('reservations', 'update')
   @Roles(SystemRole.Owner, SystemRole.Manager)
   @ApiOperation({ summary: 'Walk a confirmed reservation — relocate to another property, refund any payment already recorded, auto-cancel here' })

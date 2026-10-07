@@ -6,6 +6,7 @@ import { Roles, SystemRole } from '../../common/decorators/roles.decorator';
 import { JwtPayload } from '../../common/types/request-context';
 import { AdjustPointsDto, RedeemPointsDto, SaveLoyaltyProgramDto } from './dto/loyalty.dto';
 import { GuestLoyaltyView, LoyaltyProgramView, LoyaltyService, LoyaltySummary, RedemptionResult } from './loyalty.service';
+import { BranchOf } from '../../common/decorators/branch-of.decorator';
 
 @ApiTags('loyalty')
 @ApiBearerAuth()
@@ -65,6 +66,7 @@ export class LoyaltyController {
   }
 
   @Post('folios/:folioId/loyalty-redemptions')
+  @BranchOf('folio', 'folioId')
   @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk)
   @ApiOperation({ summary: "Pay part of a bill with the guest's points — capped at what the bill owes" })
   redeem(

@@ -7,6 +7,7 @@ import { ALL_SYSTEM_ROLES, Roles, SystemRole } from '../../common/decorators/rol
 import { JwtPayload } from '../../common/types/request-context';
 import { CreateAssetDto, CreateWorkOrderDto, UpdateWorkOrderDto } from './dto/maintenance.dto';
 import { MaintenanceService } from './maintenance.service';
+import { BranchOf } from '../../common/decorators/branch-of.decorator';
 
 @ApiTags('maintenance')
 @ApiBearerAuth()
@@ -39,6 +40,7 @@ export class MaintenanceController {
   }
 
   @Patch('maintenance/work-orders/:orderId')
+  @BranchOf('maintenanceOrder', 'orderId')
   @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.Housekeeper)
   @ApiOperation({ summary: 'Move a work order across the board, assign it, or close it out with notes' })
   updateWorkOrder(

@@ -7,6 +7,7 @@ import { ALL_SYSTEM_ROLES, Roles, SystemRole } from '../../common/decorators/rol
 import { JwtPayload } from '../../common/types/request-context';
 import { SignRegistrationCardDto } from './dto/registration-card.dto';
 import { RegistrationCardsService } from './registration-cards.service';
+import { BranchOf } from '../../common/decorators/branch-of.decorator';
 
 @ApiTags('registration-cards')
 @ApiBearerAuth()
@@ -16,6 +17,7 @@ export class RegistrationCardsController {
   constructor(private readonly registrationCardsService: RegistrationCardsService) {}
 
   @Post('reservations/:reservationId/registration-card/generate')
+  @BranchOf('reservation', 'reservationId')
   @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk)
   @ApiOperation({ summary: 'Generate a pre-filled registration card for a checked-in reservation (usually automatic at check-in — this is the manual/backfill path)' })
   generateCard(
@@ -27,6 +29,7 @@ export class RegistrationCardsController {
   }
 
   @Get('reservations/:reservationId/registration-card')
+  @BranchOf('reservation', 'reservationId')
   @Roles(...ALL_SYSTEM_ROLES)
   @ApiOperation({ summary: "A reservation's own registration card, if one has been generated yet" })
   getCardForReservation(
@@ -37,6 +40,7 @@ export class RegistrationCardsController {
   }
 
   @Get('registration-cards/:cardId')
+  @BranchOf('registrationCard', 'cardId')
   @Roles(...ALL_SYSTEM_ROLES)
   @ApiOperation({ summary: 'Get a registration card' })
   getCard(@CurrentTenant() tenantId: string, @Param('cardId', ParseUUIDPipe) cardId: string): ReturnType<RegistrationCardsService['getCard']> {
@@ -44,6 +48,7 @@ export class RegistrationCardsController {
   }
 
   @Get('registration-cards/:cardId/download')
+  @BranchOf('registrationCard', 'cardId')
   @Roles(...ALL_SYSTEM_ROLES)
   @ApiOperation({ summary: 'Download the registration card as a PDF — the persisted signed document if signed, a live-rendered preview otherwise' })
   async downloadCard(
@@ -58,6 +63,7 @@ export class RegistrationCardsController {
   }
 
   @Post('registration-cards/:cardId/sign')
+  @BranchOf('registrationCard', 'cardId')
   @Permission('guests', 'update')
   @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk)
   @ApiOperation({ summary: 'Capture the guest signature — a legal document, signed once' })

@@ -15,6 +15,7 @@ import {
 import { UpdateOverbookingConfigDto } from './dto/overbooking-config.dto';
 import { CreateBuildingDto, CreateFloorDto } from './dto/structure.dto';
 import { PropertyService } from './property.service';
+import { BranchOf } from '../../common/decorators/branch-of.decorator';
 
 @ApiTags('property')
 @ApiBearerAuth()
@@ -186,6 +187,7 @@ export class PropertyController {
   }
 
   @Post('buildings/:buildingId/floors')
+  @BranchOf('building', 'buildingId')
   @Roles(SystemRole.Owner, SystemRole.Manager)
   @ApiOperation({ summary: 'Create a floor in a building' })
   createFloor(

@@ -6,6 +6,7 @@ import { ALL_SYSTEM_ROLES, Roles, SystemRole } from '../../common/decorators/rol
 import { JwtPayload } from '../../common/types/request-context';
 import { CalculateRateDto, CreateRatePlanDto, UpdateRatePlanDto } from './dto/rate-resolver.dto';
 import { RateResolverService } from './rate-resolver.service';
+import { BranchOf } from '../../common/decorators/branch-of.decorator';
 
 @ApiTags('rate-resolver')
 @ApiBearerAuth()
@@ -53,6 +54,7 @@ export class RateResolverController {
   }
 
   @Patch('rate-plans/:ratePlanId')
+  @BranchOf('ratePlan', 'ratePlanId')
   @Roles(SystemRole.Owner, SystemRole.Manager)
   @ApiOperation({ summary: 'Retire or reinstate a rate plan (isActive) — plans are never deleted' })
   updateRatePlan(

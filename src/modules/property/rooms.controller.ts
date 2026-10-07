@@ -7,6 +7,7 @@ import { JwtPayload } from '../../common/types/request-context';
 import { CreateRoomTypeDto, UpdateRoomTypeDto } from './dto/room-type.dto';
 import { BulkCreateRoomsDto, ChangeRoomStatusDto, CreateRoomBlockDto } from './dto/rooms.dto';
 import { RoomsService } from './rooms.service';
+import { BranchOf } from '../../common/decorators/branch-of.decorator';
 
 @ApiTags('rooms')
 @ApiBearerAuth()
@@ -38,6 +39,7 @@ export class RoomsController {
   }
 
   @Patch('room-types/:roomTypeId')
+  @BranchOf('roomType', 'roomTypeId')
   @Roles(SystemRole.Owner, SystemRole.Manager)
   @ApiOperation({ summary: 'Update a room type — Property Config\'s own editor, never retroactively reprices existing reservations' })
   updateRoomType(
@@ -75,6 +77,7 @@ export class RoomsController {
   }
 
   @Patch('rooms/:roomId/status')
+  @BranchOf('room', 'roomId')
   @Roles(...ALL_SYSTEM_ROLES)
   @ApiOperation({
     summary:
@@ -90,6 +93,7 @@ export class RoomsController {
   }
 
   @Post('rooms/:roomId/block')
+  @BranchOf('room', 'roomId')
   @Permission('property', 'update')
   @Roles(SystemRole.Owner, SystemRole.Manager)
   @ApiOperation({ summary: 'Create a date-ranged administrative block on a room' })
@@ -113,6 +117,7 @@ export class RoomsController {
   }
 
   @Post('room-blocks/:blockId/end')
+  @BranchOf('roomBlock', 'blockId')
   @Permission('property', 'update')
   @Roles(SystemRole.Owner, SystemRole.Manager)
   @ApiOperation({ summary: 'End a room block early by pulling its toDate back to today' })
