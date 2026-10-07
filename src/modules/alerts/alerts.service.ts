@@ -28,10 +28,12 @@ const ALERT_RESERVATION_SELECT = {
  * reference's own hardcoded noon-Lagos-only assumption (this codebase's
  * hotels are not all in one country).
  *
- * Only three categories exist here, not the reference's four — Roomick's
- * booking lifecycle has no "unconfirmed/pending-payment hold" status
- * (`ReservationStatus` has no `hold` value), so that category has no real
- * equivalent to port.
+ * Roomick's booking lifecycle has no "unconfirmed/pending-payment hold"
+ * status (`ReservationStatus` has no `hold` value), so the reference's
+ * fourth category has no real equivalent to port. It has one the reference
+ * lacks instead: **maintenance** — an unresolved work order that is urgent,
+ * or that has a room out of service (a room that can't be sold until it's
+ * fixed). It clears itself when the work order is resolved or cancelled.
  */
 @Injectable()
 export class AlertsService {
@@ -42,21 +44,47 @@ export class AlertsService {
   ) {}
 
   async getAlerts(tenantId: string, branchId: string) {
-    const [reservationAlerts, overdueBalances] = await Promise.all([
+    const [reservationAlerts, overdueBalances, maintenance] = await Promise.all([
       this.getReservationAlerts(tenantId, branchId),
       // Reuses FoliosService's own existing "overdue" filter — a checked-out
       // guest still owing money, the City Ledger case `PMS-OPERATIONS-
       // GUIDE.md:221` names — rather than re-deriving a second copy of the
       // same balance computation here.
       this.foliosService.listFolios(tenantId, branchId, 'overdue'),
+      this.getMaintenanceAlerts(tenantId, branchId),
     ]);
 
     return {
       missedCheckIns: reservationAlerts.missedCheckIns,
       overdueCheckouts: reservationAlerts.overdueCheckouts,
       overdueBalances,
-      total: reservationAlerts.missedCheckIns.length + reservationAlerts.overdueCheckouts.length + overdueBalances.length,
+      maintenance,
+      total: reservationAlerts.missedCheckIns.length + reservationAlerts.overdueCheckouts.length + overdueBalances.length + maintenance.length,
     };
+  }
+
+  /** Unresolved work orders that are urgent, or that keep a room out of service — oldest first. */
+  private async getMaintenanceAlerts(tenantId: string, branchId: string) {
+    return this.prisma.withTenant(tenantId, (tx) =>
+      tx.maintenanceOrder.findMany({
+        where: {
+          branchId,
+          status: { in: ['open', 'in_progress', 'on_hold'] },
+          OR: [{ priority: 'urgent' }, { takesRoomOutOfService: true }],
+        },
+        select: {
+          id: true,
+          title: true,
+          priority: true,
+          status: true,
+          takesRoomOutOfService: true,
+          createdAt: true,
+          room: { select: { number: true } },
+          assignedToUser: { select: { name: true } },
+        },
+        orderBy: { createdAt: 'asc' },
+      }),
+    );
   }
 
   /**

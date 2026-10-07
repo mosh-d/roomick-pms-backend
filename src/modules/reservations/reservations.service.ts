@@ -40,9 +40,12 @@ import {
 } from './dto/reservation.dto';
 
 const RESERVATION_INCLUDE = {
-  guest: { select: { id: true, name: true, email: true, phone: true } },
+  // VIP level for the badge on Arrivals and the In-House list (ref: "VIP / group badge").
+  guest: { select: { id: true, name: true, email: true, phone: true, vipLevel: true } },
   roomType: { select: { id: true, name: true } },
   room: { select: { id: true, number: true } },
+  // The group a stay was booked into, for the same lists' Group column.
+  groupBlock: { select: { id: true, name: true } },
   // The check-in night's winning plan only — see `RateResolverService
   // .resolveStay`'s own comment on why a single FK can't represent a stay
   // whose rate changes mid-week. NULL when the stay resolved to the plain

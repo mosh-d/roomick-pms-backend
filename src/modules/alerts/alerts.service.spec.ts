@@ -28,6 +28,7 @@ function makeTx() {
         Promise.resolve(where.status === 'confirmed' ? [] : []),
       ),
     },
+    maintenanceOrder: { findMany: jest.fn().mockResolvedValue([]) },
   };
 }
 
@@ -55,7 +56,19 @@ describe('AlertsService', () => {
 
   it('reports zero alerts when nothing is missed/overdue', async () => {
     const result = await service.getAlerts(TENANT_ID, BRANCH_ID);
-    expect(result).toEqual({ missedCheckIns: [], overdueCheckouts: [], overdueBalances: [], total: 0 });
+    expect(result).toEqual({ missedCheckIns: [], overdueCheckouts: [], overdueBalances: [], maintenance: [], total: 0 });
+  });
+
+  it('flags unresolved work orders that are urgent or keep a room out of service, and counts them', async () => {
+    tx.maintenanceOrder.findMany.mockResolvedValueOnce([{ id: 'wo-1', title: 'Burst pipe', priority: 'urgent', status: 'open', takesRoomOutOfService: true }]);
+    const result = await service.getAlerts(TENANT_ID, BRANCH_ID);
+    expect(tx.maintenanceOrder.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { branchId: BRANCH_ID, status: { in: ['open', 'in_progress', 'on_hold'] }, OR: [{ priority: 'urgent' }, { takesRoomOutOfService: true }] },
+      }),
+    );
+    expect(result.maintenance).toHaveLength(1);
+    expect(result.total).toBe(1);
   });
 
   it('flags a confirmed reservation whose check-in date is strictly in the past, regardless of clock time', async () => {
