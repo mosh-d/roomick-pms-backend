@@ -1,5 +1,49 @@
 # Phase Notes
 
+## Accounts and guest terms: invitations, passwords, email confirmation, privacy notice and booking terms, document retention, and the manage link (2026-10-07)
+
+The owner asked for the work that doesn't need their accounts to be finished: accepting staff invitations end to end, changing and resetting passwords, real email confirmation at sign-up, a place for the privacy notice and booking terms, document retention, and "Manage your booking" links in guest emails. Migration `20261008020000`.
+
+### Two security holes closed first
+- **Accepting an invitation sent to an existing address signed in as that person, with any password.** `acceptInvite` looked the user up and issued a session without checking the password at all — a manager could invite the owner's email to a branch, open the link and be the owner. Now someone who already has an account here gives **that account's own password**; the role is added and they're sent to sign in as usual (two-step sign-in included) — the response is `{ joined: true }`, never a session. A deactivated account is refused (409).
+- **A manager could make anyone anything.** Invitations took any role (owner included), and `PATCH /staff/:userId` let a manager change anyone's role at any branch — their own included, to owner — or deactivate the owner. The rules now (`common/utils/staff-authority.ts`), checked before anything is written: nobody is ever invited as, or made, owner; only the owner hands out the manager role, or a role across every branch; a manager works only at the branches they manage; nobody changes their own role or switches their own account off; an owner's account can't be changed here and a manager's only by the owner; deactivating someone, or making them a reset link, touches their whole account, so a manager may do it only when every role that person holds is at a branch they manage. Outlet assignments follow the same branch rule. Deactivating also ends the person's sessions.
+
+### Account emails
+- `AccountMailService` sends the emails about someone's own account straight through the mail transport after the database work commits: confirming the owner's email, a staff invitation, a password reset. Each send says whether it really went. **With no email provider nothing is sent — not even to the log**: these bodies carry sign-in links, and a link in the server log is a link anyone reading the log can use.
+- Every link is built from `PUBLIC_WEB_BASE_URL` only (`common/utils/web-url.ts`) — never from anything a request carries, so nobody can have a reset email point at their own site. **Required in production** (the API won't start without it); development defaults to `http://localhost:3001`.
+
+### Staff invitations
+- `GET /auth/invites/:token` (public) — what the accept page shows first: who, where, as what, until when, and whether that email already has an account here.
+- Invitations are emailed when email is set up; the response always carries each `link` and whether it was `emailed`, to hand over otherwise.
+- `GET /branches/:branchId/staff/invites` — pending invitations (expired ones marked); the link only for invitations the person asking could have made (a manager never sees the link to a manager's invitation). `DELETE /staff-invites/:inviteId` withdraws one. Inviting the same email and role again is how one is sent again.
+- An address belonging to a deactivated account is refused up front ("reactivate instead").
+- The staff list says, per person, what the person asking may change (`canChangeRole`, `canManageAccount`).
+
+### Passwords
+- `POST /auth/change-password` — needs the current one (a wrong one is a 400, so the app doesn't go renewing a session that's fine), wants a different one, ends every session and every unused reset link, and returns a fresh session for this browser.
+- `POST /auth/forgot-password` — answers at once and the same for any address; the work happens after the response, so neither the answer nor its timing says whether an account exists. A one-hour link by email; one email a minute per account at most. With no email provider the answer says so (`emailEnabled: false`) — a manager makes a link instead.
+- `POST /staff/:userId/password-reset-link` — a 24-hour link for a colleague who's locked out, emailed to them when email is set up and returned to hand over. Owner for anyone but themselves; a manager under the rules above.
+- `POST /auth/reset-password` — single-use (a conditional claim, so two tabs can't both use it), ends every session. Links are `<tenantId>.<secret>` and **only a hash of the secret is stored** (`password_reset_tokens`, RLS). A link the person asked for proves their email; one a manager handed over doesn't. Two-step sign-in is untouched by a reset.
+
+### Email confirmation at sign-up
+- With an email provider, the owner gets a confirmation link (72 hours) and the token is **no longer returned** by `POST /auth/register` (`verificationToken: null`, `emailed: true`). Without one, nothing changes: the token comes back and the sign-up page confirms on the spot.
+- `POST /auth/resend-verification` — with email, sends a fresh link in the background, the same answer for any address; without, it gives the token back only for the account's own password (the same shortcut sign-up uses), so an abandoned sign-up isn't locked out.
+
+### Privacy notice and booking terms
+- `Branch.privacyNotice`, `Branch.bookingTerms`, set with `PATCH /branches/:branchId/policies/guest-terms` (owner, manager; blank clears one; audited with the text before and after).
+- The public property includes both. **Once either is set, `POST /public/properties/:slug/reservations` needs `acceptTerms: true`** — checked before anything is held — and the booking records `termsAcceptedAt`. Which words were accepted is answerable from the audit log.
+
+### Document retention
+- `Tenant.documentRetentionMonths` — off (keep everything) until the owner picks 6 to 240 months. `GET /gdpr/retention` (with `?months=` it previews what that period would remove, changing nothing), `PUT /gdpr/retention`, `POST /gdpr/retention/run` — owner only, like the rest of GDPR.
+- Every night at 04:30 (`RetentionScheduler`), per tenant, in batches of 200: **registration cards** of stays that ended before the period lose the guest's name, email, phone, signature and stored PDF (`purgedAt` set; the stay's own record — room, dates, rate, confirmation number — stays); **ID documents** of guests whose last stay ended before the period and who have nothing booked are cleared, photo included. Stays, bills and payments are never touched. Files are deleted after the commit. The audit trail gets counts only (`retention.purged`). A removed card can't be signed.
+
+### "Manage your booking" in guest emails
+The booking confirmation and the check-in receipt end with `Manage your booking: <web>/book/<slug>/manage?confirmation=<number>` when the branch's booking pages are on. The link carries the confirmation number only — the guest still types the email the booking is under, so a forwarded link opens nothing by itself.
+
+### Verified
+- **Checks:** `tsc` and lint clean; **1,216 tests** in 67 suites (new: the invitation preview and both acceptance paths, every staff rule, pending invitations, passwords end to end, email confirmation both ways, the account emails, retention, the terms gate, the manage link, the production setting).
+- **Live, against real Postgres, 62/62 with no email provider and 23/23 with email through a local SMTP server:** invitations handed over and emailed, accepted on a phone, refused when withdrawn or used, and an existing account let in only with its own password; every manager limit, from the API and on the page; a reset link handed over and one emailed, the old password and old sessions dead afterwards, the link single-use; forgot-password both ways, the same answer for an unknown address and no second email within the minute; changing a password signs out the other browser and keeps this one; an unconfirmed owner confirming from the sign-in page; sign-up confirming on the page, and by email with the link opened in another tab; terms shown, required, recorded; the manage link in the confirmation email, filling in the number; retention previewing, asking, removing the right things and auditing counts; no token ever in the server log.
+
 ## Staff Management → Page Access: a branch manager chooses each staff role's pages (2026-10-07)
 
 The owner asked for a staff management module where a branch manager sets which screens each staff role can open. Migration `20261008010000`.
