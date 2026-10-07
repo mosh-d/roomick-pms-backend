@@ -17,6 +17,7 @@ function makeTx() {
     lineItem: { findMany: jest.fn().mockResolvedValue([]) },
     payment: { findMany: jest.fn().mockResolvedValue([]) },
     posOrder: { findMany: jest.fn().mockResolvedValue([]) },
+    taxRule: { findMany: jest.fn().mockResolvedValue([]) },
   };
 }
 
@@ -200,6 +201,71 @@ describe('ReportsService', () => {
       ]);
       const result = await service.getRevenue(TENANT_ID, BRANCH_ID, { from: '2026-09-01', to: '2026-09-03' });
       expect(result.trend).toEqual([{ period: '2026-09-01', amount: '100.00' }, { period: '2026-09-02', amount: '200.00' }]);
+    });
+  });
+
+  describe('getFinancial', () => {
+    const VAT = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    const LEVY = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+    const d = (v: string) => new Prisma.Decimal(v);
+
+    beforeEach(() => {
+      propertyService.assertBranch.mockResolvedValue({ id: BRANCH_ID, currency: 'NGN', timezone: 'Africa/Lagos' });
+      tx.taxRule.findMany.mockResolvedValue([
+        { id: VAT, name: 'VAT', type: 'percentage', rate: d('0.075'), fixedAmount: null, inclusive: false },
+        { id: LEVY, name: 'City Levy', type: 'fixed', rate: d('0'), fixedAmount: d('500'), inclusive: false },
+      ]);
+      tx.lineItem.findMany
+        .mockResolvedValueOnce([
+          { amount: d('100000'), chargeType: 'room', serviceDate: new Date('2026-09-01T00:00:00.000Z'), taxRuleIds: [], parentLineItemId: null, correctsLineItem: null },
+          { amount: d('7500'), chargeType: 'tax', serviceDate: new Date('2026-09-01T00:00:00.000Z'), taxRuleIds: [VAT], parentLineItemId: 'room-1', correctsLineItem: null },
+          { amount: d('500'), chargeType: 'tax', serviceDate: new Date('2026-09-01T00:00:00.000Z'), taxRuleIds: [LEVY], parentLineItemId: 'room-1', correctsLineItem: null },
+          { amount: d('5000'), chargeType: 'minibar', serviceDate: new Date('2026-09-02T00:00:00.000Z'), taxRuleIds: [], parentLineItemId: null, correctsLineItem: null },
+          { amount: d('-5000'), chargeType: 'correction', serviceDate: new Date('2026-09-02T00:00:00.000Z'), taxRuleIds: [], parentLineItemId: null, correctsLineItem: { chargeType: 'minibar' } },
+        ])
+        .mockResolvedValueOnce([{ id: 'room-1', amount: d('100000') }]);
+      tx.payment.findMany.mockResolvedValue([
+        { amount: d('108000'), method: 'card', recordedAt: new Date('2026-09-01T10:00:00.000Z') },
+        { amount: d('-3000'), method: 'cash', recordedAt: new Date('2026-09-02T10:00:00.000Z') },
+      ]);
+      tx.posOrder.findMany.mockResolvedValue([
+        { subtotal: d('10000'), taxTotal: d('750'), total: d('10750'), settlement: 'cash', createdAt: new Date('2026-09-02T12:00:00.000Z'), outlet: { chargeType: 'fnb' } },
+      ]);
+    });
+
+    it('earned, taxed, and money in and back — per day, with every day in the range', async () => {
+      const result = await service.getFinancial(TENANT_ID, BRANCH_ID, { from: '2026-09-01', to: '2026-09-04' });
+      expect(result.summary).toEqual({ revenue: '110000.00', tax: '8750.00', billed: '118750.00', moneyIn: '118750.00', moneyBack: '3000.00', net: '115750.00' });
+      expect(result.periods.map((p) => p.period)).toEqual(['2026-09-01', '2026-09-02', '2026-09-03']);
+      // The corrected minibar nets out of its own department; the walk-in bar sale is F&B.
+      expect(result.periods[1].departments).toEqual({ minibar: '0.00', fnb: '10000.00' });
+      expect(result.periods[2]).toMatchObject({ revenue: '0.00', tax: '0.00', moneyIn: '0.00' });
+    });
+
+    it('tax by rule with its taxable base — a fixed levy is based on the charges it was added to', async () => {
+      const result = await service.getFinancial(TENANT_ID, BRANCH_ID, { from: '2026-09-01', to: '2026-09-04' });
+      expect(result.taxSummary).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ ruleName: 'VAT', taxableBase: '100000.00', taxCollected: '7500.00' }),
+          expect.objectContaining({ ruleName: 'City Levy', taxableBase: '100000.00', taxCollected: '500.00' }),
+        ]),
+      );
+      expect(result.posTax).toBe('750.00');
+    });
+
+    it('payment methods show money in and money back separately', async () => {
+      const result = await service.getFinancial(TENANT_ID, BRANCH_ID, { from: '2026-09-01', to: '2026-09-04' });
+      expect(result.paymentMethods).toEqual(
+        expect.arrayContaining([
+          { method: 'card', moneyIn: '108000.00', moneyBack: '0.00' },
+          { method: 'cash', moneyIn: '10750.00', moneyBack: '3000.00' },
+        ]),
+      );
+    });
+
+    it('groups by month too', async () => {
+      const result = await service.getFinancial(TENANT_ID, BRANCH_ID, { from: '2026-09-29', to: '2026-10-02', groupBy: 'month' });
+      expect(result.periods.map((p) => p.period)).toEqual(['2026-09', '2026-10']);
     });
   });
 

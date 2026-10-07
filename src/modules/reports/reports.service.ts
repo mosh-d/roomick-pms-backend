@@ -345,6 +345,168 @@ export class ReportsService {
     });
   }
 
+  /**
+   * Financial Reports (ref: "Daily revenue, tax, cash flow, monthly summary"
+   * — revenue by department, tax breakdown, cash flow, payment methods) for
+   * the accountant: what was earned and taxed per period, and what money
+   * came in and went back out.
+   *
+   * - **Revenue** is the same as the Revenue report's: folio charges by
+   *   service date, by department, tax excluded, corrections against the
+   *   department they reverse; walk-in Point of Sale sales by the day they
+   *   were rung up.
+   * - **Tax** is every tax line by service date, by rule, with the taxable
+   *   base worked out the way a bill's Tax Breakdown does; walk-in Point of
+   *   Sale tax is one row of its own (a sale stores its tax total, not each
+   *   rule's share).
+   * - **Money in / back** is payments by the branch's own day — positive in,
+   *   negative (refunds, a walk's reversal) back out — and walk-in sales.
+   *   Loyalty points aren't money and are left out.
+   */
+  async getFinancial(tenantId: string, branchId: string, dto: ReportQueryDto) {
+    const from = toBranchDate(dto.from);
+    const to = toBranchDate(dto.to);
+    const groupBy: ReportGroupBy = dto.groupBy ?? 'day';
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const branch = await this.propertyService.assertBranch(tx, branchId);
+      const momentsFrom = branchDayStart(dto.from, branch.timezone);
+      const momentsTo = branchDayStart(dto.to, branch.timezone);
+
+      const [lineItems, payments, posSales, rules] = await Promise.all([
+        tx.lineItem.findMany({
+          where: { folio: { branchId }, isVoid: false, deletedAt: null, serviceDate: { gte: from, lt: to } },
+          select: { amount: true, chargeType: true, serviceDate: true, taxRuleIds: true, parentLineItemId: true, correctsLineItem: { select: { chargeType: true } } },
+        }),
+        tx.payment.findMany({
+          where: { folio: { branchId }, isVoid: false, deletedAt: null, recordedAt: { gte: momentsFrom, lt: momentsTo }, method: { not: 'loyalty_points' } },
+          select: { amount: true, method: true, recordedAt: true },
+        }),
+        tx.posOrder.findMany({
+          where: { branchId, settlement: { in: ['cash', 'card'] }, voidedAt: null, createdAt: { gte: momentsFrom, lt: momentsTo } },
+          select: { subtotal: true, taxTotal: true, total: true, settlement: true, createdAt: true, outlet: { select: { chargeType: true } } },
+        }),
+        tx.taxRule.findMany({ where: { branchId } }),
+      ]);
+
+      type Period = { departments: Map<string, Prisma.Decimal>; revenue: Prisma.Decimal; tax: Prisma.Decimal; moneyIn: Prisma.Decimal; moneyBack: Prisma.Decimal };
+      const periods = new Map<string, Period>();
+      for (const day of this.enumerateDays(from, to)) {
+        const key = this.periodKeyFor(day, groupBy, from);
+        if (!periods.has(key)) periods.set(key, { departments: new Map(), revenue: ZERO, tax: ZERO, moneyIn: ZERO, moneyBack: ZERO });
+      }
+      const periodOf = (date: Date) => periods.get(this.periodKeyFor(date, groupBy, from));
+      const departments = new Set<string>();
+      const taxByRule = new Map<string, Prisma.Decimal>();
+      const fixedBaseByRule = new Map<string, Prisma.Decimal>();
+      const methods = new Map<string, { moneyIn: Prisma.Decimal; moneyBack: Prisma.Decimal }>();
+      let posTax = ZERO;
+
+      // Fixed-rule bases are the charges themselves — the parent of each of its tax lines.
+      const parentIds = [...new Set(lineItems.filter((li) => li.chargeType === 'tax' && li.parentLineItemId).map((li) => li.parentLineItemId as string))];
+      const parents = parentIds.length ? await tx.lineItem.findMany({ where: { id: { in: parentIds } }, select: { id: true, amount: true } }) : [];
+      const parentAmount = new Map(parents.map((p) => [p.id, p.amount]));
+
+      for (const li of lineItems) {
+        const period = li.serviceDate ? periodOf(li.serviceDate) : undefined;
+        if (!period) continue;
+        if (li.chargeType === 'tax') {
+          period.tax = period.tax.plus(li.amount);
+          const ruleId = li.taxRuleIds[0];
+          if (ruleId) {
+            taxByRule.set(ruleId, (taxByRule.get(ruleId) ?? ZERO).plus(li.amount));
+            const base = li.parentLineItemId ? parentAmount.get(li.parentLineItemId) : undefined;
+            if (base) fixedBaseByRule.set(ruleId, (fixedBaseByRule.get(ruleId) ?? ZERO).plus(base));
+          }
+          continue;
+        }
+        const department = li.correctsLineItem?.chargeType ?? li.chargeType;
+        departments.add(department);
+        period.departments.set(department, (period.departments.get(department) ?? ZERO).plus(li.amount));
+        period.revenue = period.revenue.plus(li.amount);
+      }
+
+      const method = (name: string) => {
+        const entry = methods.get(name) ?? { moneyIn: ZERO, moneyBack: ZERO };
+        methods.set(name, entry);
+        return entry;
+      };
+      for (const sale of posSales) {
+        const period = periodOf(toBranchDate(localDateOf(sale.createdAt, branch.timezone)));
+        if (!period) continue;
+        const department = sale.outlet.chargeType;
+        departments.add(department);
+        period.departments.set(department, (period.departments.get(department) ?? ZERO).plus(sale.subtotal));
+        period.revenue = period.revenue.plus(sale.subtotal);
+        period.tax = period.tax.plus(sale.taxTotal);
+        posTax = posTax.plus(sale.taxTotal);
+        period.moneyIn = period.moneyIn.plus(sale.total);
+        method(sale.settlement).moneyIn = method(sale.settlement).moneyIn.plus(sale.total);
+      }
+      for (const payment of payments) {
+        const period = periodOf(toBranchDate(localDateOf(payment.recordedAt, branch.timezone)));
+        if (!period) continue;
+        if (payment.amount.greaterThan(0)) {
+          period.moneyIn = period.moneyIn.plus(payment.amount);
+          method(payment.method).moneyIn = method(payment.method).moneyIn.plus(payment.amount);
+        } else {
+          period.moneyBack = period.moneyBack.plus(payment.amount.negated());
+          method(payment.method).moneyBack = method(payment.method).moneyBack.plus(payment.amount.negated());
+        }
+      }
+
+      const ruleById = new Map(rules.map((r) => [r.id, r]));
+      const taxSummary = [...taxByRule.entries()].map(([ruleId, collected]) => {
+        const rule = ruleById.get(ruleId);
+        const taxableBase =
+          rule?.type === 'fixed' ? (fixedBaseByRule.get(ruleId) ?? ZERO) : rule && !rule.rate.isZero() ? collected.div(rule.rate).toDecimalPlaces(2) : ZERO;
+        return {
+          ruleId,
+          ruleName: rule?.name ?? 'Unknown rule',
+          type: rule?.type ?? 'percentage',
+          rate: (rule?.rate ?? ZERO).toFixed(4),
+          fixedAmount: rule?.fixedAmount?.toFixed(2) ?? null,
+          inclusive: rule?.inclusive ?? false,
+          taxableBase: taxableBase.toFixed(2),
+          taxCollected: collected.toFixed(2),
+        };
+      });
+
+      const rows = [...periods.entries()].map(([period, p]) => ({
+        period,
+        departments: Object.fromEntries([...p.departments.entries()].map(([k, v]) => [k, v.toFixed(2)])),
+        revenue: p.revenue.toFixed(2),
+        tax: p.tax.toFixed(2),
+        moneyIn: p.moneyIn.toFixed(2),
+        moneyBack: p.moneyBack.toFixed(2),
+      }));
+      const sum = (pick: (p: Period) => Prisma.Decimal) => [...periods.values()].reduce((s, p) => s.plus(pick(p)), ZERO);
+      const revenue = sum((p) => p.revenue);
+      const tax = sum((p) => p.tax);
+      const moneyIn = sum((p) => p.moneyIn);
+      const moneyBack = sum((p) => p.moneyBack);
+
+      return {
+        from: dto.from,
+        to: dto.to,
+        groupBy,
+        currency: branch.currency,
+        summary: {
+          revenue: revenue.toFixed(2),
+          tax: tax.toFixed(2),
+          billed: revenue.plus(tax).toFixed(2),
+          moneyIn: moneyIn.toFixed(2),
+          moneyBack: moneyBack.toFixed(2),
+          net: moneyIn.minus(moneyBack).toFixed(2),
+        },
+        departments: [...departments].sort(),
+        periods: rows,
+        taxSummary,
+        posTax: posTax.toFixed(2),
+        paymentMethods: [...methods.entries()].map(([name, m]) => ({ method: name, moneyIn: m.moneyIn.toFixed(2), moneyBack: m.moneyBack.toFixed(2) })),
+      };
+    });
+  }
+
   // --- PDF export — one `renderReportPdf` layout shared by all four report
   // types (`report-pdf.util.ts`'s own header comment). Each method here is
   // just the adapter from that report's own JSON shape to the generic

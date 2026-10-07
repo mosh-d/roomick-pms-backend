@@ -2,6 +2,7 @@ import { Controller, Get, Param, ParseUUIDPipe, Query, Res } from '@nestjs/commo
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import type { Response } from 'express';
 import { CurrentTenant } from '../../common/decorators';
+import { Roles, SystemRole } from '../../common/decorators/roles.decorator';
 import { ReportQueryDto } from './dto/report-query.dto';
 import { ReportsService } from './reports.service';
 
@@ -49,6 +50,17 @@ export class ReportsController {
     @Query() query: ReportQueryDto,
   ): ReturnType<ReportsService['getRevenue']> {
     return this.reportsService.getRevenue(tenantId, branchId, query);
+  }
+
+  @Get('financial')
+  @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.Accountant)
+  @ApiOperation({ summary: 'Financial Reports — revenue by department, tax by rule, money in and back out, per day/week/month' })
+  getFinancial(
+    @CurrentTenant() tenantId: string,
+    @Param('branchId', ParseUUIDPipe) branchId: string,
+    @Query() query: ReportQueryDto,
+  ): ReturnType<ReportsService['getFinancial']> {
+    return this.reportsService.getFinancial(tenantId, branchId, query);
   }
 
   @Get('occupancy/pdf')
