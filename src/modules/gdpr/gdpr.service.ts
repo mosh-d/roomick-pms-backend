@@ -195,10 +195,20 @@ export class GdprService {
         if (card.documentUrl) filesToDelete.push(card.documentUrl);
       }
 
-      const [notes, messages, stays] = await Promise.all([
+      const [notes, messages, stays, webhookDeliveries] = await Promise.all([
         tx.guestNote.updateMany({ where: { guestId: guest.id }, data: { body: ERASED_TEXT } }),
         tx.communicationLog.updateMany({ where: { guestId: guest.id }, data: { body: ERASED_TEXT, bodyHtml: null } }),
         tx.reservation.updateMany({ where: { guestId: guest.id }, data: { specialRequests: null, estimatedArrivalTime: null } }),
+        // A webhook delivery carries the guest as they stood when it was
+        // queued; the log of them goes too, sent or not.
+        tx.webhookDelivery.deleteMany({
+          where: {
+            OR: [
+              { payload: { path: ['data', 'reservation', 'guest', 'id'], equals: guest.id } },
+              { payload: { path: ['data', 'guest', 'id'], equals: guest.id } },
+            ],
+          },
+        }),
       ]);
       // A bill's payer is the guest unless someone else (a company) was named.
       if (folioIds.length > 0) {
@@ -208,7 +218,7 @@ export class GdprService {
         }
       }
 
-      const note = `Erased in Roomick on ${now.toISOString().slice(0, 10)}: identity and contact details, ID document, registration cards, notes and messages. Bills, payments and stays kept as the financial record.`;
+      const note = `Erased in Roomick on ${now.toISOString().slice(0, 10)}: identity and contact details, ID document, registration cards, notes, messages and webhook deliveries. Bills, payments and stays kept as the financial record.`;
       const updated = await tx.gdprRequest.update({
         where: { id: request.id },
         data: { status: 'completed', completedAt: now, notes: request.notes ? `${request.notes}\n${note}` : note },
@@ -228,6 +238,7 @@ export class GdprService {
             notes: notes.count,
             messages: messages.count,
             stays: stays.count,
+            webhookDeliveries: webhookDeliveries.count,
             documentsDeleted: filesToDelete.length,
           },
         },

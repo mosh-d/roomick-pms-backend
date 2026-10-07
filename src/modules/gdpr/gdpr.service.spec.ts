@@ -43,6 +43,7 @@ function makeTx() {
     communicationLog: { findMany: jest.fn().mockResolvedValue([]), updateMany: jest.fn().mockResolvedValue({ count: 3 }) },
     registrationCard: { findMany: jest.fn().mockResolvedValue([]), update: jest.fn().mockResolvedValue({}) },
     guestNote: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
+    webhookDelivery: { deleteMany: jest.fn().mockResolvedValue({ count: 2 }) },
     lineItem: { aggregate: jest.fn().mockResolvedValue({ _sum: { amount: new Prisma.Decimal('64500') } }) },
     payment: { aggregate: jest.fn().mockResolvedValue({ _sum: { amount: new Prisma.Decimal('64500') } }) },
     auditLog: { create: jest.fn().mockResolvedValue({}) },
@@ -202,6 +203,15 @@ describe('GdprService', () => {
 
       expect(tx.communicationLog.updateMany).toHaveBeenCalledWith({ where: { guestId: GUEST_ID }, data: { body: '[erased]', bodyHtml: null } });
       expect(tx.guestNote.updateMany).toHaveBeenCalledWith({ where: { guestId: GUEST_ID }, data: { body: '[erased]' } });
+      // webhook deliveries that carried the guest are gone too
+      expect(tx.webhookDelivery.deleteMany).toHaveBeenCalledWith({
+        where: {
+          OR: [
+            { payload: { path: ['data', 'reservation', 'guest', 'id'], equals: GUEST_ID } },
+            { payload: { path: ['data', 'guest', 'id'], equals: GUEST_ID } },
+          ],
+        },
+      });
       // payer details only where they were the guest's own
       expect(tx.folio.updateMany).toHaveBeenCalledWith({ where: { id: { in: ['folio-1'] }, payerName: { equals: 'Jane Doe', mode: 'insensitive' } }, data: { payerName: 'Erased guest' } });
 
