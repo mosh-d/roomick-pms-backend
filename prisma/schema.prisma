@@ -376,6 +376,7 @@ model Tenant {
   marketingCampaigns       MarketingCampaign[]
   campaignRecipients       CampaignRecipient[]
   integrationConnections   IntegrationConnection[]
+  refreshTokens            RefreshToken[]
 
   @@index([isDemo, demoExpiresAt])
   @@map("tenants")
@@ -437,6 +438,7 @@ model User {
   communicationsSent         CommunicationLog[]
   auditLogs                  AuditLog[]
   guestNotesAuthored         GuestNote[]
+  refreshTokens              RefreshToken[]
 
   // Global, not per-tenant: login is plain email+password now (no
   // subdomain/tenant header to disambiguate), so one email can only ever
@@ -2160,4 +2162,26 @@ model BackupRecord {
 
   @@index([tenantId])
   @@map("backup_records")
+}
+
+/// One signed-in session's refresh token, kept only as a SHA-256 hash. Each
+/// renewal revokes the one used and issues a new one; signing out revokes it;
+/// a revoked or expired one is refused. Before this the refresh token was a
+/// bare 30-day JWT the server never saw again — nothing could end a session
+/// early, and signing out only forgot it in the browser.
+model RefreshToken {
+  id        String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String    @db.Uuid
+  userId    String    @db.Uuid
+  tokenHash String    @unique @db.Char(64)
+  expiresAt DateTime  @db.Timestamptz(6)
+  revokedAt DateTime? @db.Timestamptz(6)
+  createdAt DateTime  @default(now()) @db.Timestamptz(6)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("refresh_tokens")
 }

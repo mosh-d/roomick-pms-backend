@@ -90,6 +90,15 @@ export class AuthController {
   }
 
   @Public()
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
+  @Post('logout')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiOperation({ summary: 'End the session behind a refresh token — signing out on the server, not just in the browser' })
+  logout(@Body() dto: RefreshTokenDto): Promise<void> {
+    return this.authService.logout(dto.refreshToken);
+  }
+
+  @Public()
   @Throttle({ default: { limit: 10, ttl: 60_000 } })
   @Post('accept-invite/:token')
   @ApiOperation({ summary: 'Accept a staff invite — creates the account and logs in' })

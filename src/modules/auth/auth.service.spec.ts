@@ -56,6 +56,11 @@ function makeTx(): Record<string, Record<string, jest.Mock>> {
     auditLog: {
       create: jest.fn().mockResolvedValue({}),
     },
+    refreshToken: {
+      create: jest.fn().mockResolvedValue({}),
+      findUnique: jest.fn(),
+      updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+    },
   };
 }
 
@@ -67,7 +72,7 @@ describe('AuthService', () => {
     userEmailIndex: { findUnique: jest.Mock; create: jest.Mock };
     withTenant: jest.Mock;
   };
-  let jwt: { signAsync: jest.Mock; verifyAsync: jest.Mock };
+  let jwt: { signAsync: jest.Mock; verifyAsync: jest.Mock; decode: jest.Mock };
   let permissions: { invalidate: jest.Mock; rolesFor: jest.Mock };
   let mfa: { checkSecondFactor: jest.Mock; failureFor: jest.Mock };
 
@@ -93,6 +98,7 @@ describe('AuthService', () => {
     jwt = {
       signAsync: jest.fn().mockResolvedValue('signed.jwt.token'),
       verifyAsync: jest.fn(),
+      decode: jest.fn().mockReturnValue({ exp: Math.floor(Date.now() / 1000) + 7 * 86_400 }),
     };
     permissions = { invalidate: jest.fn(), rolesFor: jest.fn().mockResolvedValue(new Map()) };
     mfa = { checkSecondFactor: jest.fn(), failureFor: jest.fn().mockImplementation(() => new UnauthorizedException({ code: 'MFA_INVALID_CODE' })) };
@@ -245,6 +251,19 @@ describe('AuthService', () => {
       expect(tx.user.update).toHaveBeenCalled(); // lastLoginAt
       expect(tx.auditLog.create).toHaveBeenCalled();
     });
+
+    it('records the session — the refresh token as a hash, never itself, expiring with the token', async () => {
+      tx.user.findFirst.mockResolvedValue(verifiedUser);
+      (bcrypt.compare as jest.Mock).mockResolvedValue(true);
+      await service.login(dto);
+      const data = (tx.refreshToken.create.mock.calls[0] as [{ data: { tokenHash: string; expiresAt: Date; userId: string } }])[0].data;
+      expect(data.userId).toBe(USER_ID);
+      expect(data.tokenHash).toMatch(/^[0-9a-f]{64}$/);
+      expect(data.tokenHash).not.toContain('signed');
+      expect(data.expiresAt.getTime()).toBeGreaterThan(Date.now() + 6 * 86_400_000);
+      // each refresh token carries its own id, so two sign-ins in one second never collide
+      expect(jwt.signAsync).toHaveBeenCalledWith(expect.objectContaining({ tokenType: 'refresh', jti: expect.any(String) }), expect.any(Object));
+    });
   });
 
   describe('refresh', () => {
@@ -258,8 +277,11 @@ describe('AuthService', () => {
       await expect(service.refresh('some.jwt')).rejects.toThrow(UnauthorizedException);
     });
 
-    it('issues a fresh pair with roles reloaded from the DB', async () => {
+    const liveSession = () => ({ id: 'session-1', userId: USER_ID, revokedAt: null, expiresAt: new Date(Date.now() + 86_400_000) });
+
+    it('issues a fresh pair with roles reloaded from the DB, retiring the token it was given', async () => {
       jwt.verifyAsync.mockResolvedValue({ sub: USER_ID, tenantId: TENANT_ID, tokenType: 'refresh' });
+      tx.refreshToken.findUnique.mockResolvedValue(liveSession());
       tx.user.findFirst.mockResolvedValue({
         id: USER_ID,
         tenantId: TENANT_ID,
@@ -270,6 +292,48 @@ describe('AuthService', () => {
       });
       const result = await service.refresh('some.jwt');
       expect(result.user.roles).toEqual([{ branchId: null, role: 'owner' }]);
+      expect(tx.refreshToken.updateMany).toHaveBeenCalledWith({ where: { id: 'session-1', revokedAt: null }, data: { revokedAt: expect.any(Date) } });
+      expect(tx.refreshToken.create).toHaveBeenCalledTimes(1); // its replacement
+    });
+
+    it('refuses a token with no session behind it — signed out, or issued before sessions were stored', async () => {
+      jwt.verifyAsync.mockResolvedValue({ sub: USER_ID, tenantId: TENANT_ID, tokenType: 'refresh' });
+      tx.refreshToken.findUnique.mockResolvedValue(null);
+      await expect(service.refresh('some.jwt')).rejects.toThrow(UnauthorizedException);
+    });
+
+    it('refuses a token already used once, or one whose session expired', async () => {
+      jwt.verifyAsync.mockResolvedValue({ sub: USER_ID, tenantId: TENANT_ID, tokenType: 'refresh' });
+      tx.refreshToken.findUnique.mockResolvedValueOnce({ ...liveSession(), revokedAt: new Date() });
+      await expect(service.refresh('some.jwt')).rejects.toThrow(UnauthorizedException);
+      tx.refreshToken.findUnique.mockResolvedValueOnce({ ...liveSession(), expiresAt: new Date(Date.now() - 1000) });
+      await expect(service.refresh('some.jwt')).rejects.toThrow(UnauthorizedException);
+    });
+
+    it('lets only one of two racing renewals through', async () => {
+      jwt.verifyAsync.mockResolvedValue({ sub: USER_ID, tenantId: TENANT_ID, tokenType: 'refresh' });
+      tx.refreshToken.findUnique.mockResolvedValue(liveSession());
+      tx.refreshToken.updateMany.mockResolvedValue({ count: 0 }); // the other request retired it first
+      await expect(service.refresh('some.jwt')).rejects.toThrow(UnauthorizedException);
+      expect(tx.refreshToken.create).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('logout', () => {
+    it('ends the session on the server and audits it', async () => {
+      jwt.verifyAsync.mockResolvedValue({ sub: USER_ID, tenantId: TENANT_ID, tokenType: 'refresh' });
+      await service.logout('some.jwt');
+      expect(jwt.verifyAsync).toHaveBeenCalledWith('some.jwt', expect.objectContaining({ ignoreExpiration: true }));
+      expect(tx.refreshToken.updateMany).toHaveBeenCalledWith({ where: { tokenHash: expect.stringMatching(/^[0-9a-f]{64}$/), revokedAt: null }, data: { revokedAt: expect.any(Date) } });
+      expect(tx.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: 'auth.logout' }) }));
+    });
+
+    it('is silent about a token that is garbage or not a refresh token', async () => {
+      jwt.verifyAsync.mockRejectedValueOnce(new Error('invalid'));
+      await expect(service.logout('nope')).resolves.toBeUndefined();
+      jwt.verifyAsync.mockResolvedValueOnce({ sub: USER_ID, tenantId: TENANT_ID, tokenType: 'access' });
+      await expect(service.logout('access.jwt')).resolves.toBeUndefined();
+      expect(tx.refreshToken.updateMany).not.toHaveBeenCalled();
     });
   });
 

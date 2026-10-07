@@ -11,7 +11,7 @@ import { ConfigService } from '@nestjs/config';
 import { JwtService, JwtSignOptions } from '@nestjs/jwt';
 import { Prisma, Role, User } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { ErrorCode } from '../../common/errors/error-codes';
 import { PERMISSION_ACTIONS, PERMISSION_MODULES, PermissionModule, parsePermissions } from '../../common/permissions/permission-catalogue';
 import { PermissionsService } from '../../common/permissions/permissions.service';
@@ -85,7 +85,16 @@ interface RefreshTokenPayload {
   sub: string;
   tenantId: string;
   tokenType: 'refresh';
+  /** Makes every refresh token unique — two sign-ins in the same second would otherwise sign identical tokens. */
+  jti?: string;
 }
+
+/** Refresh tokens are stored as this, never as themselves. */
+function hashToken(token: string): string {
+  return createHash('sha256').update(token).digest('hex');
+}
+
+const SESSION_ENDED = { code: ErrorCode.TOKEN_INVALID, message: 'Your session has ended — sign in again' };
 
 interface EmailVerifyPayload {
   sub: string;
@@ -295,7 +304,7 @@ export class AuthService {
       await tx.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });
       await this.audit(tx, indexRow.tenantId, user.id, 'auth.login', 'user', user.id);
 
-      return this.buildLoginResult(user, roles);
+      return this.buildLoginResult(tx, user, roles);
     });
   }
 
@@ -326,7 +335,7 @@ export class AuthService {
       const roles = await this.loadRolesClaim(tx, user.id);
       await tx.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });
       await this.audit(tx, payload.tenantId, user.id, 'auth.login', 'user', user.id, { secondFactor: result.method });
-      const session = await this.buildLoginResult(user, roles);
+      const session = await this.buildLoginResult(tx, user, roles);
       return { ...session, secondFactor: result.method, recoveryCodesLeft: result.recoveryCodesLeft };
     });
   }
@@ -351,18 +360,67 @@ export class AuthService {
     }
 
     return this.prisma.withTenant(payload.tenantId, async (tx) => {
+      // The session itself, not just a valid signature: one that was signed
+      // out, already renewed, or issued before sessions were stored is over.
+      const session = await tx.refreshToken.findUnique({ where: { tokenHash: hashToken(refreshToken) } });
+      if (!session || session.revokedAt || session.expiresAt.getTime() <= Date.now() || session.userId !== payload.sub) {
+        throw new UnauthorizedException(SESSION_ENDED);
+      }
+      // Single use: renewing retires this token. Conditional, so two
+      // requests racing with the same token can't both renew it.
+      const retired = await tx.refreshToken.updateMany({ where: { id: session.id, revokedAt: null }, data: { revokedAt: new Date() } });
+      if (retired.count === 0) throw new UnauthorizedException(SESSION_ENDED);
+
       const user = await tx.user.findFirst({
         where: { id: payload.sub, deletedAt: null, emailVerified: true },
       });
-      if (!user) {
-        throw new UnauthorizedException({
-          code: ErrorCode.TOKEN_INVALID,
-          message: 'Refresh token is invalid or expired',
-        });
-      }
+      if (!user) throw new UnauthorizedException(SESSION_ENDED);
       const roles = await this.loadRolesClaim(tx, user.id);
-      return this.buildLoginResult(user, roles);
+      return this.buildLoginResult(tx, user, roles);
     });
+  }
+
+  /**
+   * Signing out ends the session on the server too, not just in the
+   * browser. Best effort and silent: an unknown, expired or already-ended
+   * token is simply nothing to do — the browser forgets it either way.
+   */
+  async logout(refreshToken: string): Promise<void> {
+    let payload: RefreshTokenPayload;
+    try {
+      payload = await this.jwt.verifyAsync<RefreshTokenPayload>(refreshToken, {
+        secret: this.config.getOrThrow<string>('JWT_REFRESH_SECRET'),
+        ignoreExpiration: true,
+      });
+    } catch {
+      return;
+    }
+    if (payload.tokenType !== 'refresh') return;
+    await this.prisma.withTenant(payload.tenantId, async (tx) => {
+      const ended = await tx.refreshToken.updateMany({
+        where: { tokenHash: hashToken(refreshToken), revokedAt: null },
+        data: { revokedAt: new Date() },
+      });
+      if (ended.count > 0) await this.audit(tx, payload.tenantId, payload.sub, 'auth.logout', 'user', payload.sub);
+    });
+  }
+
+  /**
+   * Housekeeping for the session table: sessions that ended or expired more
+   * than a week ago carry no information any more. Per tenant, since the
+   * table is row-level-security scoped.
+   */
+  async pruneEndedSessions(): Promise<number> {
+    const cutoff = new Date(Date.now() - 7 * 86_400_000);
+    const tenants = await this.prisma.tenant.findMany({ select: { id: true } });
+    let pruned = 0;
+    for (const tenant of tenants) {
+      const result = await this.prisma.withTenant(tenant.id, (tx) =>
+        tx.refreshToken.deleteMany({ where: { OR: [{ expiresAt: { lt: cutoff } }, { revokedAt: { lt: cutoff } }] } }),
+      );
+      pruned += result.count;
+    }
+    return pruned;
   }
 
   /**
@@ -468,7 +526,7 @@ export class AuthService {
       });
 
       const roles = await this.loadRolesClaim(tx, user.id);
-      return this.buildLoginResult(user, roles);
+      return this.buildLoginResult(tx, user, roles);
     });
   }
 
@@ -642,7 +700,14 @@ export class AuthService {
     return assignments.map((a) => ({ branchId: a.branchId, role: a.role.name }));
   }
 
+  /**
+   * A new session: a short-lived access token and a refresh token that's
+   * also recorded (as a hash) so it can be renewed once, ended on sign-out,
+   * and refused afterwards. Runs inside the caller's transaction, so a
+   * sign-in that fails after this leaves no session behind.
+   */
   private async buildLoginResult(
+    tx: TenantTx,
     user: User,
     roles: Array<{ branchId: string | null; role: string }>,
   ): Promise<LoginResult> {
@@ -655,21 +720,31 @@ export class AuthService {
     };
     const accessTtl = (this.config.get<string>('JWT_ACCESS_TTL') ??
       '900s') as JwtSignOptions['expiresIn'];
+    // A week, like the in-house PMS: renewing issues a fresh one, so this is
+    // how long a session survives with nobody using it at all. The browser
+    // ends an idle session after an hour on top of that (see the frontend's
+    // lib/session.ts) — the server can't tell a person from a page polling.
     const refreshTtl = (this.config.get<string>('JWT_REFRESH_TTL') ??
-      '30d') as JwtSignOptions['expiresIn'];
+      '7d') as JwtSignOptions['expiresIn'];
     const [accessToken, refreshToken] = await Promise.all([
       this.jwt.signAsync(accessPayload, {
         secret: this.config.getOrThrow<string>('JWT_ACCESS_SECRET'),
         expiresIn: accessTtl,
       }),
       this.jwt.signAsync(
-        { sub: user.id, tenantId: user.tenantId, tokenType: 'refresh' } satisfies RefreshTokenPayload,
+        { sub: user.id, tenantId: user.tenantId, tokenType: 'refresh', jti: randomUUID() } satisfies RefreshTokenPayload,
         {
           secret: this.config.getOrThrow<string>('JWT_REFRESH_SECRET'),
           expiresIn: refreshTtl,
         },
       ),
     ]);
+
+    // The row expires with the token itself — read back from its own `exp`.
+    const { exp } = this.jwt.decode<{ exp: number }>(refreshToken);
+    await tx.refreshToken.create({
+      data: { tenantId: user.tenantId, userId: user.id, tokenHash: hashToken(refreshToken), expiresAt: new Date(exp * 1000) },
+    });
 
     return {
       accessToken,

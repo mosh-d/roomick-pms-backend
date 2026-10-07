@@ -11,7 +11,7 @@ export const envValidationSchema = Joi.object({
   JWT_ACCESS_SECRET: Joi.string().min(32).required(),
   JWT_REFRESH_SECRET: Joi.string().min(32).required(),
   JWT_ACCESS_TTL: Joi.string().default('900s'),
-  JWT_REFRESH_TTL: Joi.string().default('30d'),
+  JWT_REFRESH_TTL: Joi.string().default('7d'),
   // 32 bytes hex — AES-256-GCM key for guest ID document encryption
   ENCRYPTION_KEY: Joi.string().hex().length(64).required(),
   CORS_ORIGINS: Joi.string().allow('').default(''),
