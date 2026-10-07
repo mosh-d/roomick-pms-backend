@@ -377,6 +377,7 @@ model Tenant {
   campaignRecipients       CampaignRecipient[]
   integrationConnections   IntegrationConnection[]
   refreshTokens            RefreshToken[]
+  reportTemplates          ReportTemplate[]
 
   @@index([isDemo, demoExpiresAt])
   @@map("tenants")
@@ -425,6 +426,7 @@ model User {
   refundsRequested           Refund[]            @relation("RefundRequestedBy")
   refundsApproved            Refund[]            @relation("RefundApprovedBy")
   refundsPaidOut             Refund[]            @relation("RefundPaidOutBy")
+  reportTemplates            ReportTemplate[]    @relation("ReportTemplateCreatedBy")
   housekeepingTasksAssigned  HousekeepingTask[]  @relation("HkAssignee")
   housekeepingTasksCompleted HousekeepingTask[]  @relation("HkCompletedBy")
   shifts                     Shift[]
@@ -675,6 +677,7 @@ model Branch {
   competitors              Competitor[]
   loyaltyTransactions      LoyaltyTransaction[]
   marketingCampaigns       MarketingCampaign[]
+  reportTemplates          ReportTemplate[]
 
   @@index([tenantId, brandId])
   @@index([tenantId, deletedAt])
@@ -2220,4 +2223,25 @@ model RefreshToken {
   @@index([userId])
   @@index([expiresAt])
   @@map("refresh_tokens")
+}
+
+/// Custom Report Builder's saved reports — a dataset, its columns, filters,
+/// grouping and sort, run again for whatever dates are picked.
+model ReportTemplate {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId   String   @db.Uuid
+  branchId   String   @db.Uuid
+  name       String   @db.VarChar(100)
+  // { dataset, fields, filters, groupBy, sortBy, sortDir } — checked against the catalogue on every run.
+  definition Json
+  createdBy  String?  @db.Uuid
+  createdAt  DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt  DateTime @updatedAt @db.Timestamptz(6)
+
+  tenant        Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  branch        Branch @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  createdByUser User?  @relation("ReportTemplateCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
+
+  @@unique([branchId, name])
+  @@map("report_templates")
 }
