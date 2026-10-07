@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { mkdir, readFile, writeFile } from 'fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'fs/promises';
 import { tmpdir } from 'os';
 import { dirname, join } from 'path';
 import { DocumentStorageAdapter } from './document-storage.interface';
@@ -27,5 +27,10 @@ export class LocalFilesystemDocumentStorage implements DocumentStorageAdapter {
   async read(storageUrl: string): Promise<Buffer> {
     const filePath = storageUrl.replace(/^file:\/\//, '');
     return readFile(filePath);
+  }
+
+  async remove(storageUrl: string): Promise<void> {
+    // `force`: a file already gone is the outcome wanted, not a failure.
+    await rm(storageUrl.replace(/^file:\/\//, ''), { force: true });
   }
 }

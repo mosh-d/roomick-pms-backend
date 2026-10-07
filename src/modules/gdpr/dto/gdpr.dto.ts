@@ -24,10 +24,10 @@ export class CreateGdprRequestDto {
 }
 
 /**
- * `completed`/`rejected` are terminal — this system never runs an automated
- * erasure itself (see `GdprService.downloadExport`'s own comment on why),
- * so "completed" here always means a human process outside this system
- * actually carried out the request; this only records that it happened.
+ * `completed`/`rejected` are terminal. An access/portability request
+ * completes when its export is downloaded, an erasure when it's carried out
+ * (`POST .../erase`) — marking one completed here by hand records work done
+ * outside Roomick.
  */
 export class UpdateGdprRequestStatusDto {
   @ApiProperty({ enum: ['in_progress', 'completed', 'rejected'] })

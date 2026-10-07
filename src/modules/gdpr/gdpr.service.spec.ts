@@ -1,5 +1,6 @@
 import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
+import { Prisma } from '@prisma/client';
 import { DOCUMENT_STORAGE_ADAPTER } from '../../common/documents/document-storage.interface';
 import { EncryptionService } from '../../common/crypto/encryption.service';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -30,16 +31,20 @@ function gdprRequest(overrides: Partial<Record<string, unknown>> = {}) {
 
 function makeTx() {
   return {
-    guestProfile: { findFirst: jest.fn().mockResolvedValue({ id: GUEST_ID }) },
+    guestProfile: { findFirst: jest.fn().mockResolvedValue({ id: GUEST_ID }), update: jest.fn().mockResolvedValue({}) },
     gdprRequest: {
       findFirst: jest.fn().mockResolvedValue(gdprRequest()),
       create: jest.fn().mockImplementation(({ data }: { data: Record<string, unknown> }) => Promise.resolve(gdprRequest(data))),
       update: jest.fn().mockImplementation(({ data }: { data: Record<string, unknown> }) => Promise.resolve(gdprRequest(data))),
       findMany: jest.fn().mockResolvedValue([]),
     },
-    reservation: { findMany: jest.fn().mockResolvedValue([]) },
-    folio: { findMany: jest.fn().mockResolvedValue([]) },
-    communicationLog: { findMany: jest.fn().mockResolvedValue([]) },
+    reservation: { findMany: jest.fn().mockResolvedValue([]), count: jest.fn().mockResolvedValue(0), updateMany: jest.fn().mockResolvedValue({ count: 2 }) },
+    folio: { findMany: jest.fn().mockResolvedValue([]), updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
+    communicationLog: { findMany: jest.fn().mockResolvedValue([]), updateMany: jest.fn().mockResolvedValue({ count: 3 }) },
+    registrationCard: { findMany: jest.fn().mockResolvedValue([]), update: jest.fn().mockResolvedValue({}) },
+    guestNote: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
+    lineItem: { aggregate: jest.fn().mockResolvedValue({ _sum: { amount: new Prisma.Decimal('64500') } }) },
+    payment: { aggregate: jest.fn().mockResolvedValue({ _sum: { amount: new Prisma.Decimal('64500') } }) },
     auditLog: { create: jest.fn().mockResolvedValue({}) },
   };
 }
@@ -49,7 +54,7 @@ describe('GdprService', () => {
   let tx: ReturnType<typeof makeTx>;
   let guestsService: { getGuestDetail: jest.Mock };
   let encryption: { encryptBuffer: jest.Mock; decryptBuffer: jest.Mock };
-  let documentStorage: { write: jest.Mock; read: jest.Mock };
+  let documentStorage: { write: jest.Mock; read: jest.Mock; remove: jest.Mock };
 
   beforeEach(async () => {
     tx = makeTx();
@@ -58,7 +63,11 @@ describe('GdprService', () => {
       encryptBuffer: jest.fn().mockImplementation((b: Buffer) => Buffer.concat([Buffer.from('enc:'), b])),
       decryptBuffer: jest.fn().mockImplementation((b: Buffer) => b.subarray(4)),
     };
-    documentStorage = { write: jest.fn().mockResolvedValue('storage://export.enc'), read: jest.fn().mockResolvedValue(Buffer.from('enc:{"ok":true}')) };
+    documentStorage = {
+      write: jest.fn().mockResolvedValue('storage://export.enc'),
+      read: jest.fn().mockResolvedValue(Buffer.from('enc:{"ok":true}')),
+      remove: jest.fn().mockResolvedValue(undefined),
+    };
 
     const moduleRef = await Test.createTestingModule({
       providers: [
@@ -165,6 +174,68 @@ describe('GdprService', () => {
       expect(documentStorage.write).not.toHaveBeenCalled();
       expect(documentStorage.read).toHaveBeenCalledWith('storage://already-there.enc');
       expect(tx.gdprRequest.update).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('eraseGuestData', () => {
+    const guest = () => ({ id: GUEST_ID, name: 'Jane Doe', email: 'jane@example.com', idDocUrl: 'file:///docs/id.enc', deletedAt: null, marketingUnsubscribedAt: null });
+
+    beforeEach(() => {
+      tx.gdprRequest.findFirst.mockResolvedValue(gdprRequest({ type: 'erasure' }));
+      tx.guestProfile.findFirst.mockResolvedValue(guest());
+      tx.folio.findMany.mockResolvedValue([{ id: 'folio-1' }]);
+      tx.registrationCard.findMany.mockResolvedValue([
+        { id: 'card-1', fields: { guestName: 'Jane Doe', guestPhone: '+2348012345678', roomNumber: '101' }, documentUrl: 'file:///docs/card.enc' },
+      ]);
+    });
+
+    it('takes the identity off the guest and their cards, keeps the stays and bills, and completes the request', async () => {
+      const result = await service.eraseGuestData(TENANT_ID, REQUEST_ID, ACTOR_ID);
+
+      const profile = (tx.guestProfile.update.mock.calls[0] as [{ data: Record<string, unknown> }])[0].data;
+      expect(profile).toMatchObject({ name: 'Erased guest', email: null, phone: null, idDocNumber: null, idDocUrl: null, tags: [], marketingOptIn: false });
+      expect(profile.deletedAt).toBeInstanceOf(Date);
+
+      const card = (tx.registrationCard.update.mock.calls[0] as [{ data: { fields: Record<string, unknown>; signatureData: null; documentUrl: null } }])[0].data;
+      expect(card.fields).toEqual({ guestName: 'Erased guest', guestEmail: null, guestPhone: null, roomNumber: '101' });
+      expect(card).toMatchObject({ signatureData: null, documentUrl: null });
+
+      expect(tx.communicationLog.updateMany).toHaveBeenCalledWith({ where: { guestId: GUEST_ID }, data: { body: '[erased]', bodyHtml: null } });
+      expect(tx.guestNote.updateMany).toHaveBeenCalledWith({ where: { guestId: GUEST_ID }, data: { body: '[erased]' } });
+      // payer details only where they were the guest's own
+      expect(tx.folio.updateMany).toHaveBeenCalledWith({ where: { id: { in: ['folio-1'] }, payerName: { equals: 'Jane Doe', mode: 'insensitive' } }, data: { payerName: 'Erased guest' } });
+
+      expect(tx.gdprRequest.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: 'completed' }) }));
+      expect(result).toMatchObject({ status: 'completed' });
+      // the stored ID photo and card PDF are deleted — after the database work
+      expect(documentStorage.remove.mock.calls.map((c) => c[0])).toEqual(['file:///docs/id.enc', 'file:///docs/card.enc']);
+    });
+
+    it('audits counts, never the erased details themselves', async () => {
+      await service.eraseGuestData(TENANT_ID, REQUEST_ID, ACTOR_ID);
+      const entry = (tx.auditLog.create.mock.calls[0] as [{ data: { action: string; after: Record<string, unknown> } }])[0].data;
+      expect(entry.action).toBe('gdpr.guest_erased');
+      expect(JSON.stringify(entry.after)).not.toMatch(/Jane|jane@|2348012345678/);
+    });
+
+    it('refuses while a stay is booked or in progress', async () => {
+      tx.reservation.count.mockResolvedValue(1);
+      await expect(service.eraseGuestData(TENANT_ID, REQUEST_ID, ACTOR_ID)).rejects.toThrow(ConflictException);
+      expect(tx.guestProfile.update).not.toHaveBeenCalled();
+    });
+
+    it('refuses while the guest still owes money — the details are needed to collect it', async () => {
+      tx.payment.aggregate.mockResolvedValue({ _sum: { amount: new Prisma.Decimal('50000') } });
+      await expect(service.eraseGuestData(TENANT_ID, REQUEST_ID, ACTOR_ID)).rejects.toThrow(/still owes 14500\.00/);
+      expect(tx.guestProfile.update).not.toHaveBeenCalled();
+    });
+
+    it('only erases from an erasure request, once', async () => {
+      tx.gdprRequest.findFirst.mockResolvedValueOnce(gdprRequest({ type: 'access' }));
+      await expect(service.eraseGuestData(TENANT_ID, REQUEST_ID, ACTOR_ID)).rejects.toThrow(BadRequestException);
+      tx.guestProfile.findFirst.mockResolvedValueOnce({ ...guest(), deletedAt: new Date() });
+      await expect(service.eraseGuestData(TENANT_ID, REQUEST_ID, ACTOR_ID)).rejects.toThrow(ConflictException);
+      expect(documentStorage.remove).not.toHaveBeenCalled();
     });
   });
 });

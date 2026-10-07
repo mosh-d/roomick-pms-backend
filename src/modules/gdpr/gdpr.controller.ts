@@ -30,8 +30,18 @@ export class GdprController {
     return this.gdprService.listDataRequests(tenantId);
   }
 
+  @Post('data-requests/:requestId/erase')
+  @ApiOperation({ summary: 'Carry out an erasure request: the guest’s identity, contact details, ID document, notes and messages are erased; bills, payments and stays are kept' })
+  erase(
+    @CurrentTenant() tenantId: string,
+    @CurrentUser() user: JwtPayload,
+    @Param('requestId', ParseUUIDPipe) requestId: string,
+  ): ReturnType<GdprService['eraseGuestData']> {
+    return this.gdprService.eraseGuestData(tenantId, requestId, user.sub);
+  }
+
   @Patch('data-requests/:requestId/status')
-  @ApiOperation({ summary: "Manually progress a request's status — this system tracks fulfillment, it never runs automated erasure itself" })
+  @ApiOperation({ summary: "Progress a request's status by hand — in progress, or rejected; an erasure completes through /erase" })
   updateStatus(
     @CurrentTenant() tenantId: string,
     @CurrentUser() user: JwtPayload,

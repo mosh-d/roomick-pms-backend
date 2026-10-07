@@ -13,6 +13,8 @@ export interface DocumentStorageAdapter {
   /** Writes `data` under `key`, returns a URL/path that `read` can resolve back. */
   write(key: string, data: Buffer): Promise<string>;
   read(storageUrl: string): Promise<Buffer>;
+  /** Deletes a stored document for good — an erased guest's ID photo or registration card. A document already gone is not an error. */
+  remove(storageUrl: string): Promise<void>;
 }
 
 export const DOCUMENT_STORAGE_ADAPTER = 'DOCUMENT_STORAGE_ADAPTER';
