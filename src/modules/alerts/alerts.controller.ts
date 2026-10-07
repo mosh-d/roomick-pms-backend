@@ -1,11 +1,13 @@
 import { Controller, Get, Param, ParseUUIDPipe } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentTenant } from '../../common/decorators';
+import { Permission } from '../../common/decorators/permission.decorator';
 import { AlertsService } from './alerts.service';
 
 @ApiTags('alerts')
 @ApiBearerAuth()
 @Controller('branches/:branchId/alerts')
+@Permission('alerts')
 export class AlertsController {
   constructor(private readonly alertsService: AlertsService) {}
 

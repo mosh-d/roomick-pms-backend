@@ -2,6 +2,7 @@ import { Body, Controller, Delete, Get, HttpCode, Param, ParseUUIDPipe, Post, Re
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import type { Response } from 'express';
 import { CurrentTenant, CurrentUser } from '../../common/decorators';
+import { Permission } from '../../common/decorators/permission.decorator';
 import { Roles, SystemRole } from '../../common/decorators/roles.decorator';
 import { JwtPayload } from '../../common/types/request-context';
 import { RunCustomReportDto, SaveReportTemplateDto } from './dto/custom-report.dto';
@@ -13,6 +14,7 @@ const REPORT_ROLES = [SystemRole.Owner, SystemRole.Manager, SystemRole.Accountan
 @ApiTags('reports')
 @ApiBearerAuth()
 @Controller()
+@Permission('reports')
 export class CustomReportsController {
   constructor(private readonly customReportsService: CustomReportsService) {}
 
@@ -25,6 +27,7 @@ export class CustomReportsController {
 
   @Post('branches/:branchId/reports/custom/run')
   @HttpCode(200)
+  @Permission('reports', 'read')
   @Roles(...REPORT_ROLES)
   @ApiOperation({ summary: 'Run a custom report for a range of dates — the first 500 rows, and how many there are' })
   run(
@@ -37,6 +40,7 @@ export class CustomReportsController {
 
   @Post('branches/:branchId/reports/custom/csv')
   @HttpCode(200)
+  @Permission('reports', 'read')
   @Roles(...REPORT_ROLES)
   @ApiOperation({ summary: 'The same report as a CSV file, every row' })
   async csv(@CurrentTenant() tenantId: string, @Param('branchId', ParseUUIDPipe) branchId: string, @Body() dto: RunCustomReportDto, @Res() res: Response): Promise<void> {

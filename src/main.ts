@@ -32,7 +32,11 @@ async function bootstrap(): Promise<void> {
 
   const swaggerConfig = new DocumentBuilder()
     .setTitle('Roomick PMS API')
-    .setDescription('Multi-tenant hotel Property Management System')
+    .setDescription(
+      'Multi-tenant hotel Property Management System. Every request sends the account ID as X-Tenant-ID and signs in either as a person ' +
+        '(the access token from POST /auth/login) or with an API key made on the Integrations & APIs page — use the rk_… key as the bearer ' +
+        'token. A key makes GET requests only, to the areas it was given (and one branch, if it was kept to one).',
+    )
     .setVersion('1.0')
     .addBearerAuth()
     .addGlobalParameters({

@@ -28,8 +28,9 @@ function contextFor(options: {
   params?: Record<string, string>;
   user?: JwtPayload;
   branchOf?: BranchOfMetadata;
+  query?: Record<string, string>;
 }): { context: ExecutionContext; reflector: Reflector } {
-  const request = { user: options.user, params: options.params ?? {}, method: options.method ?? 'GET' };
+  const request = { user: options.user, params: options.params ?? {}, method: options.method ?? 'GET', query: options.query ?? {} };
   const context = {
     getHandler: () => function handler() {},
     getClass: () => class Controller {},
@@ -199,6 +200,59 @@ describe('RolesGuard', () => {
       const malformed = route(frontDesk, 'not-a-uuid');
       await expect(guardWith(malformed.reflector, [], prisma).canActivate(malformed.context)).resolves.toBe(true);
       expect(tx.folio.findFirst).toHaveBeenCalledTimes(1);
+    });
+  });
+  describe('an API key', () => {
+    function key(scopes: string[], branchId: string | null = null): JwtPayload {
+      return { sub: 'key-1', tenantId: TENANT_ID, email: '', roles: [], tokenType: 'access', apiKey: { id: 'key-1', name: 'BI', scopes, branchId } };
+    }
+
+    it('reads a module it was given, whatever roles the route names', async () => {
+      const { context, reflector } = contextFor({ required: [SystemRole.Owner], permission: { module: 'reports' }, user: key(['reports']), params: { branchId: BRANCH_ID } });
+      await expect(guardWith(reflector, []).canActivate(context)).resolves.toBe(true);
+    });
+
+    it('is refused a module it wasn’t given — even on a route open to every signed-in person', async () => {
+      const { context, reflector } = contextFor({ permission: { module: 'guests' }, user: key(['reports']) });
+      await expect(guardWith(reflector, []).canActivate(context)).rejects.toThrow(/can’t read guests/);
+    });
+
+    it('can’t reach a route with no module — staff, security, backups, integrations', async () => {
+      const { context, reflector } = contextFor({ required: [SystemRole.Owner], user: key(['reports', 'reservations']) });
+      await expect(guardWith(reflector, []).canActivate(context)).rejects.toThrow(/can’t reach this/);
+      const open = contextFor({ user: key(['reports']) });
+      await expect(guardWith(open.reflector, []).canActivate(open.context)).rejects.toThrow(/can’t reach this/);
+    });
+
+    it('only reads: a write — or a POST that only previews — is refused', async () => {
+      const write = contextFor({ permission: { module: 'reservations' }, method: 'POST', user: key(['reservations']) });
+      await expect(guardWith(write.reflector, []).canActivate(write.context)).rejects.toThrow(/can only read/);
+      const preview = contextFor({ permission: { module: 'reports', action: 'read' }, method: 'POST', user: key(['reports']) });
+      await expect(guardWith(preview.reflector, []).canActivate(preview.context)).rejects.toThrow(/can only read/);
+    });
+
+    it('never reveals an ID document number', async () => {
+      const { context, reflector } = contextFor({ permission: { module: 'guests' }, user: key(['guests']), query: { reveal: 'true' } });
+      await expect(guardWith(reflector, []).canActivate(context)).rejects.toThrow(/reveal/);
+    });
+
+    it('kept to one branch, it reads that branch and nothing at another', async () => {
+      const here = contextFor({ permission: { module: 'reservations' }, user: key(['reservations'], BRANCH_ID), params: { branchId: BRANCH_ID } });
+      await expect(guardWith(here.reflector, []).canActivate(here.context)).resolves.toBe(true);
+      const there = contextFor({ permission: { module: 'reservations' }, user: key(['reservations'], BRANCH_ID), params: { branchId: OTHER_BRANCH_ID } });
+      await expect(guardWith(there.reflector, []).canActivate(there.context)).rejects.toThrow(/another branch/);
+    });
+
+    it('kept to one branch, a record at another branch is refused too', async () => {
+      const FOLIO_THERE = '55555555-5555-4555-8555-555555555555';
+      const { prisma } = prismaWith({ [FOLIO_THERE]: OTHER_BRANCH_ID });
+      const { context, reflector } = contextFor({
+        permission: { module: 'folios' },
+        user: key(['folios'], BRANCH_ID),
+        params: { folioId: FOLIO_THERE },
+        branchOf: { record: 'folio', param: 'folioId' },
+      });
+      await expect(guardWith(reflector, [], prisma).canActivate(context)).rejects.toThrow(/another branch/);
     });
   });
 });

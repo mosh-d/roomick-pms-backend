@@ -14,6 +14,7 @@ import { RegistrationCardsService } from '../registration-cards/registration-car
 import { CommsLogService } from '../comms-log/comms-log.service';
 import { RestrictionsService } from '../revenue-management/restrictions.service';
 import { LoyaltyService } from '../loyalty/loyalty.service';
+import { WebhookEventsService } from '../integrations/webhook-events.service';
 import {
   CANCELLABLE_STATUSES,
   CancellationQuote,
@@ -90,6 +91,7 @@ export class ReservationsService {
     private readonly commsLogService: CommsLogService,
     private readonly restrictionsService: RestrictionsService,
     private readonly loyaltyService: LoyaltyService,
+    private readonly webhookEvents: WebhookEventsService,
   ) {}
 
   // -------------------------------------------------------------------------
@@ -1841,7 +1843,7 @@ export class ReservationsService {
       if (folio) {
         const payments = await tx.payment.findMany({ where: { folioId: folio.id, isVoid: false, amount: { gt: 0 } } });
         for (const payment of payments) {
-          await tx.payment.create({
+          const reversal = await tx.payment.create({
             data: {
               tenantId,
               folioId: folio.id,
@@ -1854,6 +1856,7 @@ export class ReservationsService {
             },
           });
           refundedTotal = refundedTotal.add(payment.amount);
+          await this.webhookEvents.paymentRecorded(tx, { tenantId, branchId: reservation.branchId, type: 'refund.paid', paymentId: reversal.id });
         }
       }
 
@@ -2123,6 +2126,11 @@ export class ReservationsService {
     return reservation;
   }
 
+  /**
+   * Every change to a booking is recorded here, so this is also where the
+   * change becomes a webhook event (`RESERVATION_ACTION_EVENTS`) — in the same
+   * transaction, so nothing that changes a booking can skip telling anyone.
+   */
   private async audit(
     tx: TenantTx,
     tenantId: string,
@@ -2135,5 +2143,7 @@ export class ReservationsService {
     await tx.auditLog.create({
       data: { tenantId, branchId, userId, action, entityType: 'reservation', entityId, after },
     });
+    const previousRoomId = action === 'reservation.room_moved' ? (after as { fromRoomId?: string } | undefined)?.fromRoomId : undefined;
+    await this.webhookEvents.reservationChanged(tx, { tenantId, branchId, action, reservationId: entityId, previousRoomId });
   }
 }

@@ -12,7 +12,11 @@ import { RegistrationCardsService } from '../registration-cards/registration-car
 import { CommsLogService } from '../comms-log/comms-log.service';
 import { RestrictionsService } from '../revenue-management/restrictions.service';
 import { LoyaltyService } from '../loyalty/loyalty.service';
+import { WebhookEventsService } from '../integrations/webhook-events.service';
 import { ReservationsService } from './reservations.service';
+
+/** Webhook events are raised from the same audit calls these tests exercise; what they send is `WebhookEventsService`'s own spec. */
+const webhookEvents = { reservationChanged: jest.fn().mockResolvedValue(undefined), paymentRecorded: jest.fn().mockResolvedValue(undefined) };
 
 const TENANT_ID = '11111111-1111-4111-8111-111111111111';
 const BRANCH_ID = '33333333-3333-4333-8333-333333333333';
@@ -181,6 +185,7 @@ describe('ReservationsService', () => {
         { provide: CommsLogService, useValue: commsLogService },
         { provide: RestrictionsService, useValue: restrictionsService },
         { provide: LoyaltyService, useValue: { earnForStayInTx: jest.fn().mockResolvedValue(0) } },
+        { provide: WebhookEventsService, useValue: webhookEvents },
       ],
     }).compile();
     service = moduleRef.get(ReservationsService);
@@ -482,6 +487,17 @@ describe('ReservationsService', () => {
         expect.objectContaining({ data: expect.objectContaining({ confirmedRate: expect.objectContaining({ toString: expect.any(Function) }) }) }),
       );
       expect(String((result as unknown as { confirmedRate: unknown }).confirmedRate)).toBe('300'); // 100 × 3 nights
+    });
+
+    it('becomes a webhook event in the same transaction as the booking', async () => {
+      const result = await service.createReservation(TENANT_ID, BRANCH_ID, dto, ACTOR_ID);
+      expect(webhookEvents.reservationChanged).toHaveBeenCalledWith(tx, {
+        tenantId: TENANT_ID,
+        branchId: BRANCH_ID,
+        action: 'reservation.created',
+        reservationId: (result as unknown as { id: string }).id,
+        previousRoomId: undefined,
+      });
     });
 
     it('resolves the rate through the Rate Resolver, passing promoCode/corporateAccountId through, and stores its winning ratePlanId', async () => {

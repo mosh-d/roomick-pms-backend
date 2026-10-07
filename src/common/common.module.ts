@@ -1,5 +1,6 @@
 import { Global, Module } from '@nestjs/common';
 import { DiscoveryModule } from '@nestjs/core';
+import { ApiKeyAuthService } from './auth/api-key-auth.service';
 import { TenantContextService } from './context/tenant-context.service';
 import { EncryptionService } from './crypto/encryption.service';
 import { DOCUMENT_STORAGE_ADAPTER } from './documents/document-storage.interface';
@@ -16,6 +17,8 @@ import { RoutePermissionMapService } from './permissions/route-permission-map.se
   // DiscoveryModule lets RoutePermissionMapService read what each route requires.
   imports: [DiscoveryModule],
   providers: [
+    // Signs a request in with an API key — `JwtAuthGuard` is global, so this is too.
+    ApiKeyAuthService,
     TenantContextService,
     EncryptionService,
     MetricsService,
@@ -32,6 +35,6 @@ import { RoutePermissionMapService } from './permissions/route-permission-map.se
       },
     },
   ],
-  exports: [TenantContextService, EncryptionService, MetricsService, PermissionsService, RoutePermissionMapService, DOCUMENT_STORAGE_ADAPTER, MAIL_TRANSPORT],
+  exports: [ApiKeyAuthService, TenantContextService, EncryptionService, MetricsService, PermissionsService, RoutePermissionMapService, DOCUMENT_STORAGE_ADAPTER, MAIL_TRANSPORT],
 })
 export class CommonModule {}

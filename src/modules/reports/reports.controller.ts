@@ -2,6 +2,7 @@ import { Controller, Get, Param, ParseUUIDPipe, Query, Res } from '@nestjs/commo
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import type { Response } from 'express';
 import { CurrentTenant } from '../../common/decorators';
+import { Permission } from '../../common/decorators/permission.decorator';
 import { Roles, SystemRole } from '../../common/decorators/roles.decorator';
 import { ReportQueryDto } from './dto/report-query.dto';
 import { ReportsService } from './reports.service';
@@ -9,6 +10,7 @@ import { ReportsService } from './reports.service';
 @ApiTags('reports')
 @ApiBearerAuth()
 @Controller('branches/:branchId/reports')
+@Permission('reports')
 export class ReportsController {
   constructor(private readonly reportsService: ReportsService) {}
 

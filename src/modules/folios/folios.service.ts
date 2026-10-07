@@ -4,6 +4,7 @@ import { ErrorCode } from '../../common/errors/error-codes';
 import { todayInTimezone, toBranchDate } from '../../common/utils/branch-date';
 import { PrismaService, TenantTx } from '../../prisma/prisma.service';
 import { PropertyService } from '../property/property.service';
+import { WebhookEventsService } from '../integrations/webhook-events.service';
 import { describeRule, PricedCharge, TaxesService } from '../taxes/taxes.service';
 import { CorrectLineItemDto, PostChargeDto, RecordPaymentDto } from './dto/folio.dto';
 
@@ -63,6 +64,7 @@ export class FoliosService {
     private readonly prisma: PrismaService,
     private readonly propertyService: PropertyService,
     private readonly taxesService: TaxesService,
+    private readonly webhookEvents: WebhookEventsService,
   ) {}
 
   // -------------------------------------------------------------------------
@@ -1212,5 +1214,7 @@ export class FoliosService {
     await tx.auditLog.create({
       data: { tenantId, branchId, userId, action, entityType: 'folio', entityId, after },
     });
+    // Every payment taken on a bill is recorded here — loyalty points too.
+    if (action === 'payment.recorded') await this.webhookEvents.paymentRecorded(tx, { tenantId, branchId, type: 'payment.received', paymentId: entityId });
   }
 }

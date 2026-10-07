@@ -5,6 +5,7 @@ import { ErrorCode } from '../../common/errors/error-codes';
 import { JwtPayload } from '../../common/types/request-context';
 import { hasRoleAtBranch } from '../../common/utils/branch-roles';
 import { PrismaService, TenantTx } from '../../prisma/prisma.service';
+import { WebhookEventsService } from '../integrations/webhook-events.service';
 import { PropertyService } from '../property/property.service';
 import { REFUND_METHODS, RefundMethod, RequestRefundDto } from './dto/refund.dto';
 import { FoliosService } from './folios.service';
@@ -58,6 +59,7 @@ export class RefundsService {
     private readonly prisma: PrismaService,
     private readonly foliosService: FoliosService,
     private readonly propertyService: PropertyService,
+    private readonly webhookEvents: WebhookEventsService,
   ) {}
 
   async request(tenantId: string, folioId: string, dto: RequestRefundDto, actor: JwtPayload): Promise<Refund> {
@@ -199,6 +201,7 @@ export class RefundsService {
         paymentId: payment.id,
         ...(openShift ? { shiftId: openShift.id } : {}),
       });
+      await this.webhookEvents.paymentRecorded(tx, { tenantId, branchId: refund.folio.branchId, type: 'refund.paid', paymentId: payment.id, refundId });
       return paid;
     });
   }

@@ -4,7 +4,11 @@ import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { PropertyService } from '../property/property.service';
 import { TaxesService } from '../taxes/taxes.service';
+import { WebhookEventsService } from '../integrations/webhook-events.service';
 import { FoliosService } from './folios.service';
+
+/** Webhook events are raised from the same audit calls these tests exercise; what they send is `WebhookEventsService`'s own spec. */
+const webhookEvents = { reservationChanged: jest.fn().mockResolvedValue(undefined), paymentRecorded: jest.fn().mockResolvedValue(undefined) };
 
 const TENANT_ID = '11111111-1111-4111-8111-111111111111';
 const BRANCH_ID = '33333333-3333-4333-8333-333333333333';
@@ -82,6 +86,7 @@ describe('FoliosService', () => {
         { provide: PrismaService, useValue: { withTenant: jest.fn((_t: string, fn: (x: unknown) => unknown) => fn(tx)) } },
         { provide: PropertyService, useValue: { assertBranch: jest.fn().mockResolvedValue({ id: BRANCH_ID, timezone: 'Africa/Lagos', currency: 'NGN' }) } },
         { provide: TaxesService, useValue: taxesService },
+        { provide: WebhookEventsService, useValue: webhookEvents },
       ],
     }).compile();
     service = moduleRef.get(FoliosService);
@@ -265,6 +270,12 @@ describe('FoliosService', () => {
       await service.recordPayment(TENANT_ID, FOLIO_ID, { amount: 5000, method: 'cash' } as never, ACTOR_ID);
       expect(tx.shift.findFirst).toHaveBeenCalledWith({ where: { branchId: BRANCH_ID, agentId: ACTOR_ID, closedAt: null } });
       expect(tx.payment.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ shiftId: 'shift-1' }) }));
+    });
+
+    it('tells any webhook listening for payments', async () => {
+      tx.payment.create.mockResolvedValueOnce({ id: 'pay-9' });
+      await service.recordPayment(TENANT_ID, FOLIO_ID, { amount: 5000, method: 'card' } as never, ACTOR_ID);
+      expect(webhookEvents.paymentRecorded).toHaveBeenCalledWith(tx, { tenantId: TENANT_ID, branchId: BRANCH_ID, type: 'payment.received', paymentId: 'pay-9' });
     });
 
     it('leaves shiftId undefined for a cash payment when the agent has no open shift', async () => {

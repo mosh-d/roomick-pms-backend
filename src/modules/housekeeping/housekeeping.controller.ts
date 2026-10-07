@@ -1,6 +1,7 @@
 import { Body, Controller, Get, Param, ParseUUIDPipe, Post, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentTenant, CurrentUser } from '../../common/decorators';
+import { Permission } from '../../common/decorators/permission.decorator';
 import { JwtPayload } from '../../common/types/request-context';
 import { AssignTaskDto, CreateTaskDto, ListTasksQueryDto, ReportIssueDto } from './dto/housekeeping.dto';
 import { HousekeepingService } from './housekeeping.service';
@@ -8,6 +9,7 @@ import { HousekeepingService } from './housekeeping.service';
 @ApiTags('housekeeping')
 @ApiBearerAuth()
 @Controller()
+@Permission('housekeeping')
 export class HousekeepingController {
   constructor(private readonly housekeepingService: HousekeepingService) {}
 
@@ -42,6 +44,7 @@ export class HousekeepingController {
   }
 
   @Post('housekeeping/tasks/:taskId/assign')
+  @Permission('housekeeping', 'update')
   @ApiOperation({ summary: 'Assign a task to a housekeeper — supervisor only' })
   assignTask(
     @CurrentTenant() tenantId: string,
@@ -53,6 +56,7 @@ export class HousekeepingController {
   }
 
   @Post('housekeeping/tasks/:taskId/start')
+  @Permission('housekeeping', 'update')
   @ApiOperation({ summary: 'Start cleaning — self-assigns if unclaimed, moves the room dirty → cleaning' })
   startTask(
     @CurrentTenant() tenantId: string,
@@ -63,6 +67,7 @@ export class HousekeepingController {
   }
 
   @Post('housekeeping/tasks/:taskId/complete')
+  @Permission('housekeeping', 'update')
   @ApiOperation({ summary: 'Finish cleaning — moves the room cleaning → clean, awaiting inspection' })
   completeTask(
     @CurrentTenant() tenantId: string,
@@ -73,6 +78,7 @@ export class HousekeepingController {
   }
 
   @Post('housekeeping/tasks/:taskId/report-issue')
+  @Permission('housekeeping', 'update')
   @ApiOperation({ summary: 'Report an issue instead of a normal clean — marks the task skipped' })
   reportIssue(
     @CurrentTenant() tenantId: string,

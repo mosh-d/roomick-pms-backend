@@ -361,6 +361,7 @@ model Tenant {
   guestNotes               GuestNote[]
   apiKeys                  ApiKey[]
   webhooks                 Webhook[]
+  webhookDeliveries        WebhookDelivery[]
   groupBlocks              GroupBlock[]
   eventSpaces              EventSpace[]
   eventBookings            EventBooking[]
@@ -678,6 +679,8 @@ model Branch {
   loyaltyTransactions      LoyaltyTransaction[]
   marketingCampaigns       MarketingCampaign[]
   reportTemplates          ReportTemplate[]
+  apiKeys                  ApiKey[]
+  webhooks                 Webhook[]
 
   @@index([tenantId, brandId])
   @@index([tenantId, deletedAt])
@@ -879,39 +882,41 @@ model GuestNote {
 }
 
 /**
- * Integrations & APIs' own "API Keys" card. The raw key is shown to the
- * caller exactly once, at creation — only `keyHash` (SHA-256; the key
- * itself is high-entropy random data, not a user-chosen password, so a
- * slow KDF like bcrypt buys nothing here) and `keyPrefix` (for on-screen
- * identification in a list) are ever persisted. Not yet consumed by any
- * authentication path in this app — see `IntegrationsService`'s own header
- * comment for why that's a deliberate, stated limitation, not an oversight.
+ * Integrations & APIs' "API Keys" — read-only access for another system.
+ * The raw key is shown exactly once, at creation; only `keyHash` (SHA-256 —
+ * the key is high-entropy random data, not a chosen password, so a slow KDF
+ * buys nothing) and `keyPrefix` (to tell keys apart in a list) are kept.
+ * A request signs in with `Authorization: Bearer rk_…` plus the usual
+ * `X-Tenant-ID`. What it can then do is `scopes` — permission modules
+ * (`permission-catalogue.ts`), read only — and, with `branchId`, only that
+ * branch's records. Anything without a module (staff, roles, security,
+ * backups, GDPR, integrations themselves) is out of reach by construction.
  */
 model ApiKey {
   id         String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   tenantId   String    @db.Uuid
   name       String    @db.VarChar(200)
   keyPrefix  String    @db.VarChar(12)
-  keyHash    String    @db.VarChar(64)
+  keyHash    String    @unique @db.VarChar(64)
+  scopes     String[]  @default([])
+  branchId   String?   @db.Uuid
   createdAt  DateTime  @default(now()) @db.Timestamptz(6)
   createdBy  String?   @db.Uuid
   lastUsedAt DateTime? @db.Timestamptz(6)
   revokedAt  DateTime? @db.Timestamptz(6)
 
-  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenant Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  branch Branch? @relation(fields: [branchId], references: [id], onDelete: Cascade)
 
   @@index([tenantId])
   @@map("api_keys")
 }
 
 /**
- * Integrations & APIs' own "Webhooks" card — subscription definitions
- * only. `secret` (for signing a delivered payload) is shown once at
- * creation, same discipline as `ApiKey`'s own raw key. Not yet triggered by
- * any real PMS event — delivery infrastructure (matching subscriptions
- * against an event, POSTing, retry/backoff) is real, cross-cutting
- * infrastructure work this pass deliberately doesn't take on; see
- * `IntegrationsService`'s own header comment.
+ * Integrations & APIs' "Webhooks" — another system told when something
+ * happens here. `eventTypes` are names from `webhook-events.ts`; `secret`
+ * signs every delivery (HMAC-SHA256) and is shown once, at creation. With
+ * `branchId`, only that branch's events.
  */
 model Webhook {
   id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
@@ -919,14 +924,63 @@ model Webhook {
   url        String   @db.VarChar(500)
   eventTypes String[]
   secret     String   @db.VarChar(64)
+  branchId   String?  @db.Uuid
   isActive   Boolean  @default(true)
   createdAt  DateTime @default(now()) @db.Timestamptz(6)
   createdBy  String?  @db.Uuid
 
-  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenant     Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  branch     Branch?           @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  deliveries WebhookDelivery[]
 
   @@index([tenantId])
   @@map("webhooks")
+}
+
+/**
+ * One event on its way to one webhook — the outbox. Written in the same
+ * transaction as the change it reports, so a rolled-back booking never
+ * announces itself, and sent afterwards by `WebhookDispatcherService`, so a
+ * slow endpoint never holds a database transaction open. Retried with
+ * backoff until delivered or out of attempts.
+ */
+model WebhookDelivery {
+  id             String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId       String                @db.Uuid
+  webhookId      String                @db.Uuid
+  /**
+   * The same for every webhook told about one event — what a receiver de-duplicates on.
+   */
+  eventId        String                @db.Uuid
+  eventType      String                @db.VarChar(60)
+  payload        Json
+  status         WebhookDeliveryStatus @default(pending)
+  attempts       Int                   @default(0)
+  nextAttemptAt  DateTime              @default(now()) @db.Timestamptz(6)
+  /**
+   * Claimed by a dispatcher until then — a second server can't send it twice meanwhile.
+   */
+  lockedUntil    DateTime?             @db.Timestamptz(6)
+  lastAttemptAt  DateTime?             @db.Timestamptz(6)
+  responseStatus Int?
+  lastError      String?               @db.VarChar(500)
+  deliveredAt    DateTime?             @db.Timestamptz(6)
+  createdAt      DateTime              @default(now()) @db.Timestamptz(6)
+
+  tenant  Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  webhook Webhook @relation(fields: [webhookId], references: [id], onDelete: Cascade)
+
+  @@index([status, nextAttemptAt])
+  @@index([webhookId, createdAt(sort: Desc)])
+  @@map("webhook_deliveries")
+}
+
+enum WebhookDeliveryStatus {
+  pending
+  delivered
+  failed
+
+  @@map("webhook_delivery_status_enum")
 }
 
 enum IntegrationStatus {

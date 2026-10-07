@@ -6,7 +6,7 @@ import { ROLES_KEY, SystemRole } from '../decorators/roles.decorator';
 import { ErrorCode } from '../errors/error-codes';
 import { actionForMethod, permits } from '../permissions/permission-catalogue';
 import { PermissionsService } from '../permissions/permissions.service';
-import { AuthenticatedRequest } from '../types/request-context';
+import { ApiKeyPrincipal, AuthenticatedRequest } from '../types/request-context';
 import { PrismaService } from '../../prisma/prisma.service';
 import { RECORD_BRANCH } from './record-branch';
 
@@ -36,7 +36,8 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
  * branch, which is only right for tenant-wide records (guests, campaigns).
  *
  * Routes without `@Roles()` pass through — JwtAuthGuard + TenantGuard have
- * already run.
+ * already run. A request signed in with an API key never does: see
+ * `apiKeyMayRead`.
  */
 @Injectable()
 export class RolesGuard implements CanActivate {
@@ -47,10 +48,14 @@ export class RolesGuard implements CanActivate {
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
+    const request = context.switchToHttp().getRequest<AuthenticatedRequest>();
+    // An API key is checked whether or not the route names roles: a route
+    // open to every signed-in person is not open to every key.
+    if (request.user?.apiKey) return this.apiKeyMayRead(context, request, request.user.apiKey);
+
     const required = this.reflector.getAllAndOverride<SystemRole[] | undefined>(ROLES_KEY, [context.getHandler(), context.getClass()]);
     if (!required || required.length === 0) return true;
 
-    const request = context.switchToHttp().getRequest<AuthenticatedRequest>();
     const user = request.user;
     if (!user) return false;
 
@@ -70,6 +75,32 @@ export class RolesGuard implements CanActivate {
     }
 
     throw new ForbiddenException({ code: ErrorCode.FORBIDDEN, message: 'Insufficient role for this action' });
+  }
+
+  /**
+   * An API key reads, and only what it was given: the route must belong to a
+   * module in the key's scopes (`@Permission`), be a GET, and — for a key
+   * kept to one branch — be about that branch. Routes with no module (staff,
+   * roles, security, backups, GDPR, integrations) are out of reach, and so is
+   * revealing an ID document number.
+   */
+  private async apiKeyMayRead(context: ExecutionContext, request: AuthenticatedRequest, key: ApiKeyPrincipal): Promise<boolean> {
+    const refuse = (message: string): never => {
+      throw new ForbiddenException({ code: ErrorCode.FORBIDDEN, message });
+    };
+    const metadata = this.reflector.getAllAndOverride<PermissionMetadata | undefined>(PERMISSION_KEY, [context.getHandler(), context.getClass()]);
+    const method = request.method.toUpperCase();
+    if (method !== 'GET' && method !== 'HEAD') refuse('API keys can only read');
+    if (!metadata || (metadata.action ?? actionForMethod(method)) !== 'read') refuse('API keys can’t reach this');
+    if (!key.scopes.includes(metadata!.module)) refuse(`This API key can’t read ${metadata!.module.replace('_', ' ')} — give it access on the Integrations page`);
+    if ((request.query as Record<string, unknown> | undefined)?.reveal === 'true') refuse('API keys can’t reveal ID document numbers');
+
+    if (key.branchId) {
+      const params = request.params as Record<string, string | undefined>;
+      const branchId = params.branchId ?? (await this.recordBranch(context, params, request.user!.tenantId));
+      if (branchId !== undefined && branchId !== key.branchId) refuse('This API key is for another branch');
+    }
+    return true;
   }
 
   /** The branch of the record a `@BranchOf` route is addressed by; `undefined` when there's none to find (a malformed id is left to the route's own validation, a missing record to its 404). */

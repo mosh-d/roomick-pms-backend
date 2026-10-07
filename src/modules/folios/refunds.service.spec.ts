@@ -3,8 +3,12 @@ import { Test } from '@nestjs/testing';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { PropertyService } from '../property/property.service';
+import { WebhookEventsService } from '../integrations/webhook-events.service';
 import { FoliosService } from './folios.service';
 import { RefundsService } from './refunds.service';
+
+/** Webhook events are raised from the same audit calls these tests exercise; what they send is `WebhookEventsService`'s own spec. */
+const webhookEvents = { reservationChanged: jest.fn().mockResolvedValue(undefined), paymentRecorded: jest.fn().mockResolvedValue(undefined) };
 
 const TENANT_ID = '11111111-1111-4111-8111-111111111111';
 const BRANCH_ID = '33333333-3333-4333-8333-333333333333';
@@ -48,6 +52,7 @@ describe('RefundsService', () => {
         { provide: PrismaService, useValue: { withTenant: jest.fn((_t: string, fn: (x: unknown) => unknown) => fn(tx)) } },
         { provide: FoliosService, useValue: { totalsInTx: totals } },
         { provide: PropertyService, useValue: { assertBranch: jest.fn().mockResolvedValue({ id: BRANCH_ID, currency: 'NGN' }) } },
+        { provide: WebhookEventsService, useValue: webhookEvents },
       ],
     }).compile();
     service = moduleRef.get(RefundsService);
@@ -150,6 +155,7 @@ describe('RefundsService', () => {
         where: { id: 'refund-1' },
         data: { status: 'processed', processedAt: expect.any(Date), processedBy: 'desk-1', refundPaymentId: 'pay-out-1' },
       });
+      expect(webhookEvents.paymentRecorded).toHaveBeenCalledWith(tx, { tenantId: TENANT_ID, branchId: BRANCH_ID, type: 'refund.paid', paymentId: 'pay-out-1', refundId: 'refund-1' });
     });
 
     it('a card refund touches no drawer', async () => {
