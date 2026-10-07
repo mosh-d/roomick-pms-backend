@@ -8,6 +8,7 @@ export type BranchRecord =
   | 'noShowRecord'
   | 'folio'
   | 'folioTransfer'
+  | 'refund'
   | 'lineItem'
   | 'registrationCard'
   | 'maintenanceOrder'

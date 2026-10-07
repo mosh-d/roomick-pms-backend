@@ -1114,6 +1114,11 @@ export class FoliosService {
     return parent;
   }
 
+  /** A folio's totals inside the caller's transaction — what Refunds checks a bill's credit against. */
+  async totalsInTx(tx: TenantTx, folioId: string): Promise<FolioTotals> {
+    return this.computeTotals(tx, folioId);
+  }
+
   /** `balance = SUM(line_items not void/deleted) − SUM(payments not void)` — computed, never stored (spec §4.5). */
   private async computeTotals(tx: TenantTx, folioId: string): Promise<FolioTotals> {
     const [lineItems, payments] = await Promise.all([

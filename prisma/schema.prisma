@@ -424,6 +424,7 @@ model User {
   paymentsVoided             Payment[]           @relation("PaymentVoidedBy")
   refundsRequested           Refund[]            @relation("RefundRequestedBy")
   refundsApproved            Refund[]            @relation("RefundApprovedBy")
+  refundsPaidOut             Refund[]            @relation("RefundPaidOutBy")
   housekeepingTasksAssigned  HousekeepingTask[]  @relation("HkAssignee")
   housekeepingTasksCompleted HousekeepingTask[]  @relation("HkCompletedBy")
   shifts                     Shift[]
@@ -1486,6 +1487,8 @@ model Payment {
   voidedByUser   User?  @relation("PaymentVoidedBy", fields: [voidedBy], references: [id], onDelete: SetNull)
 
   refunds            Refund[]
+  // The refund this negative payment paid out, when it was one.
+  refundPayout       Refund?             @relation("RefundPayout")
   loyaltyTransaction LoyaltyTransaction?
 
   @@index([folioId, paymentPurpose])
@@ -1494,25 +1497,35 @@ model Payment {
 }
 
 model Refund {
-  id          String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  tenantId    String       @db.Uuid
-  folioId     String       @db.Uuid
-  paymentId   String?      @db.Uuid // original payment being refunded
-  amount      Decimal      @db.Decimal(12, 2)
-  reason      String
-  status      RefundStatus @default(pending)
-  requestedBy String?      @db.Uuid
-  approvedBy  String?      @db.Uuid
-  processedAt DateTime?    @db.Timestamptz(6)
-  createdAt   DateTime     @default(now()) @db.Timestamptz(6)
+  id              String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId        String        @db.Uuid
+  folioId         String        @db.Uuid
+  paymentId       String?       @db.Uuid // original payment being refunded
+  amount          Decimal       @db.Decimal(12, 2)
+  reason          String
+  status          RefundStatus  @default(pending)
+  // How the money goes back. Paid out as a negative payment by this method.
+  method          PaymentMethod
+  requestedBy     String?       @db.Uuid
+  approvedBy      String?       @db.Uuid
+  // Why a manager turned it down.
+  rejectionReason String?
+  // Who handed the money back, and the negative payment that records it.
+  processedBy     String?       @db.Uuid
+  refundPaymentId String?       @unique @db.Uuid
+  processedAt     DateTime?     @db.Timestamptz(6)
+  createdAt       DateTime      @default(now()) @db.Timestamptz(6)
 
   tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Restrict)
   folio           Folio    @relation(fields: [folioId], references: [id], onDelete: Restrict)
   payment         Payment? @relation(fields: [paymentId], references: [id], onDelete: SetNull)
+  refundPayment   Payment? @relation("RefundPayout", fields: [refundPaymentId], references: [id], onDelete: Restrict)
   requestedByUser User?    @relation("RefundRequestedBy", fields: [requestedBy], references: [id], onDelete: SetNull)
   approvedByUser  User?    @relation("RefundApprovedBy", fields: [approvedBy], references: [id], onDelete: SetNull)
+  processedByUser User?    @relation("RefundPaidOutBy", fields: [processedBy], references: [id], onDelete: SetNull)
 
   @@index([folioId])
+  @@index([status])
   @@map("refunds")
 }
 
