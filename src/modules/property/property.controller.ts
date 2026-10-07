@@ -13,7 +13,7 @@ import {
   UpdateBranchDto,
 } from './dto/branch.dto';
 import { UpdateOverbookingConfigDto } from './dto/overbooking-config.dto';
-import { CreateBuildingDto, CreateFloorDto } from './dto/structure.dto';
+import { CreateBuildingDto, CreateFloorDto, RenameBuildingDto, UpdateFloorDto } from './dto/structure.dto';
 import { PropertyService } from './property.service';
 import { BranchOf } from '../../common/decorators/branch-of.decorator';
 
@@ -174,6 +174,39 @@ export class PropertyController {
   }
 
   // --- Buildings & floors -----------------------------------------------------
+  @Get('branches/:branchId/layout')
+  @Roles(SystemRole.Owner, SystemRole.Manager)
+  @ApiOperation({ summary: "Every building and floor at the branch, empty ones too, with each floor's room count" })
+  getLayout(@CurrentTenant() tenantId: string, @Param('branchId', ParseUUIDPipe) branchId: string): ReturnType<PropertyService['getLayout']> {
+    return this.propertyService.getLayout(tenantId, branchId);
+  }
+
+  @Patch('buildings/:buildingId')
+  @BranchOf('building', 'buildingId')
+  @Roles(SystemRole.Owner, SystemRole.Manager)
+  @ApiOperation({ summary: 'Rename a building' })
+  renameBuilding(
+    @CurrentTenant() tenantId: string,
+    @CurrentUser() user: JwtPayload,
+    @Param('buildingId', ParseUUIDPipe) buildingId: string,
+    @Body() dto: RenameBuildingDto,
+  ): ReturnType<PropertyService['renameBuilding']> {
+    return this.propertyService.renameBuilding(tenantId, buildingId, dto.name, user.sub);
+  }
+
+  @Patch('floors/:floorId')
+  @BranchOf('floor', 'floorId')
+  @Roles(SystemRole.Owner, SystemRole.Manager)
+  @ApiOperation({ summary: "Change a floor's number or label" })
+  updateFloor(
+    @CurrentTenant() tenantId: string,
+    @CurrentUser() user: JwtPayload,
+    @Param('floorId', ParseUUIDPipe) floorId: string,
+    @Body() dto: UpdateFloorDto,
+  ): ReturnType<PropertyService['updateFloor']> {
+    return this.propertyService.updateFloor(tenantId, floorId, dto, user.sub);
+  }
+
   @Post('branches/:branchId/buildings')
   @Roles(SystemRole.Owner, SystemRole.Manager)
   @ApiOperation({ summary: 'Create a building ("Full" onboarding mode)' })

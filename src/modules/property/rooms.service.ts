@@ -11,7 +11,7 @@ import { todayInTimezone, toBranchDate } from '../../common/utils/branch-date';
 import { JwtPayload } from '../../common/types/request-context';
 import { PrismaService, TenantTx } from '../../prisma/prisma.service';
 import { CreateRoomTypeDto, UpdateRoomTypeDto } from './dto/room-type.dto';
-import { BulkCreateRoomsDto, ChangeRoomStatusDto, CreateRoomBlockDto } from './dto/rooms.dto';
+import { BulkCreateRoomsDto, ChangeRoomStatusDto, CreateRoomBlockDto, UpdateRoomDto } from './dto/rooms.dto';
 import { PropertyService } from './property.service';
 
 /** Roles that count as "supervisor" for §4.1 (may set `inspected`) and may
@@ -157,30 +157,56 @@ export class RoomsService {
 
       const clashes = await tx.room.findMany({
         where: { branchId, number: { in: numbers } },
-        select: { number: true },
+        select: { id: true, number: true, deletedAt: true },
       });
-      if (clashes.length > 0) {
+      const inUse = clashes.filter((c) => !c.deletedAt);
+      if (inUse.length > 0) {
         throw new ConflictException({
           code: ErrorCode.ROOM_NUMBERS_TAKEN,
-          message: `Room numbers already exist: ${clashes.map((c) => c.number).join(', ')}`,
+          message: `Room numbers already exist: ${inUse.map((c) => c.number).join(', ')}`,
         });
       }
 
-      await tx.room.createMany({
-        data: numbers.map((number) => ({
-          tenantId,
-          branchId,
-          roomTypeId: dto.roomTypeId,
-          floorId,
-          number,
-          view: dto.view,
-        })),
-      });
+      // A number a removed room had comes back as that room — the number stays
+      // unique at the branch, and the room's history stays with it — vacant and
+      // dirty, to be cleaned before anyone sleeps in it.
+      const removedRooms = clashes.filter((c) => c.deletedAt);
+      const restored = removedRooms.map((c) => c.number);
+      for (const removed of removedRooms) {
+        await tx.room.update({
+          where: { id: removed.id },
+          data: {
+            deletedAt: null,
+            roomTypeId: dto.roomTypeId,
+            floorId,
+            view: dto.view ?? null,
+            occupancyStatus: 'vacant',
+            cleanlinessStatus: 'dirty',
+            heldStatus: null,
+            statusChangedAt: new Date(),
+            statusChangedBy: actorId,
+          },
+        });
+      }
+      const fresh = numbers.filter((number) => !restored.includes(number));
+      if (fresh.length > 0) {
+        await tx.room.createMany({
+          data: fresh.map((number) => ({
+            tenantId,
+            branchId,
+            roomTypeId: dto.roomTypeId,
+            floorId,
+            number,
+            view: dto.view,
+          })),
+        });
+      }
 
       await this.audit(tx, tenantId, actorId, 'room.bulk_created', 'room', dto.roomTypeId, {
         count: numbers.length,
         numbers,
         floorId,
+        ...(restored.length > 0 ? { broughtBack: restored } : {}),
       });
 
       return tx.room.findMany({
@@ -224,6 +250,126 @@ export class RoomsService {
         ],
       });
     });
+  }
+
+  /**
+   * Edits a room after onboarding — its number, type, floor, view or notes.
+   * A type change is refused while a guest is in the room (Room Move moves
+   * the guest), and when the room's current type would be left without a
+   * room for a night it has bookings for.
+   */
+  async updateRoom(tenantId: string, roomId: string, dto: UpdateRoomDto, actorId: string): Promise<Room> {
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const room = await tx.room.findFirst({ where: { id: roomId, deletedAt: null }, include: { roomType: { select: { name: true } } } });
+      if (!room) throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Room not found' });
+
+      const data: Prisma.RoomUncheckedUpdateInput = {};
+      const changes: Record<string, { from: unknown; to: unknown }> = {};
+
+      const number = dto.number?.trim();
+      if (number && number !== room.number) {
+        const taken = await tx.room.findFirst({ where: { branchId: room.branchId, number, id: { not: roomId } }, select: { deletedAt: true } });
+        if (taken) {
+          throw new ConflictException({
+            code: ErrorCode.ROOM_NUMBERS_TAKEN,
+            message: taken.deletedAt ? `Room ${number} was removed — add it back from Add Rooms instead` : `There's already a room ${number}`,
+          });
+        }
+        data.number = number;
+        changes.number = { from: room.number, to: number };
+      }
+
+      if (dto.roomTypeId && dto.roomTypeId !== room.roomTypeId) {
+        const roomType = await tx.roomType.findFirst({ where: { id: dto.roomTypeId, branchId: room.branchId, deletedAt: null } });
+        if (!roomType) throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Room type not found at this branch' });
+        if (room.occupancyStatus === 'occupied') {
+          throw new ConflictException({ code: ErrorCode.CONFLICT, message: 'A guest is in this room — move them with Room Move, or wait for check-out, before changing its type' });
+        }
+        await this.assertTypeCanSpareARoom(tx, room.branchId, room.roomTypeId, room.roomType.name);
+        data.roomTypeId = roomType.id;
+        changes.roomType = { from: room.roomType.name, to: roomType.name };
+      }
+
+      if (dto.floorId && dto.floorId !== room.floorId) {
+        const floor = await tx.floor.findFirst({ where: { id: dto.floorId, building: { branchId: room.branchId } } });
+        if (!floor) throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Floor not found at this branch' });
+        data.floorId = floor.id;
+        changes.floor = { from: room.floorId, to: floor.id };
+      }
+      if (dto.view !== undefined && (dto.view.trim() || null) !== room.view) {
+        data.view = dto.view.trim() || null;
+        changes.view = { from: room.view, to: data.view };
+      }
+      if (dto.notes !== undefined && (dto.notes.trim() || null) !== room.notes) {
+        data.notes = dto.notes.trim() || null;
+        changes.notes = { from: room.notes, to: data.notes };
+      }
+
+      if (Object.keys(changes).length === 0) return room;
+      const updated = await tx.room.update({ where: { id: roomId }, data });
+      await this.audit(tx, tenantId, actorId, 'room.updated', 'room', roomId, changes as Prisma.InputJsonValue);
+      return updated;
+    });
+  }
+
+  /**
+   * Takes a room out of the inventory — a room knocked through, turned into
+   * an office. Its record and history stay; adding its number back brings it
+   * back. Refused while a guest is in it, or when its type would be left
+   * without a room for a night it has bookings for.
+   */
+  async removeRoom(tenantId: string, roomId: string, actorId: string): Promise<Room> {
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const room = await tx.room.findFirst({ where: { id: roomId, deletedAt: null }, include: { roomType: { select: { name: true } } } });
+      if (!room) throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Room not found' });
+      if (room.occupancyStatus === 'occupied') {
+        throw new ConflictException({ code: ErrorCode.CONFLICT, message: 'A guest is in this room — move them with Room Move, or wait for check-out, before removing it' });
+      }
+      await this.assertTypeCanSpareARoom(tx, room.branchId, room.roomTypeId, room.roomType.name);
+      const removed = await tx.room.update({ where: { id: roomId }, data: { deletedAt: new Date() } });
+      await this.audit(tx, tenantId, actorId, 'room.removed', 'room', roomId, { number: room.number, roomType: room.roomType.name });
+      return removed;
+    });
+  }
+
+  /**
+   * Would `roomTypeId` still have a room for every night it has bookings for,
+   * with one room fewer? Bookings hold a room type, not a room, so taking a
+   * room out of a type can leave a future night short — the guest would
+   * arrive to no room. Counts confirmed and in-house stays from today on —
+   * a guest still in the house past their departure date holds tonight too.
+   */
+  private async assertTypeCanSpareARoom(tx: TenantTx, branchId: string, roomTypeId: string, typeName: string): Promise<void> {
+    const branch = await this.propertyService.assertBranch(tx, branchId);
+    const today = toBranchDate(todayInTimezone(branch.timezone));
+    const tomorrow = new Date(today.getTime() + 86_400_000);
+    const [rooms, stays] = await Promise.all([
+      tx.room.count({ where: { branchId, roomTypeId, deletedAt: null } }),
+      tx.reservation.findMany({
+        where: {
+          branchId,
+          roomTypeId,
+          deletedAt: null,
+          OR: [{ status: { in: ['confirmed', 'checked_in'] }, checkOutDate: { gt: today } }, { status: 'checked_in' }],
+        },
+        select: { checkInDate: true, checkOutDate: true, status: true },
+      }),
+    ]);
+    const perNight = new Map<string, number>();
+    for (const stay of stays) {
+      const end = stay.status === 'checked_in' && stay.checkOutDate <= today ? tomorrow : stay.checkOutDate;
+      for (let night = stay.checkInDate > today ? stay.checkInDate : today; night < end; night = new Date(night.getTime() + 86_400_000)) {
+        const key = night.toISOString().slice(0, 10);
+        perNight.set(key, (perNight.get(key) ?? 0) + 1);
+      }
+    }
+    const [worstNight, booked] = [...perNight].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0] ?? [null, 0];
+    if (worstNight && booked > rooms - 1) {
+      throw new ConflictException({
+        code: ErrorCode.CONFLICT,
+        message: `${booked} ${typeName} ${booked === 1 ? 'booking needs' : 'bookings need'} a room on ${worstNight} — with one ${typeName} fewer there wouldn't be enough. Move or change those bookings first.`,
+      });
+    }
   }
 
   // -------------------------------------------------------------------------

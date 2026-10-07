@@ -312,6 +312,54 @@ export class PropertyService {
   }
 
   /**
+   * Property Config's Rooms & Layout: every building and floor at the branch,
+   * empty ones too, with how many rooms each floor has — the rooms list only
+   * ever shows a floor that has a room on it.
+   */
+  async getLayout(tenantId: string, branchId: string) {
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      await this.assertBranch(tx, branchId);
+      return tx.building.findMany({
+        where: { branchId },
+        include: {
+          floors: {
+            include: { _count: { select: { rooms: { where: { deletedAt: null } } } } },
+            orderBy: [{ floorNumber: 'asc' }, { createdAt: 'asc' }],
+          },
+        },
+        orderBy: { createdAt: 'asc' },
+      });
+    });
+  }
+
+  /** Names a building — the hidden default one ("Rooms Only" onboarding) too, which then shows by that name. */
+  async renameBuilding(tenantId: string, buildingId: string, name: string, actorId: string): Promise<Building> {
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const building = await tx.building.findFirst({ where: { id: buildingId } });
+      if (!building) throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Building not found' });
+      const updated = await tx.building.update({ where: { id: buildingId }, data: { name: name.trim() } });
+      await this.audit(tx, tenantId, actorId, 'building.renamed', 'building', buildingId, { from: building.name, to: updated.name });
+      return updated;
+    });
+  }
+
+  async updateFloor(tenantId: string, floorId: string, dto: { floorNumber?: number; label?: string }, actorId: string): Promise<Floor> {
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const floor = await tx.floor.findFirst({ where: { id: floorId } });
+      if (!floor) throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Floor not found' });
+      const data: Prisma.FloorUpdateInput = {};
+      if (dto.floorNumber !== undefined) data.floorNumber = dto.floorNumber;
+      if (dto.label !== undefined) data.label = dto.label.trim() || null;
+      const updated = await tx.floor.update({ where: { id: floorId }, data });
+      await this.audit(tx, tenantId, actorId, 'floor.updated', 'floor', floorId, {
+        ...(dto.floorNumber !== undefined ? { floorNumber: { from: floor.floorNumber, to: updated.floorNumber } } : {}),
+        ...(dto.label !== undefined ? { label: { from: floor.label, to: updated.label } } : {}),
+      });
+      return updated;
+    });
+  }
+
+  /**
    * "Floors Only" onboarding: floors without explicit buildings hang off the
    * branch's hidden default building (auto-created, name NULL — spec §1.1).
    */

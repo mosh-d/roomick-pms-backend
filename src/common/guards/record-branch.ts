@@ -14,6 +14,7 @@ export const RECORD_BRANCH: Record<BranchRecord, Lookup> = {
   noShowRecord: async (tx, id) => (await tx.noShowRecord.findFirst({ where: { id }, select: { reservation: { select: { branchId: true } } } }))?.reservation.branchId,
   folio: async (tx, id) => (await tx.folio.findFirst({ where: { id }, select: { branchId: true } }))?.branchId,
   folioTransfer: async (tx, id) => (await tx.folioTransfer.findFirst({ where: { id }, select: { sourceFolio: { select: { branchId: true } } } }))?.sourceFolio.branchId,
+  floor: async (tx, id) => (await tx.floor.findFirst({ where: { id }, select: { building: { select: { branchId: true } } } }))?.building.branchId,
   groupBlock: async (tx, id) => (await tx.groupBlock.findFirst({ where: { id }, select: { branchId: true } }))?.branchId,
   refund: async (tx, id) => (await tx.refund.findFirst({ where: { id }, select: { folio: { select: { branchId: true } } } }))?.folio.branchId,
   lineItem: async (tx, id) => (await tx.lineItem.findFirst({ where: { id }, select: { folio: { select: { branchId: true } } } }))?.folio.branchId,

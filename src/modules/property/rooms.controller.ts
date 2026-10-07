@@ -1,11 +1,11 @@
-import { Body, Controller, Get, Param, ParseUUIDPipe, Patch, Post } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Patch, Post } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentTenant, CurrentUser } from '../../common/decorators';
 import { Permission } from '../../common/decorators/permission.decorator';
 import { ALL_SYSTEM_ROLES, Roles, SystemRole } from '../../common/decorators/roles.decorator';
 import { JwtPayload } from '../../common/types/request-context';
 import { CreateRoomTypeDto, UpdateRoomTypeDto } from './dto/room-type.dto';
-import { BulkCreateRoomsDto, ChangeRoomStatusDto, CreateRoomBlockDto } from './dto/rooms.dto';
+import { BulkCreateRoomsDto, ChangeRoomStatusDto, CreateRoomBlockDto, UpdateRoomDto } from './dto/rooms.dto';
 import { RoomsService } from './rooms.service';
 import { BranchOf } from '../../common/decorators/branch-of.decorator';
 
@@ -74,6 +74,33 @@ export class RoomsController {
     @Param('branchId', ParseUUIDPipe) branchId: string,
   ): ReturnType<RoomsService['listRoomsForBranch']> {
     return this.roomsService.listRoomsForBranch(tenantId, branchId);
+  }
+
+  @Patch('rooms/:roomId')
+  @BranchOf('room', 'roomId')
+  @Permission('property', 'update')
+  @Roles(SystemRole.Owner, SystemRole.Manager)
+  @ApiOperation({ summary: "Edit a room — number, type, floor, view, notes. Type changes are refused while it's occupied or would leave its type short" })
+  updateRoom(
+    @CurrentTenant() tenantId: string,
+    @CurrentUser() user: JwtPayload,
+    @Param('roomId', ParseUUIDPipe) roomId: string,
+    @Body() dto: UpdateRoomDto,
+  ): ReturnType<RoomsService['updateRoom']> {
+    return this.roomsService.updateRoom(tenantId, roomId, dto, user.sub);
+  }
+
+  @Delete('rooms/:roomId')
+  @BranchOf('room', 'roomId')
+  @Permission('property', 'delete')
+  @Roles(SystemRole.Owner, SystemRole.Manager)
+  @ApiOperation({ summary: 'Take a room out of the inventory (kept on record; adding its number back brings it back)' })
+  removeRoom(
+    @CurrentTenant() tenantId: string,
+    @CurrentUser() user: JwtPayload,
+    @Param('roomId', ParseUUIDPipe) roomId: string,
+  ): ReturnType<RoomsService['removeRoom']> {
+    return this.roomsService.removeRoom(tenantId, roomId, user.sub);
   }
 
   @Patch('rooms/:roomId/status')

@@ -31,6 +31,7 @@ function makeTx() {
     room: {
       findFirst: jest.fn(),
       findMany: jest.fn().mockResolvedValue([]),
+      count: jest.fn().mockResolvedValue(3),
       update: jest.fn().mockImplementation(({ data }: { data: Record<string, unknown> }) =>
         Promise.resolve({ id: ROOM_ID, branchId: BRANCH_ID, ...data }),
       ),
@@ -42,6 +43,7 @@ function makeTx() {
       update: jest.fn().mockImplementation(({ data }: { data: Record<string, unknown> }) => Promise.resolve({ id: TYPE_ID, ...data })),
     },
     floor: { findFirst: jest.fn().mockResolvedValue({ id: FLOOR_ID }) },
+    reservation: { findMany: jest.fn().mockResolvedValue([]) },
     roomBlock: {
       create: jest.fn().mockResolvedValue({ id: 'block-1' }),
       findMany: jest.fn().mockResolvedValue([]),
@@ -228,6 +230,17 @@ describe('RoomsService', () => {
       expect(tx.room.createMany).not.toHaveBeenCalled();
     });
 
+    it('a number a removed room had brings that room back, vacant and dirty, instead of clashing', async () => {
+      tx.room.findMany.mockResolvedValueOnce([{ id: 'old-305', number: '305', deletedAt: new Date('2026-09-01') }]);
+      await service.bulkCreateRooms(TENANT_ID, BRANCH_ID, { roomTypeId: TYPE_ID, floorId: FLOOR_ID, numbers: ['305', '306'] }, manager.sub);
+      expect(tx.room.update).toHaveBeenCalledWith({
+        where: { id: 'old-305' },
+        data: expect.objectContaining({ deletedAt: null, roomTypeId: TYPE_ID, floorId: FLOOR_ID, occupancyStatus: 'vacant', cleanlinessStatus: 'dirty' }),
+      });
+      const created = tx.room.createMany.mock.calls[0][0] as { data: Array<{ number: string }> };
+      expect(created.data.map((r) => r.number)).toEqual(['306']);
+    });
+
     it('"Rooms Only" onboarding: no floorId → hidden default building/floor is used', async () => {
       await service.bulkCreateRooms(
         TENANT_ID,
@@ -244,6 +257,63 @@ describe('RoomsService', () => {
       await expect(
         service.bulkCreateRooms(TENANT_ID, BRANCH_ID, { roomTypeId: TYPE_ID }, manager.sub),
       ).rejects.toThrow(BadRequestException);
+    });
+  });
+
+  describe('updateRoom / removeRoom — after onboarding', () => {
+    const SUITE_ID = '66666666-6666-4666-8666-666666666666';
+    const today = new Date(`${new Date().toLocaleDateString('en-CA', { timeZone: 'Africa/Lagos' })}T00:00:00.000Z`);
+    const day = (n: number) => new Date(today.getTime() + n * 86_400_000);
+
+    beforeEach(() => {
+      tx.room.findFirst.mockResolvedValue(room({ number: '101', roomTypeId: TYPE_ID, floorId: FLOOR_ID, view: null, notes: null, roomType: { name: 'Deluxe' } }));
+    });
+
+    it('renumbers a room, refusing a number already taken', async () => {
+      tx.room.findFirst.mockResolvedValueOnce(room({ number: '101', roomTypeId: TYPE_ID, roomType: { name: 'Deluxe' } })).mockResolvedValueOnce({ deletedAt: null });
+      await expect(service.updateRoom(TENANT_ID, ROOM_ID, { number: '102' }, manager.sub)).rejects.toThrow(/already a room 102/);
+      tx.room.findFirst.mockResolvedValueOnce(room({ number: '101', roomTypeId: TYPE_ID, roomType: { name: 'Deluxe' } })).mockResolvedValueOnce(null);
+      await service.updateRoom(TENANT_ID, ROOM_ID, { number: '101A' }, manager.sub);
+      expect(tx.room.update).toHaveBeenCalledWith({ where: { id: ROOM_ID }, data: { number: '101A' } });
+    });
+
+    it("won't change the type of a room a guest is in", async () => {
+      tx.room.findFirst.mockResolvedValue(room({ occupancyStatus: 'occupied', roomTypeId: TYPE_ID, roomType: { name: 'Deluxe' } }));
+      tx.roomType.findFirst.mockResolvedValue({ id: SUITE_ID, name: 'Suite' });
+      await expect(service.updateRoom(TENANT_ID, ROOM_ID, { roomTypeId: SUITE_ID }, manager.sub)).rejects.toThrow(/A guest is in this room/);
+    });
+
+    it('refuses to leave a type short of rooms for a night it has bookings for', async () => {
+      tx.room.findFirst.mockResolvedValue(room({ roomTypeId: TYPE_ID, roomType: { name: 'Deluxe' } }));
+      tx.roomType.findFirst.mockResolvedValue({ id: SUITE_ID, name: 'Suite' });
+      tx.room.count.mockResolvedValue(2);
+      tx.reservation.findMany.mockResolvedValue([
+        { checkInDate: day(3), checkOutDate: day(5) },
+        { checkInDate: day(4), checkOutDate: day(6) },
+      ]);
+      await expect(service.updateRoom(TENANT_ID, ROOM_ID, { roomTypeId: SUITE_ID }, manager.sub)).rejects.toThrow(/2 Deluxe bookings need a room on/);
+      expect(tx.room.update).not.toHaveBeenCalled();
+    });
+
+    it('changes the type when the old one can spare the room, and audits what changed', async () => {
+      tx.room.findFirst.mockResolvedValue(room({ roomTypeId: TYPE_ID, roomType: { name: 'Deluxe' } }));
+      tx.roomType.findFirst.mockResolvedValue({ id: SUITE_ID, name: 'Suite' });
+      tx.room.count.mockResolvedValue(3);
+      tx.reservation.findMany.mockResolvedValue([{ checkInDate: day(3), checkOutDate: day(5) }]);
+      await service.updateRoom(TENANT_ID, ROOM_ID, { roomTypeId: SUITE_ID }, manager.sub);
+      expect(tx.room.update).toHaveBeenCalledWith({ where: { id: ROOM_ID }, data: { roomTypeId: SUITE_ID } });
+      expect(tx.auditLog.create).toHaveBeenCalledWith({ data: expect.objectContaining({ action: 'room.updated', after: { roomType: { from: 'Deluxe', to: 'Suite' } } }) });
+    });
+
+    it('removes a free room, keeping its record', async () => {
+      tx.room.findFirst.mockResolvedValue(room({ roomTypeId: TYPE_ID, roomType: { name: 'Deluxe' } }));
+      await service.removeRoom(TENANT_ID, ROOM_ID, manager.sub);
+      expect(tx.room.update).toHaveBeenCalledWith({ where: { id: ROOM_ID }, data: { deletedAt: expect.any(Date) } });
+    });
+
+    it("won't remove a room a guest is in", async () => {
+      tx.room.findFirst.mockResolvedValue(room({ occupancyStatus: 'occupied', roomType: { name: 'Deluxe' } }));
+      await expect(service.removeRoom(TENANT_ID, ROOM_ID, manager.sub)).rejects.toThrow(ConflictException);
     });
   });
 

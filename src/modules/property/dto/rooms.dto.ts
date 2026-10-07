@@ -10,6 +10,7 @@ import {
   IsString,
   IsUUID,
   Max,
+  MinLength,
   MaxLength,
   Min,
   ValidateIf,
@@ -70,6 +71,38 @@ export class BulkCreateRoomsDto {
   @IsString()
   @MaxLength(50)
   view?: string;
+}
+
+/** Editing one room after onboarding. */
+export class UpdateRoomDto {
+  @ApiPropertyOptional({ example: '101A' })
+  @IsOptional()
+  @IsString()
+  @MinLength(1)
+  @MaxLength(20)
+  number?: string;
+
+  @ApiPropertyOptional({ description: 'Not while a guest is in the room, nor when the type would be left without a room for its bookings' })
+  @IsOptional()
+  @IsUUID()
+  roomTypeId?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsUUID()
+  floorId?: string;
+
+  @ApiPropertyOptional({ example: 'sea', description: 'Empty clears it' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(50)
+  view?: string;
+
+  @ApiPropertyOptional({ description: 'Empty clears it' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(1000)
+  notes?: string;
 }
 
 export class ChangeRoomStatusDto {
