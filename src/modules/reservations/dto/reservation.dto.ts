@@ -175,6 +175,35 @@ export class CheckInDto {
   @ValidateNested()
   @Type(() => RecordIdDocumentDto)
   idDocument?: RecordIdDocumentDto;
+
+  @ApiPropertyOptional({ example: 'Deluxe rooms all still being cleaned', description: "Manual Room Override — required when the room is of another type than the booking's; kept in the audit log" })
+  @IsOptional()
+  @IsString()
+  @MaxLength(300)
+  overrideReason?: string;
+}
+
+/** Room Move / Room Upgrade for a checked-in guest. */
+export class MoveRoomDto {
+  @ApiProperty({ description: 'The room the guest moves to — vacant, not held or blocked' })
+  @IsUUID()
+  roomId!: string;
+
+  @ApiProperty({ example: 'Air conditioning failed in 204' })
+  @IsString()
+  @MinLength(1)
+  @MaxLength(300)
+  reason!: string;
+
+  @ApiProperty({ description: "true: the nights left are priced at the new room type's rate. false: the guest keeps the rate they booked." })
+  @IsBoolean()
+  chargeNewRate!: boolean;
+}
+
+export class RoomMoveQuoteQueryDto {
+  @ApiProperty({ description: 'The room type the guest would move to' })
+  @IsUUID()
+  roomTypeId!: string;
 }
 
 export class ExtendStayDto {

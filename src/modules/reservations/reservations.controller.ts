@@ -14,6 +14,8 @@ import {
   ExtendStayDto,
   ListReservationsQueryDto,
   ModifyReservationDto,
+  MoveRoomDto,
+  RoomMoveQuoteQueryDto,
   ReinstateNoShowDto,
   SetRateOverrideDto,
   WalkInReservationDto,
@@ -230,6 +232,32 @@ export class ReservationsController {
     @Body() dto: ExtendStayDto,
   ): ReturnType<ReservationsService['extendStay']> {
     return this.reservationsService.extendStay(tenantId, reservationId, dto, user.sub);
+  }
+
+  @Get('reservations/:reservationId/room-move-quote')
+  @BranchOf('reservation', 'reservationId')
+  @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk)
+  @ApiOperation({ summary: "What moving an in-house guest to a room type would cost for the nights left — at the booked rate, and at the new type's" })
+  roomMoveQuote(
+    @CurrentTenant() tenantId: string,
+    @Param('reservationId', ParseUUIDPipe) reservationId: string,
+    @Query() query: RoomMoveQuoteQueryDto,
+  ): ReturnType<ReservationsService['roomMoveQuote']> {
+    return this.reservationsService.roomMoveQuote(tenantId, reservationId, query.roomTypeId);
+  }
+
+  @Patch('reservations/:reservationId/move-room')
+  @BranchOf('reservation', 'reservationId')
+  @Permission('reservations', 'update')
+  @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk)
+  @ApiOperation({ summary: 'Room Move / Upgrade — move a checked-in guest to another room from tonight, keeping their rate or charging the new one' })
+  moveRoom(
+    @CurrentTenant() tenantId: string,
+    @CurrentUser() user: JwtPayload,
+    @Param('reservationId', ParseUUIDPipe) reservationId: string,
+    @Body() dto: MoveRoomDto,
+  ): ReturnType<ReservationsService['moveRoom']> {
+    return this.reservationsService.moveRoom(tenantId, reservationId, dto, user.sub);
   }
 
   @Patch('reservations/:reservationId/rate-override')

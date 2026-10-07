@@ -1454,6 +1454,160 @@ describe('ReservationsService', () => {
     });
   });
 
+  describe('moveRoom — Room Move / Upgrade', () => {
+    const SUITE_ID = '66666666-6666-4666-8666-666666666666';
+    const NEW_ROOM_ID = '99999999-9999-4999-8999-999999999999';
+    const DAY = 86_400_000;
+    // The stay spans today in Lagos, whatever today is: in yesterday, out the day after tomorrow — 3 nights at 100.
+    const today = new Date(`${new Date().toLocaleDateString('en-CA', { timeZone: 'Africa/Lagos' })}T00:00:00.000Z`);
+    const yesterday = new Date(today.getTime() - DAY);
+    const inHouse = (overrides: Record<string, unknown> = {}) =>
+      reservation({
+        status: 'checked_in',
+        roomId: ROOM_ID,
+        checkInDate: yesterday,
+        checkOutDate: new Date(today.getTime() + 2 * DAY),
+        confirmedRate: new Prisma.Decimal('300'),
+        overrideRate: null,
+        ...overrides,
+      });
+    const newRoom = (overrides: Record<string, unknown> = {}) => ({
+      id: NEW_ROOM_ID,
+      number: '305',
+      branchId: BRANCH_ID,
+      roomTypeId: TYPE_ID,
+      occupancyStatus: 'vacant',
+      heldStatus: null,
+      cleanlinessStatus: 'clean',
+      deletedAt: null,
+      ...overrides,
+    });
+
+    beforeEach(() => {
+      Object.assign(tx.lineItem, { findMany: jest.fn().mockResolvedValue([{ serviceDate: yesterday }]) });
+      tx.roomType.findFirst.mockImplementation(({ where }: { where: { id: string } }) =>
+        Promise.resolve(
+          where.id === SUITE_ID
+            ? { id: SUITE_ID, branchId: BRANCH_ID, name: 'Suite', baseRate: '180.00', capacity: { adults: 4, children: 2 } }
+            : { id: TYPE_ID, branchId: BRANCH_ID, name: 'Standard', baseRate: '100.00', capacity: { adults: 10, children: 10 } },
+        ),
+      );
+      // The new type's nights left: tonight and tomorrow at 180.
+      rateResolverService.resolveStay.mockImplementation((_tx: unknown, _t: string, _b: string, roomType: { baseRate: string }, from: Date, to: Date) => {
+        const perNight = [];
+        for (let night = new Date(from); night < to; night = new Date(night.getTime() + DAY)) {
+          perNight.push({ date: night.toISOString().slice(0, 10), finalRate: new Prisma.Decimal(roomType.baseRate) });
+        }
+        const subtotal = perNight.reduce((sum, n) => sum.plus(n.finalRate), new Prisma.Decimal(0));
+        return Promise.resolve({ subtotal, perNight, ratePlanId: null });
+      });
+    });
+
+    it('only an in-house guest changes rooms', async () => {
+      tx.reservation.findFirst.mockResolvedValue(inHouse({ status: 'confirmed', roomId: null }));
+      await expect(service.moveRoom(TENANT_ID, RESERVATION_ID, { roomId: NEW_ROOM_ID, reason: 'x', chargeNewRate: false }, ACTOR_ID)).rejects.toThrow(ConflictException);
+    });
+
+    it('refuses the room they are already in, and a room someone is in', async () => {
+      tx.reservation.findFirst.mockResolvedValue(inHouse());
+      await expect(service.moveRoom(TENANT_ID, RESERVATION_ID, { roomId: ROOM_ID, reason: 'x', chargeNewRate: false }, ACTOR_ID)).rejects.toThrow(BadRequestException);
+      tx.room.findFirst.mockResolvedValue(newRoom({ occupancyStatus: 'occupied' }));
+      await expect(service.moveRoom(TENANT_ID, RESERVATION_ID, { roomId: NEW_ROOM_ID, reason: 'x', chargeNewRate: false }, ACTOR_ID)).rejects.toThrow(ConflictException);
+    });
+
+    it('same type: the guest moves, the rate is untouched, the old room goes dirty with a task', async () => {
+      tx.reservation.findFirst.mockResolvedValue(inHouse());
+      tx.room.findFirst.mockResolvedValue(newRoom());
+      await service.moveRoom(TENANT_ID, RESERVATION_ID, { roomId: NEW_ROOM_ID, reason: 'AC failed', chargeNewRate: false }, ACTOR_ID);
+      expect(tx.reservation.update.mock.calls[0][0].data).toEqual({ roomId: NEW_ROOM_ID, roomTypeId: TYPE_ID });
+      expect(roomsService.applyReservationOccupancy).toHaveBeenCalledWith(tx, TENANT_ID, ROOM_ID, { occupancyStatus: 'vacant', cleanlinessStatus: 'dirty' }, ACTOR_ID);
+      expect(roomsService.applyReservationOccupancy).toHaveBeenCalledWith(tx, TENANT_ID, NEW_ROOM_ID, { occupancyStatus: 'occupied' }, ACTOR_ID);
+      expect(housekeepingService.createTaskInTx).toHaveBeenCalledWith(tx, TENANT_ID, BRANCH_ID, expect.objectContaining({ roomId: ROOM_ID, triggerEvent: 'room_move' }));
+    });
+
+    it('bills any past night not yet on the bill at the old rate before anything changes', async () => {
+      tx.reservation.findFirst.mockResolvedValue(inHouse());
+      tx.room.findFirst.mockResolvedValue(newRoom());
+      await service.moveRoom(TENANT_ID, RESERVATION_ID, { roomId: NEW_ROOM_ID, reason: 'AC failed', chargeNewRate: false }, ACTOR_ID);
+      expect(foliosService.backfillRoomCharges).toHaveBeenCalledWith(tx, expect.objectContaining({ roomId: ROOM_ID, overrideRate: null }), expect.anything(), today, 'Room move', ACTOR_ID);
+      expect(foliosService.backfillRoomCharges.mock.invocationCallOrder[0]).toBeLessThan(tx.reservation.update.mock.invocationCallOrder[0]);
+    });
+
+    it('a complimentary upgrade pins the booked nightly rate, so an extension later cannot re-price it', async () => {
+      tx.reservation.findFirst.mockResolvedValue(inHouse());
+      tx.room.findFirst.mockResolvedValue(newRoom({ roomTypeId: SUITE_ID }));
+      await service.moveRoom(TENANT_ID, RESERVATION_ID, { roomId: NEW_ROOM_ID, reason: 'Loyal guest', chargeNewRate: false }, ACTOR_ID);
+      const data = tx.reservation.update.mock.calls[0][0].data;
+      expect(data).toMatchObject({ roomId: NEW_ROOM_ID, roomTypeId: SUITE_ID });
+      expect(String(data.overrideRate)).toBe('100');
+      expect(data.confirmedRate).toBeUndefined();
+    });
+
+    it('a chargeable upgrade prices the nights left at the new type and keeps the billed night as it was', async () => {
+      tx.reservation.findFirst.mockResolvedValue(inHouse());
+      tx.room.findFirst.mockResolvedValue(newRoom({ roomTypeId: SUITE_ID }));
+      await service.moveRoom(TENANT_ID, RESERVATION_ID, { roomId: NEW_ROOM_ID, reason: 'Asked for a suite', chargeNewRate: true }, ACTOR_ID);
+      const data = tx.reservation.update.mock.calls[0][0].data;
+      expect(String(data.overrideRate)).toBe('180');
+      // Yesterday at 100 (billed) + tonight and tomorrow at 180.
+      expect(String(data.confirmedRate)).toBe('460');
+      expect(data.overrideReason).toMatch(/^Room move to Suite — Asked for a suite/);
+    });
+
+    it('a different type needs a room of it to spare for the nights left', async () => {
+      tx.reservation.findFirst.mockResolvedValue(inHouse());
+      tx.room.findFirst.mockResolvedValue(newRoom({ roomTypeId: SUITE_ID }));
+      tx.room.count.mockResolvedValue(0);
+      await expect(service.moveRoom(TENANT_ID, RESERVATION_ID, { roomId: NEW_ROOM_ID, reason: 'x', chargeNewRate: false }, ACTOR_ID)).rejects.toThrow(ConflictException);
+    });
+
+    it('quotes both prices for the nights left without writing anything', async () => {
+      tx.reservation.findFirst.mockResolvedValue(inHouse());
+      const quote = await service.roomMoveQuote(TENANT_ID, RESERVATION_ID, SUITE_ID);
+      expect(quote).toMatchObject({ nightsLeft: 2, currentNightly: '100.00', keepTotal: '200.00', newNightly: '180.00', newTotal: '360.00', tonightAlreadyBilled: false });
+      expect(rateResolverService.resolveStay).toHaveBeenCalledWith(tx, TENANT_ID, BRANCH_ID, expect.objectContaining({ id: SUITE_ID }), today, expect.any(Date), {}, expect.objectContaining({ persistAudit: false }));
+      expect(tx.reservation.update).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('checkIn — Manual Room Override', () => {
+    const SUITE_ID = '66666666-6666-4666-8666-666666666666';
+    const suiteRoom = { id: ROOM_ID, number: '401', branchId: BRANCH_ID, roomTypeId: SUITE_ID, occupancyStatus: 'vacant', heldStatus: null, deletedAt: null };
+
+    beforeEach(() => {
+      tx.roomType.findFirst.mockImplementation(({ where }: { where: { id: string } }) =>
+        Promise.resolve(where.id === SUITE_ID ? { id: SUITE_ID, branchId: BRANCH_ID, name: 'Suite', baseRate: '180.00' } : { id: TYPE_ID, branchId: BRANCH_ID, name: 'Standard', baseRate: '100.00' }),
+      );
+    });
+
+    it('a room of another type needs the reason', async () => {
+      tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'confirmed', roomId: null, confirmedRate: new Prisma.Decimal('300') }));
+      tx.room.findFirst.mockResolvedValue(suiteRoom);
+      await expect(service.checkIn(TENANT_ID, RESERVATION_ID, { roomId: ROOM_ID }, ACTOR_ID)).rejects.toThrow(/Room 401 is a Suite and this booking is for a Standard/);
+    });
+
+    it('with one, the stay becomes that type at the booked rate, pinned, and the reason is on record', async () => {
+      tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'confirmed', roomId: null, confirmedRate: new Prisma.Decimal('300'), overrideRate: null }));
+      tx.room.findFirst.mockResolvedValue(suiteRoom);
+      await service.checkIn(TENANT_ID, RESERVATION_ID, { roomId: ROOM_ID, overrideReason: 'Standards all being cleaned' }, ACTOR_ID);
+      const data = tx.reservation.update.mock.calls[0][0].data;
+      expect(data).toMatchObject({ status: 'checked_in', roomId: ROOM_ID, roomTypeId: SUITE_ID });
+      expect(String(data.overrideRate)).toBe('100');
+      const entry = tx.auditLog.create.mock.calls.map((c: [{ data: { action: string; after: Record<string, unknown> } }]) => c[0].data).find((d: { action: string }) => d.action === 'reservation.checked_in');
+      expect(entry?.after).toMatchObject({ overrideReason: 'Standards all being cleaned', bookedRoomTypeId: TYPE_ID, roomTypeId: SUITE_ID });
+    });
+  });
+
+  describe('extendStay — a pinned nightly rate carries on', () => {
+    it('the stay total grows by the pinned rate for the extra nights, not a re-price of the whole stay', async () => {
+      tx.reservation.findFirst.mockResolvedValue(
+        reservation({ status: 'checked_in', roomId: ROOM_ID, confirmedRate: new Prisma.Decimal('460'), overrideRate: new Prisma.Decimal('180'), checkOutDate: new Date('2026-09-04T00:00:00.000Z') }),
+      );
+      const result = await service.extendStay(TENANT_ID, RESERVATION_ID, { checkOutDate: '2026-09-06' }, ACTOR_ID);
+      expect(String((result as unknown as { confirmedRate: unknown }).confirmedRate)).toBe('820');
+    });
+  });
+
   describe('setRateOverride', () => {
     const dto = { overrideRate: 25000, reason: 'Service recovery — delayed check-in' };
 

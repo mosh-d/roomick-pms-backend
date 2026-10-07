@@ -692,11 +692,42 @@ export class ReservationsService {
       if (!room) {
         throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Room not found' });
       }
-      await this.assertRoomCheckInReady(tx, room, reservation.branchId, reservation.roomTypeId, reservation.checkInDate, reservation.checkOutDate);
+
+      // Manual Room Override (ref: "Receptionist selects room manually"): a
+      // room of another type, with the reason on record. The stay moves to
+      // that type — so its inventory is counted where the guest really is —
+      // at the rate they booked, pinned so a later extension can't re-price
+      // it at the new type. The new type needs a room to spare for the stay.
+      const overrideReason = dto.overrideReason?.trim() || undefined;
+      const typeChanges = room.roomTypeId !== reservation.roomTypeId;
+      let override: Prisma.ReservationUncheckedUpdateInput = {};
+      if (typeChanges && room.branchId === reservation.branchId) {
+        const [booked, given] = await Promise.all([
+          this.assertRoomType(tx, reservation.branchId, reservation.roomTypeId),
+          this.assertRoomType(tx, reservation.branchId, room.roomTypeId),
+        ]);
+        if (!overrideReason) {
+          throw new BadRequestException({
+            code: ErrorCode.VALIDATION_FAILED,
+            message: `Room ${room.number} is a ${given.name} and this booking is for a ${booked.name} — give the reason for the override, or pick a ${booked.name} room`,
+          });
+        }
+        await this.assertAvailableForStay(tx, reservation.branchId, room.roomTypeId, reservation.checkInDate, reservation.checkOutDate, reservationId);
+        override = {
+          roomTypeId: room.roomTypeId,
+          ...(reservation.overrideRate
+            ? {}
+            : {
+                overrideRate: new Prisma.Decimal(reservation.confirmedRate).div(this.stayNights(reservation)).toDecimalPlaces(2),
+                overrideReason: `Given a ${given.name} at check-in at the booked rate — ${overrideReason}`.slice(0, 500),
+              }),
+        };
+      }
+      await this.assertRoomCheckInReady(tx, room, reservation.branchId, typeChanges ? room.roomTypeId : reservation.roomTypeId, reservation.checkInDate, reservation.checkOutDate);
 
       const updated = await tx.reservation.update({
         where: { id: reservationId },
-        data: { status: 'checked_in', roomId, actualCheckIn: new Date() },
+        data: { status: 'checked_in', roomId, actualCheckIn: new Date(), ...override },
         include: RESERVATION_INCLUDE,
       });
       await this.roomsService.applyReservationOccupancy(tx, tenantId, roomId, { occupancyStatus: 'occupied' }, actorId);
@@ -719,7 +750,11 @@ export class ReservationsService {
       const branch = await this.propertyService.assertBranch(tx, reservation.branchId);
       await this.registrationCardsService.generateCardInTx(tx, tenantId, { ...updated, branch: { currency: updated.branch.currency, regCardTemplate: branch.regCardTemplate } }, actorId);
 
-      await this.audit(tx, tenantId, reservation.branchId, actorId, 'reservation.checked_in', reservationId, { roomId });
+      await this.audit(tx, tenantId, reservation.branchId, actorId, 'reservation.checked_in', reservationId, {
+        roomId,
+        ...(overrideReason ? { overrideReason } : {}),
+        ...(typeChanges ? { bookedRoomTypeId: reservation.roomTypeId, roomTypeId: room.roomTypeId } : {}),
+      });
       await this.commsLogService.logAutomatedInTx(tx, tenantId, reservation.branchId, {
         reservationId,
         guestId: updated.guestId,
@@ -1397,18 +1432,25 @@ export class ReservationsService {
         this.storedDeal(reservation),
         { triggeredBy: 'extend_stay', userId: actorId, reservationId },
       );
+      // A pinned nightly rate (a manager's override, a room move) is what the
+      // extra nights are billed at, so it's what the stay total grows by —
+      // re-pricing the whole stay would state a total the bill never shows.
+      const extraNights = Math.round((newCheckOutDate.getTime() - reservation.checkOutDate.getTime()) / 86_400_000);
+      const confirmedRate = reservation.overrideRate
+        ? new Prisma.Decimal(reservation.confirmedRate).plus(new Prisma.Decimal(reservation.overrideRate).mul(extraNights))
+        : resolved.subtotal;
 
       const previousCheckOutDate = reservation.checkOutDate;
       const updated = await tx.reservation.update({
         where: { id: reservationId },
-        data: { checkOutDate: newCheckOutDate, confirmedRate: resolved.subtotal, ratePlanId: resolved.ratePlanId },
+        data: { checkOutDate: newCheckOutDate, confirmedRate, ratePlanId: resolved.ratePlanId },
         include: RESERVATION_INCLUDE,
       });
 
       await this.audit(tx, tenantId, reservation.branchId, actorId, 'reservation.extended', reservationId, {
         previousCheckOutDate,
         newCheckOutDate,
-        confirmedRate: resolved.subtotal.toFixed(2),
+        confirmedRate: confirmedRate.toFixed(2),
       });
       await this.commsLogService.logAutomatedInTx(tx, tenantId, reservation.branchId, {
         reservationId,
@@ -1420,6 +1462,194 @@ export class ReservationsService {
       });
       return updated;
     });
+  }
+
+  /**
+   * What moving an in-house guest to a room of `roomTypeId` would cost, for
+   * the nights not yet on the bill — tonight onwards. Two prices: the rate
+   * they booked, and the new room type's own rate under the stay's deal
+   * (its company, its promo code). Read-only: nothing is written, not even
+   * the Rate Resolver's audit rows.
+   */
+  async roomMoveQuote(tenantId: string, reservationId: string, roomTypeId: string) {
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const reservation = await this.findReservationOrThrow(tx, reservationId);
+      this.assertMovable(reservation);
+      const roomType = await this.assertRoomType(tx, reservation.branchId, roomTypeId);
+      const plan = await this.roomMovePlan(tx, tenantId, reservation, roomType, false);
+      return {
+        nightsLeft: plan.nightsLeft.length,
+        firstNight: plan.nightsLeft[0]?.toISOString().slice(0, 10) ?? null,
+        tonightAlreadyBilled: plan.tonightAlreadyBilled,
+        currentNightly: plan.currentNightly.toFixed(2),
+        keepTotal: plan.currentNightly.mul(plan.nightsLeft.length).toFixed(2),
+        newNightly: plan.newNightly.toFixed(2),
+        newTotal: plan.newTotal.toFixed(2),
+      };
+    });
+  }
+
+  /**
+   * Room Move / Room Upgrade (ref: "Switch guest to higher room category")
+   * — an in-house guest changes rooms: the AC failed, they asked for a
+   * suite, a family needs two beds. Takes effect from tonight:
+   *
+   * - **Nights already on the bill stay as billed.** Any past night the
+   *   night audit hasn't reached yet is billed first, at the old rate — the
+   *   guest slept in the old room.
+   * - **Keep the rate** (`chargeNewRate: false`): the guest pays what they
+   *   booked. Moving to another type pins that nightly rate
+   *   (`overrideRate`), so extending the stay later can't quietly re-price
+   *   it at the new type.
+   * - **Charge the new rate**: the nights left are priced at the new room
+   *   type under the stay's own deal, and pinned at that nightly rate.
+   *
+   * The old room is vacated dirty with a housekeeping task, as at
+   * check-out; the new one is occupied. A different room type must have a
+   * room to spare for the nights left (the guest's own hold excluded).
+   */
+  async moveRoom(tenantId: string, reservationId: string, dto: { roomId: string; reason: string; chargeNewRate: boolean }, actorId: string) {
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const reservation = await this.findReservationOrThrow(tx, reservationId);
+      this.assertMovable(reservation);
+      const fromRoomId = reservation.roomId as string;
+      if (dto.roomId === fromRoomId) {
+        throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: 'The guest is already in this room' });
+      }
+      const room = await tx.room.findFirst({ where: { id: dto.roomId, deletedAt: null } });
+      if (!room || room.branchId !== reservation.branchId) {
+        throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Room not found' });
+      }
+      const branch = await this.propertyService.assertBranch(tx, reservation.branchId);
+      const today = toBranchDate(todayInTimezone(branch.timezone));
+      const tonight = today > reservation.checkInDate ? today : reservation.checkInDate;
+      // Physically free for the nights left — the same hard checks as check-in.
+      await this.assertRoomCheckInReady(tx, room, reservation.branchId, room.roomTypeId, tonight, reservation.checkOutDate > tonight ? reservation.checkOutDate : tonight);
+
+      const typeChanges = room.roomTypeId !== reservation.roomTypeId;
+      if (typeChanges && reservation.checkOutDate > tonight) {
+        await this.assertAvailableForStay(tx, reservation.branchId, room.roomTypeId, tonight, reservation.checkOutDate, reservationId);
+      }
+
+      // The past at the old rate first, while the stay still carries it.
+      const folio = await this.foliosService.ensurePrimaryFolio(tx, reservation, actorId);
+      await this.foliosService.backfillRoomCharges(tx, reservation, folio, today, 'Room move', actorId);
+
+      const newType = await this.assertRoomType(tx, reservation.branchId, room.roomTypeId);
+      const plan = await this.roomMovePlan(tx, tenantId, reservation, newType, true, actorId);
+      const nights = this.stayNights(reservation);
+      const reason = dto.reason.trim();
+
+      // The nightly rate pinned from tonight, when the move pins one.
+      let nightly: Prisma.Decimal | null = null;
+      let rate: Prisma.ReservationUncheckedUpdateInput = {};
+      if (dto.chargeNewRate && plan.nightsLeft.length > 0) {
+        nightly = plan.newTotal.div(plan.nightsLeft.length).toDecimalPlaces(2);
+        rate = {
+          overrideRate: nightly,
+          overrideReason: `Room move to ${newType.name} — ${reason}`.slice(0, 500),
+          confirmedRate: plan.currentNightly.mul(nights - plan.nightsLeft.length).plus(plan.newTotal),
+        };
+      } else if (typeChanges && !reservation.overrideRate) {
+        nightly = plan.currentNightly;
+        rate = { overrideRate: nightly, overrideReason: `Moved to ${newType.name} at the booked rate — ${reason}`.slice(0, 500) };
+      }
+
+      const updated = await tx.reservation.update({
+        where: { id: reservationId },
+        data: { roomId: room.id, roomTypeId: room.roomTypeId, ...rate },
+        include: RESERVATION_INCLUDE,
+      });
+
+      // The old room needs cleaning before anyone else sleeps in it — vacated dirty, on the Task Board, as at check-out.
+      await this.roomsService.applyReservationOccupancy(tx, tenantId, fromRoomId, { occupancyStatus: 'vacant', cleanlinessStatus: 'dirty' }, actorId);
+      await this.housekeepingService.createTaskInTx(tx, tenantId, reservation.branchId, {
+        roomId: fromRoomId,
+        triggerEvent: 'room_move',
+        triggeredByReservationId: reservationId,
+        notes: `Guest moved to room ${room.number}`,
+        taskDate: today,
+        actorId,
+      });
+      await this.roomsService.applyReservationOccupancy(tx, tenantId, room.id, { occupancyStatus: 'occupied' }, actorId);
+
+      await this.audit(tx, tenantId, reservation.branchId, actorId, 'reservation.room_moved', reservationId, {
+        fromRoomId,
+        toRoomId: room.id,
+        ...(typeChanges ? { fromRoomTypeId: reservation.roomTypeId, toRoomTypeId: room.roomTypeId } : {}),
+        rate: dto.chargeNewRate && plan.nightsLeft.length > 0 ? 'new' : 'kept',
+        nightsLeft: plan.nightsLeft.length,
+        ...(nightly ? { nightlyRate: nightly.toFixed(2) } : {}),
+        reason,
+      });
+      return updated;
+    });
+  }
+
+  private assertMovable(reservation: Reservation): void {
+    if (reservation.status !== 'checked_in' || !reservation.roomId) {
+      throw new ConflictException({
+        code: ErrorCode.INVALID_STATUS_TRANSITION,
+        message: 'Only a guest who is checked in can change rooms — before arrival, change the room type with Modify Reservation',
+      });
+    }
+  }
+
+  /**
+   * The nights a room move prices: from tonight to check-out, less any night
+   * already on the bill (moving on arrival day, tonight was billed at
+   * check-in). Priced two ways — the stay's current nightly rate, and the
+   * new room type's rate under the stay's deal.
+   */
+  private async roomMovePlan(tx: TenantTx, tenantId: string, reservation: Reservation, newType: RoomType, persistAudit: boolean, actorId?: string) {
+    const branch = await this.propertyService.assertBranch(tx, reservation.branchId);
+    const today = toBranchDate(todayInTimezone(branch.timezone));
+    const tonight = today > reservation.checkInDate ? today : reservation.checkInDate;
+    const billed = await tx.lineItem.findMany({
+      where: {
+        chargeType: 'room',
+        isVoid: false,
+        deletedAt: null,
+        OR: [{ stayReservationId: reservation.id }, { stayReservationId: null, folio: { reservationId: reservation.id } }],
+      },
+      select: { serviceDate: true },
+    });
+    const billedDates = new Set(billed.map((line) => line.serviceDate?.toISOString().slice(0, 10)));
+    const nightsLeft: Date[] = [];
+    for (let night = new Date(tonight); night < reservation.checkOutDate; night = new Date(night.getTime() + 86_400_000)) {
+      if (!billedDates.has(night.toISOString().slice(0, 10))) nightsLeft.push(night);
+    }
+
+    const currentNightly = reservation.overrideRate
+      ? new Prisma.Decimal(reservation.overrideRate)
+      : new Prisma.Decimal(reservation.confirmedRate).div(this.stayNights(reservation)).toDecimalPlaces(2);
+
+    let newTotal = new Prisma.Decimal(0);
+    if (nightsLeft.length > 0) {
+      const resolved = await this.rateResolverService.resolveStay(
+        tx,
+        tenantId,
+        reservation.branchId,
+        newType,
+        nightsLeft[0],
+        reservation.checkOutDate,
+        this.storedDeal(reservation),
+        { triggeredBy: 'room_move', userId: actorId, reservationId: reservation.id, persistAudit },
+      );
+      const left = new Set(nightsLeft.map((night) => night.toISOString().slice(0, 10)));
+      newTotal = resolved.perNight.filter((n) => left.has(n.date)).reduce((sum, n) => sum.plus(n.finalRate), new Prisma.Decimal(0));
+    }
+    return {
+      nightsLeft,
+      tonightAlreadyBilled: billedDates.has(tonight.toISOString().slice(0, 10)) && tonight < reservation.checkOutDate,
+      currentNightly,
+      newNightly: nightsLeft.length > 0 ? newTotal.div(nightsLeft.length).toDecimalPlaces(2) : new Prisma.Decimal(0),
+      newTotal,
+    };
+  }
+
+  private stayNights(reservation: Reservation): number {
+    return Math.max(1, Math.round((reservation.checkOutDate.getTime() - reservation.checkInDate.getTime()) / 86_400_000));
   }
 
   /**

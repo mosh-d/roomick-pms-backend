@@ -47,7 +47,7 @@ export interface StayResolution {
   auditLogIds: bigint[];
 }
 
-export type TriggeredBy = 'checkin' | 'booking_create' | 'override' | 'ota_import' | 'walkin' | 'modify' | 'extend_stay';
+export type TriggeredBy = 'checkin' | 'booking_create' | 'override' | 'ota_import' | 'walkin' | 'modify' | 'extend_stay' | 'room_move';
 
 @Injectable()
 export class RateResolverService {
