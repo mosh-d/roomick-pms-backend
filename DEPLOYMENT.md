@@ -156,6 +156,22 @@ bucket, then restore from it.
 
 ---
 
+## Locked out before email is set up
+
+"Forgot your password?" emails a link once `SMTP_HOST` is set. Until then a
+manager — or the owner — makes a link for a colleague from Staff Management.
+Nobody in the app can make one for the **owner**, so for an owner locked out
+before email is on, run this where the production `DATABASE_URL` and
+`PUBLIC_WEB_BASE_URL` are set (the Render shell works):
+
+```bash
+npm run reset-link -- owner@yourdomain
+```
+
+It prints a link that works once, for 24 hours, and records in the audit log
+that one was made this way. Hand it over in person or by a channel you trust —
+anyone holding it can set the password.
+
 ## Known gaps at launch
 
 These are real and deliberate, not oversights — each is documented in

@@ -14,6 +14,7 @@
     "start": "nest start",
     "start:dev": "nest start --watch",
     "start:prod": "node dist/main",
+    "reset-link": "node dist/cli/reset-link.js",
     "lint": "eslint \"{src,test,prisma}/**/*.ts\"",
     "lint:fix": "eslint \"{src,test,prisma}/**/*.ts\" --fix",
     "typecheck": "tsc --noEmit",
