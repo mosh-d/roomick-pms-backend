@@ -1,5 +1,31 @@
 # Phase Notes
 
+## Staff Management → Page Access: a branch manager chooses each staff role's pages (2026-10-07)
+
+The owner asked for a staff management module where a branch manager sets which screens each staff role can open. Migration `20261008010000`.
+
+### The model
+- `branch_page_access` (RLS): one row per branch and role — the pages that role opens there. **No row is the default: every page the role can open.** Owners and managers have no rows and are never restricted; they're the ones who set it.
+- **The pages** are a catalogue (`common/permissions/page-catalogue.ts`), keyed by their path in the web app (`/dashboard/arrivals`), so the web app's own navigation map needs no translation. For each page:
+  - `module` — the permission module it's about; a **custom role** can be given it when its permission map reads that module.
+  - `roles` — the built-in staff roles (front desk, housekeeper, accountant, POS staff) that can open it today; the only roles it can be given.
+  - `actRoles` — those that can also do its work; for the rest Page Access says "view only".
+  - `uses` — every module the page calls — its record page, the shared pieces on it, and its hub included. **Worked out from the web app's code, not by hand**: a script followed each page's imports to the API calls and matched them to the routes' `@Permission` modules.
+- Eleven pages only owners and managers can use (Manager Dashboard, Staff Management, Overbooking, Revenue Management, Loyalty & Marketing, Email Campaigns, Property Config, Integrations & APIs, Security & Roles, System Admin, Enterprise / HQ) aren't in the catalogue, and Page Access names them so a manager knows why.
+
+### The server holds a restricted role to it
+`RolesGuard` now checks Page Access after the role check (`PageAccessService.modulesForUser`): **a role whose pages its manager has set reaches only the modules those pages use.** Taking Reports from housekeepers makes the reports API answer them 403 ("None of your pages at this branch include Reports — ask your manager for access"); a module another of their pages needs stays open. It applies on routes in a module (routes that never were in one — sign-in, the person's own account — are untouched), at the branch the request is about (its URL, or the record's), and for a request about no branch, across the person's branches. A role nobody has set — anywhere at the tenant, in the common case without even looking up the branch — works exactly as before. Rows are cached per tenant and cleared on every change.
+
+### Routes
+- `GET /branches/:branchId/page-access` (owner, manager) — every staff role there: what it could be given, what it's view-only on, what it opens now, whether a manager set it.
+- `PUT /branches/:branchId/page-access/:roleId` `{ pages }` — refused for a page the role can't open, a page that isn't one, or the owner/manager roles. `DELETE` puts it back on its default. Both audited (`page_access.updated` with before and after, `page_access.reset`).
+- `GET /branches/:branchId/my-pages` (anyone signed in) — `{ restricted, pages }` for the person asking; what the web app shapes its menus by.
+- A manager sets only their own branch's (the branch is in the URL, so the role check covers it).
+
+### Verified
+- **Checks:** `tsc` and lint clean; **1,157 tests** in 63 suites (new: the catalogue's own consistency, defaults, a set role, two roles together, the module union, a request about no branch, validation and audit, the matrix's view-only lines, and the guard refusing a module outside a restricted role's pages while leaving everyone else alone).
+- **Live, against real Postgres, 27/27 + 4/4:** a manager gives housekeepers three pages at one branch; they open just those, the reports and billing APIs refuse them with the reason while housekeeping and rooms still answer, and at their other branch nothing changed; a front desk agent nobody set is untouched; a page the role can't use, the manager role, another branch, and staff opening Page Access are all refused; the change is audited; in the browser their menu, the Front Desk hub (no empty sections, no override card), the breadcrumb dropdowns and the phone menu show only their pages, and a page they lost says so; the manager ticks Operational Reports on Staff Management and it reaches them, then resets them to the default; no colour mismatches, no sideways scroll at 390px, no console errors.
+
 ## Rounding up before the owner's integrations: billing workflows, group check-in, layout editing, reports, email, API keys and webhooks (2026-10-07)
 
 The owner asked for every piece of development work that doesn't need their accounts to be finished, so the integrations and account links that only they can do can start. Migrations `20261007010000` to `20261007060000`.
