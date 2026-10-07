@@ -4,6 +4,7 @@ import { BRANCH_OF_KEY, BranchOfMetadata } from '../decorators/branch-of.decorat
 import { PERMISSION_KEY, PermissionMetadata } from '../decorators/permission.decorator';
 import { PrismaService } from '../../prisma/prisma.service';
 import { ROLES_KEY, SystemRole } from '../decorators/roles.decorator';
+import { PageAccessService } from '../permissions/page-access.service';
 import { PermissionMap } from '../permissions/permission-catalogue';
 import { PermissionsService, RoleGrant } from '../permissions/permissions.service';
 import { JwtPayload } from '../types/request-context';
@@ -49,9 +50,14 @@ function prismaWith(folios: Record<string, string> = {}) {
   return { tx, prisma: { withTenant: jest.fn((_tenantId: string, fn: (t: unknown) => unknown) => fn(tx)) } as unknown as PrismaService };
 }
 
-function guardWith(reflector: Reflector, roles: RoleGrant[], prisma: PrismaService = prismaWith().prisma): RolesGuard {
+/** No Page Access restriction unless a test sets the modules a person's pages reach. */
+function pageAccessWith(modules: string[] | null = null) {
+  return { modulesForUser: jest.fn().mockResolvedValue(modules === null ? null : new Set(modules)) } as unknown as PageAccessService;
+}
+
+function guardWith(reflector: Reflector, roles: RoleGrant[], prisma: PrismaService = prismaWith().prisma, pageAccess = pageAccessWith()): RolesGuard {
   const permissionsService = { rolesFor: jest.fn().mockResolvedValue(new Map(roles.map((role) => [role.name, role]))) } as unknown as PermissionsService;
-  return new RolesGuard(reflector, permissionsService, prisma);
+  return new RolesGuard(reflector, permissionsService, prisma, pageAccess);
 }
 
 describe('RolesGuard', () => {
@@ -79,7 +85,7 @@ describe('RolesGuard', () => {
     it('never asks the database when a seeded role already matches', async () => {
       const { context, reflector } = contextFor({ required: [SystemRole.Owner], user: actor([{ branchId: null, role: 'owner' }]) });
       const permissionsService = { rolesFor: jest.fn() } as unknown as PermissionsService;
-      await expect(new RolesGuard(reflector, permissionsService, prismaWith().prisma).canActivate(context)).resolves.toBe(true);
+      await expect(new RolesGuard(reflector, permissionsService, prismaWith().prisma, pageAccessWith()).canActivate(context)).resolves.toBe(true);
       expect((permissionsService as unknown as { rolesFor: jest.Mock }).rolesFor).not.toHaveBeenCalled();
     });
   });
@@ -253,6 +259,35 @@ describe('RolesGuard', () => {
         branchOf: { record: 'folio', param: 'folioId' },
       });
       await expect(guardWith(reflector, [], prisma).canActivate(context)).rejects.toThrow(/another branch/);
+    });
+  });
+  describe('Page Access', () => {
+    const desk = actor([{ branchId: BRANCH_ID, role: 'front_desk' }]);
+
+    it('a restricted role is refused a module none of its pages use — even on a route open to everyone', async () => {
+      const { context, reflector } = contextFor({ permission: { module: 'reports' }, user: desk, params: { branchId: BRANCH_ID } });
+      await expect(guardWith(reflector, [], prismaWith().prisma, pageAccessWith(['reservations', 'property'])).canActivate(context)).rejects.toThrow(
+        /None of your pages at this branch include Reports/,
+      );
+    });
+
+    it('…and reaches the modules its pages do use', async () => {
+      const { context, reflector } = contextFor({ required: [SystemRole.FrontDesk], permission: { module: 'reservations' }, user: desk, params: { branchId: BRANCH_ID } });
+      await expect(guardWith(reflector, [], prismaWith().prisma, pageAccessWith(['reservations', 'property'])).canActivate(context)).resolves.toBe(true);
+    });
+
+    it('a role nobody restricted, and a route in no module, are never limited by it', async () => {
+      const unrestricted = contextFor({ permission: { module: 'reports' }, user: desk, params: { branchId: BRANCH_ID } });
+      await expect(guardWith(unrestricted.reflector, []).canActivate(unrestricted.context)).resolves.toBe(true);
+      const noModule = contextFor({ user: desk, params: { branchId: BRANCH_ID } });
+      const modulesForUser = jest.fn().mockResolvedValue(new Set());
+      await expect(guardWith(noModule.reflector, [], prismaWith().prisma, { modulesForUser } as unknown as PageAccessService).canActivate(noModule.context)).resolves.toBe(true);
+      expect(modulesForUser).not.toHaveBeenCalled();
+    });
+
+    it('the role check still comes first: Page Access never lets anyone in', async () => {
+      const { context, reflector } = contextFor({ required: [SystemRole.Manager], permission: { module: 'reservations' }, user: desk, params: { branchId: BRANCH_ID } });
+      await expect(guardWith(reflector, [], prismaWith().prisma, pageAccessWith(['reservations'])).canActivate(context)).rejects.toThrow(/Insufficient role/);
     });
   });
 });

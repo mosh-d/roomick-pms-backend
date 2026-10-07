@@ -4,9 +4,10 @@ import { BRANCH_OF_KEY, BranchOfMetadata } from '../decorators/branch-of.decorat
 import { PERMISSION_KEY, PermissionMetadata } from '../decorators/permission.decorator';
 import { ROLES_KEY, SystemRole } from '../decorators/roles.decorator';
 import { ErrorCode } from '../errors/error-codes';
-import { actionForMethod, permits } from '../permissions/permission-catalogue';
+import { PageAccessService } from '../permissions/page-access.service';
+import { actionForMethod, PERMISSION_MODULES, permits } from '../permissions/permission-catalogue';
 import { PermissionsService } from '../permissions/permissions.service';
-import { ApiKeyPrincipal, AuthenticatedRequest } from '../types/request-context';
+import { ApiKeyPrincipal, AuthenticatedRequest, JwtPayload } from '../types/request-context';
 import { PrismaService } from '../../prisma/prisma.service';
 import { RECORD_BRANCH } from './record-branch';
 
@@ -45,6 +46,7 @@ export class RolesGuard implements CanActivate {
     private readonly reflector: Reflector,
     private readonly permissionsService: PermissionsService,
     private readonly prisma: PrismaService,
+    private readonly pageAccess: PageAccessService,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -53,28 +55,47 @@ export class RolesGuard implements CanActivate {
     // open to every signed-in person is not open to every key.
     if (request.user?.apiKey) return this.apiKeyMayRead(context, request, request.user.apiKey);
 
-    const required = this.reflector.getAllAndOverride<SystemRole[] | undefined>(ROLES_KEY, [context.getHandler(), context.getClass()]);
-    if (!required || required.length === 0) return true;
-
     const user = request.user;
-    if (!user) return false;
-
     // Branch scope comes from the route param when present (/branches/:branchId/...),
-    // else from the record the route is addressed by.
+    // else from the record the route is addressed by — looked up once, and only when needed.
     const params = request.params as Record<string, string | undefined>;
-    const branchId = params.branchId ?? (await this.recordBranch(context, params, user.tenantId));
-    const atThisBranch = (assignment: { branchId: string | null }) =>
-      assignment.branchId === null || branchId === undefined || assignment.branchId === branchId;
+    let resolved: { branchId: string | undefined } | null = null;
+    const branchOfRequest = async (): Promise<string | undefined> => {
+      resolved ??= { branchId: params.branchId ?? (user ? await this.recordBranch(context, params, user.tenantId) : undefined) };
+      return resolved.branchId;
+    };
 
-    if (user.roles.some((assignment) => (required as string[]).includes(assignment.role) && atThisBranch(assignment))) {
-      return true;
+    const required = this.reflector.getAllAndOverride<SystemRole[] | undefined>(ROLES_KEY, [context.getHandler(), context.getClass()]);
+    if (required && required.length > 0) {
+      if (!user) return false;
+      const branchId = await branchOfRequest();
+      const atThisBranch = (assignment: { branchId: string | null }) =>
+        assignment.branchId === null || branchId === undefined || assignment.branchId === branchId;
+      const allowed =
+        user.roles.some((assignment) => (required as string[]).includes(assignment.role) && atThisBranch(assignment)) ||
+        (await this.customRoleAllows(context, request, user.roles.filter(atThisBranch).map((assignment) => assignment.role)));
+      if (!allowed) throw new ForbiddenException({ code: ErrorCode.FORBIDDEN, message: 'Insufficient role for this action' });
     }
 
-    if (await this.customRoleAllows(context, request, user.roles.filter(atThisBranch).map((assignment) => assignment.role))) {
-      return true;
-    }
+    if (user) await this.assertWithinPageAccess(context, user, branchOfRequest);
+    return true;
+  }
 
-    throw new ForbiddenException({ code: ErrorCode.FORBIDDEN, message: 'Insufficient role for this action' });
+  /**
+   * Page Access: a staff role whose pages its branch manager has set reaches
+   * only the permission modules those pages use (`PageAccessService`), so a
+   * page taken away is closed on the server too, not just hidden. Checked
+   * after the role check, on routes in a module; owners, managers and roles
+   * nobody has set pages for are never limited by it.
+   */
+  private async assertWithinPageAccess(context: ExecutionContext, user: JwtPayload, branchOfRequest: () => Promise<string | undefined>): Promise<void> {
+    const metadata = this.reflector.getAllAndOverride<PermissionMetadata | undefined>(PERMISSION_KEY, [context.getHandler(), context.getClass()]);
+    if (!metadata) return;
+    const modules = await this.pageAccess.modulesForUser(user.tenantId, user, branchOfRequest);
+    if (modules && !modules.has(metadata.module)) {
+      const label = PERMISSION_MODULES.find((module) => module.key === metadata.module)?.label ?? metadata.module;
+      throw new ForbiddenException({ code: ErrorCode.FORBIDDEN, message: `None of your pages at this branch include ${label} — ask your manager for access` });
+    }
   }
 
   /**

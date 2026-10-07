@@ -9,6 +9,7 @@ import { LogMailTransport } from './mail/log-mail-transport';
 import { MAIL_TRANSPORT, MailTransport } from './mail/mail-transport.interface';
 import { SmtpMailTransport, smtpSettingsFromEnv } from './mail/smtp-mail-transport';
 import { MetricsService } from './metrics/metrics.service';
+import { PageAccessService } from './permissions/page-access.service';
 import { PermissionsService } from './permissions/permissions.service';
 import { RoutePermissionMapService } from './permissions/route-permission-map.service';
 
@@ -23,6 +24,7 @@ import { RoutePermissionMapService } from './permissions/route-permission-map.se
     EncryptionService,
     MetricsService,
     PermissionsService,
+    PageAccessService,
     RoutePermissionMapService,
     { provide: DOCUMENT_STORAGE_ADAPTER, useClass: LocalFilesystemDocumentStorage },
     // SMTP once `SMTP_HOST` is set (any provider — they all take SMTP), the
@@ -35,6 +37,6 @@ import { RoutePermissionMapService } from './permissions/route-permission-map.se
       },
     },
   ],
-  exports: [ApiKeyAuthService, TenantContextService, EncryptionService, MetricsService, PermissionsService, RoutePermissionMapService, DOCUMENT_STORAGE_ADAPTER, MAIL_TRANSPORT],
+  exports: [ApiKeyAuthService, TenantContextService, EncryptionService, MetricsService, PermissionsService, PageAccessService, RoutePermissionMapService, DOCUMENT_STORAGE_ADAPTER, MAIL_TRANSPORT],
 })
 export class CommonModule {}

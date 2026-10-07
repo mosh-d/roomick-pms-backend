@@ -379,6 +379,7 @@ model Tenant {
   integrationConnections   IntegrationConnection[]
   refreshTokens            RefreshToken[]
   reportTemplates          ReportTemplate[]
+  branchPageAccess         BranchPageAccess[]
 
   @@index([isDemo, demoExpiresAt])
   @@map("tenants")
@@ -538,6 +539,7 @@ model Role {
 
   userBranchRoles UserBranchRole[]
   inviteTokens    InviteToken[]
+  pageAccess      BranchPageAccess[]
 
   @@unique([tenantId, name])
   @@map("roles")
@@ -561,6 +563,31 @@ model UserBranchRole {
   @@unique([userId, roleId, branchId])
   @@index([userId, branchId])
   @@map("user_branch_roles")
+}
+
+/**
+ * Which dashboard pages one staff role can open at one branch — set by the
+ * branch's manager on Staff Management → Page Access. No row means the
+ * role's default: every page it can open (`page-catalogue.ts`). `pages` are
+ * page keys (their paths in the web app). Owners and managers have no rows:
+ * they are never restricted.
+ */
+model BranchPageAccess {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String   @db.Uuid
+  branchId  String   @db.Uuid
+  roleId    String   @db.Uuid
+  pages     String[]
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+  updatedBy String?  @db.Uuid
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  branch Branch @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  role   Role   @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@unique([branchId, roleId])
+  @@index([tenantId])
+  @@map("branch_page_access")
 }
 
 model InviteToken {
@@ -681,6 +708,7 @@ model Branch {
   reportTemplates          ReportTemplate[]
   apiKeys                  ApiKey[]
   webhooks                 Webhook[]
+  pageAccess               BranchPageAccess[]
 
   @@index([tenantId, brandId])
   @@index([tenantId, deletedAt])
