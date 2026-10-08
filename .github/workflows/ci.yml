@@ -54,6 +54,20 @@ jobs:
       - name: Verify migrations match the schema (no drift)
         run: npx prisma migrate diff --from-migrations prisma/migrations --to-schema-datamodel prisma/schema.prisma --shadow-database-url "$DATABASE_URL" --exit-code
 
+      # The service container's user is a superuser, and a superuser skips
+      # row-level security even on FORCE tables — so tests run as it never
+      # saw the tenant isolation production relies on (and the end-to-end
+      # tests failed outright: one organisation saw another's brand). The
+      # API in production signs in as an ordinary role; so do the tests.
+      - name: Create the ordinary database role the tests run as
+        run: |
+          npx prisma db execute --url "$DATABASE_URL" --stdin <<'SQL'
+          CREATE ROLE roomick_app LOGIN PASSWORD 'roomick_app' NOSUPERUSER NOBYPASSRLS;
+          GRANT USAGE ON SCHEMA public TO roomick_app;
+          GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO roomick_app;
+          GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO roomick_app;
+          SQL
+
       - name: Seed (smoke-tests RLS wiring)
         run: npx prisma db seed
 
@@ -61,6 +75,8 @@ jobs:
         run: npm test -- --passWithNoTests
 
       - name: E2E tests
+        env:
+          DATABASE_URL: postgresql://roomick_app:roomick_app@localhost:5432/roomick_test?schema=public
         run: npm run test:e2e
 
       - name: Build

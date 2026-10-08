@@ -31,7 +31,8 @@ export default tseslint.config(
   },
   {
     // Tests mock Prisma/Nest heavily — the unsafe-* family only fights the mocks there.
-    files: ['**/*.spec.ts', '**/*.e2e-spec.ts'],
+    // test/** includes the end-to-end suites' shared helpers.
+    files: ['**/*.spec.ts', '**/*.e2e-spec.ts', 'test/**/*.ts'],
     rules: {
       '@typescript-eslint/no-unsafe-assignment': 'off',
       '@typescript-eslint/no-unsafe-member-access': 'off',

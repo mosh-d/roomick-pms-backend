@@ -1,9 +1,10 @@
-import { INestApplication, ValidationPipe, VersioningType } from '@nestjs/common';
+import { INestApplication } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { App } from 'supertest/types';
 import request from 'supertest';
 import { AppModule } from '../src/app.module';
-import { ProblemJsonExceptionFilter } from '../src/common/filters/problem-json.filter';
+import { configureApp } from '../src/app-setup';
+import { lagosDay } from './support/e2e';
 import { PrismaService } from '../src/prisma/prisma.service';
 
 /**
@@ -34,7 +35,8 @@ describe('Delete organisation (e2e)', () => {
   const password = 'Str0ngPass!1';
 
   function iso(offsetDays: number): string {
-    return new Date(Date.now() + offsetDays * 86_400_000).toISOString().slice(0, 10);
+    // Lagos, the branch's timezone — UTC's date is a day behind for an hour every night.
+    return lagosDay(offsetDays);
   }
 
   async function post(path: string, body?: Record<string, unknown>) {
@@ -72,11 +74,9 @@ describe('Delete organisation (e2e)', () => {
 
   beforeAll(async () => {
     const moduleFixture: TestingModule = await Test.createTestingModule({ imports: [AppModule] }).compile();
-    app = moduleFixture.createNestApplication();
-    app.setGlobalPrefix('api');
-    app.enableVersioning({ type: VersioningType.URI, defaultVersion: '1' });
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
-    app.useGlobalFilters(new ProblemJsonExceptionFilter());
+    app = moduleFixture.createNestApplication({ bodyParser: false });
+    // The API exactly as main.ts builds it — body limit, strict validation, error format.
+    configureApp(app);
     await app.init();
     prisma = app.get(PrismaService);
 

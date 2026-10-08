@@ -658,8 +658,11 @@ model Branch {
   address            Json // {street, city, state, country, zip}
   timezone           String   @db.VarChar(50) // IANA tz — night audit depends on it
   currency           String   @db.Char(3) // ISO 4217
-  checkInTime        DateTime @default(dbgenerated("'14:00:00'::time")) @db.Time(0)
-  checkOutTime       DateTime @default(dbgenerated("'11:00:00'::time")) @db.Time(0)
+  // Written the way Postgres stores the default ("time without time zone"):
+  // a bare "::time" never matched what the database reports, so CI's drift
+  // check failed on every run and nothing after it — tests, build — ran.
+  checkInTime        DateTime @default(dbgenerated("'14:00:00'::time without time zone")) @db.Time(0)
+  checkOutTime       DateTime @default(dbgenerated("'11:00:00'::time without time zone")) @db.Time(0)
   category           String?  @db.VarChar(30) // hotel | resort | motel | boutique | hostel
   policies           Json? // overrides brand defaultPolicies; merged at read time. Holds idCaptureMandatory, early/late surcharge policy, AR flag rules.
   noShowPolicy       Json? // {cutoffTime, defaultPenalty, flatFeeAmount, autoMark, notifyMinutesBefore}

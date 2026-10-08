@@ -1,9 +1,9 @@
-import { INestApplication, ValidationPipe, VersioningType } from '@nestjs/common';
+import { INestApplication } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { App } from 'supertest/types';
 import request from 'supertest';
 import { AppModule } from '../src/app.module';
-import { ProblemJsonExceptionFilter } from '../src/common/filters/problem-json.filter';
+import { configureApp } from '../src/app-setup';
 
 describe('P0 scaffold (e2e)', () => {
   let app: INestApplication<App>;
@@ -13,11 +13,9 @@ describe('P0 scaffold (e2e)', () => {
       imports: [AppModule],
     }).compile();
 
-    app = moduleFixture.createNestApplication();
-    app.setGlobalPrefix('api');
-    app.enableVersioning({ type: VersioningType.URI, defaultVersion: '1' });
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
-    app.useGlobalFilters(new ProblemJsonExceptionFilter());
+    app = moduleFixture.createNestApplication({ bodyParser: false });
+    // The API exactly as main.ts builds it — body limit, strict validation, error format.
+    configureApp(app);
     await app.init();
   });
 

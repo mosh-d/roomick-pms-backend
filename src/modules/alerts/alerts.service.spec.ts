@@ -82,7 +82,10 @@ describe('AlertsService', () => {
   });
 
   it('does NOT flag a confirmed reservation checking in today before the branch check-in cutoff has passed', async () => {
-    const today = new Date();
+    // Today at the branch (Lagos), as a date — the machine's own clock read as
+    // a date is yesterday there from 23:00 to midnight UTC, which made this
+    // test fail every night in that hour (and on CI, which runs in UTC).
+    const today = new Date(`${new Date().toLocaleDateString('en-CA', { timeZone: 'Africa/Lagos' })}T00:00:00.000Z`);
     tx.reservation.findMany = jest.fn().mockImplementation(({ where }) =>
       Promise.resolve(where.status === 'confirmed' ? [{ id: 'r1', checkInDate: today, checkOutDate: today }] : []),
     );
