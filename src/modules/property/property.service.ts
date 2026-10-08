@@ -35,6 +35,20 @@ function assertValidTimezone(tz: string): void {
   }
 }
 
+/**
+ * A branch's policies after an update: the keys sent replace those on file,
+ * a key sent as `null` is removed, and every other key stays. The whole object
+ * used to be replaced, so a client sending one policy wiped all the others.
+ */
+function mergePolicies(current: unknown, patch: Record<string, unknown>): Record<string, unknown> {
+  const merged: Record<string, unknown> = current && typeof current === 'object' && !Array.isArray(current) ? { ...(current as Record<string, unknown>) } : {};
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === null) delete merged[key];
+    else merged[key] = value;
+  }
+  return merged;
+}
+
 @Injectable()
 export class PropertyService {
   constructor(private readonly prisma: PrismaService) {}
@@ -145,7 +159,7 @@ export class PropertyService {
       await this.audit(tx, tenantId, actorId, 'branch.created', 'branch', branch.id, {
         name: dto.name,
         brandId,
-      });
+      }, branch.id);
       return branch;
     });
   }
@@ -188,10 +202,10 @@ export class PropertyService {
           ...(dto.checkInTime ? { checkInTime: timeStringToDate(dto.checkInTime) } : {}),
           ...(dto.checkOutTime ? { checkOutTime: timeStringToDate(dto.checkOutTime) } : {}),
           category: dto.category,
-          policies: dto.policies as Prisma.InputJsonValue | undefined,
+          policies: dto.policies === undefined ? undefined : (mergePolicies(branch.policies, dto.policies) as Prisma.InputJsonValue),
         },
       });
-      await this.audit(tx, tenantId, actorId, 'branch.updated', 'branch', branchId, dto as Prisma.InputJsonValue);
+      await this.audit(tx, tenantId, actorId, 'branch.updated', 'branch', branchId, dto as Prisma.InputJsonValue, branchId);
       return updated;
     });
   }
@@ -242,7 +256,7 @@ export class PropertyService {
         where: { id: branchId },
         data: { noShowPolicy: dto as unknown as Prisma.InputJsonValue },
       });
-      await this.audit(tx, tenantId, actorId, 'branch.no_show_policy_updated', 'branch', branchId, dto as Prisma.InputJsonValue);
+      await this.audit(tx, tenantId, actorId, 'branch.no_show_policy_updated', 'branch', branchId, dto as Prisma.InputJsonValue, branchId);
       return updated;
     });
   }
@@ -262,7 +276,7 @@ export class PropertyService {
         where: { id: branchId },
         data: { cancellationPolicy: policy },
       });
-      await this.audit(tx, tenantId, actorId, 'branch.cancellation_policy_updated', 'branch', branchId, policy);
+      await this.audit(tx, tenantId, actorId, 'branch.cancellation_policy_updated', 'branch', branchId, policy, branchId);
       return updated;
     });
   }
@@ -306,7 +320,7 @@ export class PropertyService {
         where: { id: branchId },
         data: { regCardTemplate: dto as unknown as Prisma.InputJsonValue },
       });
-      await this.audit(tx, tenantId, actorId, 'branch.reg_card_template_updated', 'branch', branchId, dto as Prisma.InputJsonValue);
+      await this.audit(tx, tenantId, actorId, 'branch.reg_card_template_updated', 'branch', branchId, dto as Prisma.InputJsonValue, branchId);
       return updated;
     });
   }
@@ -335,7 +349,7 @@ export class PropertyService {
       });
       await this.audit(tx, tenantId, actorId, 'building.created', 'building', building.id, {
         name: dto.name,
-      });
+      }, branchId);
       return building;
     });
   }
@@ -388,7 +402,7 @@ export class PropertyService {
       const building = await tx.building.findFirst({ where: { id: buildingId } });
       if (!building) throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Building not found' });
       const updated = await tx.building.update({ where: { id: buildingId }, data: { name: name.trim() } });
-      await this.audit(tx, tenantId, actorId, 'building.renamed', 'building', buildingId, { from: building.name, to: updated.name });
+      await this.audit(tx, tenantId, actorId, 'building.renamed', 'building', buildingId, { from: building.name, to: updated.name }, building.branchId);
       return updated;
     });
   }
@@ -470,6 +484,11 @@ export class PropertyService {
   ): Promise<OverbookingConfig> {
     return this.prisma.withTenant(tenantId, async (tx) => {
       await this.assertBranch(tx, branchId);
+      // This branch's own room type — any id in the organisation used to be taken.
+      if (dto.roomTypeId) {
+        const roomType = await tx.roomType.findFirst({ where: { id: dto.roomTypeId, branchId, deletedAt: null }, select: { id: true } });
+        if (!roomType) throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Room type not found at this branch' });
+      }
       const data = {
         globalEnabled: dto.globalEnabled,
         maxOverbookPct: dto.maxOverbookPct,
@@ -489,7 +508,7 @@ export class PropertyService {
         : await tx.overbookingConfig.create({
             data: { tenantId, branchId, roomTypeId: dto.roomTypeId ?? null, ...data },
           });
-      await this.audit(tx, tenantId, actorId, 'branch.overbooking_config_updated', 'overbooking_config', config.id, dto as Prisma.InputJsonValue);
+      await this.audit(tx, tenantId, actorId, 'branch.overbooking_config_updated', 'overbooking_config', config.id, dto as Prisma.InputJsonValue, branchId);
       return config;
     });
   }
@@ -519,7 +538,9 @@ export class PropertyService {
     entityType: string,
     entityId: string,
     after?: Prisma.InputJsonValue,
+    /** The branch it happened at — what the audit-log viewer scopes a branch manager by. NULL for the brand and the organisation. */
+    branchId?: string | null,
   ): Promise<void> {
-    await tx.auditLog.create({ data: { tenantId, userId, action, entityType, entityId, after } });
+    await tx.auditLog.create({ data: { tenantId, branchId: branchId ?? null, userId, action, entityType, entityId, after } });
   }
 }

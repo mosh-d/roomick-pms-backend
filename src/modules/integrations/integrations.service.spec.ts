@@ -1,6 +1,8 @@
+import { Logger } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { createHash } from 'node:crypto';
 import { PrismaService } from '../../prisma/prisma.service';
+import { EncryptionService } from '../../common/crypto/encryption.service';
 import { IntegrationsService } from './integrations.service';
 
 const TENANT_ID = '11111111-1111-4111-8111-111111111111';
@@ -10,7 +12,7 @@ const BRANCH_ID = '33333333-3333-4333-8333-333333333333';
 function makeTx() {
   return {
     apiKey: { create: jest.fn(), findMany: jest.fn().mockResolvedValue([]), findFirst: jest.fn(), findFirstOrThrow: jest.fn(), update: jest.fn() },
-    webhook: { create: jest.fn(), findMany: jest.fn().mockResolvedValue([]), findFirst: jest.fn(), update: jest.fn() },
+    webhook: { create: jest.fn(), findMany: jest.fn().mockResolvedValue([]), findFirst: jest.fn(), update: jest.fn(), updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
     webhookDelivery: { groupBy: jest.fn().mockResolvedValue([]), updateMany: jest.fn().mockResolvedValue({ count: 0 }), findMany: jest.fn().mockResolvedValue([]) },
     branch: { findFirst: jest.fn().mockResolvedValue({ id: BRANCH_ID }) },
     auditLog: { create: jest.fn().mockResolvedValue({}) },
@@ -18,15 +20,21 @@ function makeTx() {
 }
 
 describe('IntegrationsService', () => {
+  process.env.ENCRYPTION_KEY ??= '0'.repeat(64);
+  const encryption = new EncryptionService();
   let service: IntegrationsService;
   let tx: ReturnType<typeof makeTx>;
+  let prisma: { withTenant: jest.Mock; tenant: { findMany: jest.Mock } };
   const originalEnv = process.env.NODE_ENV;
 
   beforeEach(async () => {
     tx = makeTx();
-    const prisma = { withTenant: jest.fn((_t: string, fn: (x: unknown) => unknown) => fn(tx)) };
+    prisma = {
+      withTenant: jest.fn((_t: string, fn: (x: unknown) => unknown) => fn(tx)),
+      tenant: { findMany: jest.fn().mockResolvedValue([{ id: TENANT_ID }]) },
+    };
     const moduleRef = await Test.createTestingModule({
-      providers: [IntegrationsService, { provide: PrismaService, useValue: prisma }],
+      providers: [IntegrationsService, { provide: PrismaService, useValue: prisma }, { provide: EncryptionService, useValue: encryption }],
     }).compile();
     service = moduleRef.get(IntegrationsService);
   });
@@ -108,6 +116,10 @@ describe('IntegrationsService', () => {
       const result = await service.createWebhook(TENANT_ID, { url: 'https://partner.example.com/hook', eventTypes: ['reservation.created'] }, ACTOR);
       expect(result.secret).toMatch(/^[0-9a-f]{48}$/);
       expect(JSON.stringify(tx.auditLog.create.mock.calls[0][0].data)).not.toContain(result.secret);
+      // Stored encrypted — the database never holds what signs the deliveries.
+      const stored = (tx.webhook.create.mock.calls[0][0] as { data: { secret: string } }).data.secret;
+      expect(stored).not.toContain(result.secret);
+      expect(encryption.decrypt(stored)).toBe(result.secret);
     });
 
     it('in production, refuses an address that isn’t https or is private', async () => {
@@ -148,6 +160,57 @@ describe('IntegrationsService', () => {
       const types = service.eventCatalogue().map((event) => event.type);
       expect(new Set(types).size).toBe(types.length);
       expect(types).toContain('reservation.checked_in');
+    });
+  });
+  describe('webhook secrets stored before they were encrypted', () => {
+    it('encrypts each plain one in place — only while it is still the plain one', async () => {
+      tx.webhook.findMany.mockResolvedValue([{ id: 'wh-1', secret: 'ab'.repeat(24) }]);
+      await expect(service.encryptPlainWebhookSecrets()).resolves.toBe(1);
+
+      expect(tx.webhook.findMany).toHaveBeenCalledWith({ where: { NOT: { secret: { contains: ':' } } }, select: { id: true, secret: true } });
+      const { where, data } = tx.webhook.updateMany.mock.calls[0][0];
+      expect(where).toEqual({ id: 'wh-1', secret: 'ab'.repeat(24) });
+      expect(data.secret).toContain(':');
+      expect(encryption.decrypt(data.secret)).toBe('ab'.repeat(24));
+    });
+
+    it('carries on past an organisation it could not reach, and says so', async () => {
+      prisma.tenant.findMany.mockResolvedValue([{ id: 'busy' }, { id: TENANT_ID }]);
+      prisma.withTenant.mockImplementationOnce(() => Promise.reject(new Error('Unable to start a transaction in the given time.')));
+      tx.webhook.findMany.mockResolvedValue([{ id: 'wh-1', secret: 'cd'.repeat(24) }]);
+      const error = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+      jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+
+      await expect(service.encryptPlainWebhookSecrets()).resolves.toBe(1);
+      expect(prisma.withTenant).toHaveBeenCalledTimes(2);
+      expect(prisma.withTenant.mock.calls[1][2]).toEqual({ maxWait: 10_000 });
+      expect(error).toHaveBeenCalledWith(expect.stringContaining('1 organisation(s) are still to encrypt'));
+    });
+
+    it('runs after the start, in the background — the start never waits on it', () => {
+      jest.useFakeTimers();
+      try {
+        const pass = jest.spyOn(service, 'encryptPlainWebhookSecrets').mockResolvedValue(0);
+        expect(service.onApplicationBootstrap()).toBeUndefined();
+        expect(pass).not.toHaveBeenCalled();
+        jest.advanceTimersByTime(15_000);
+        expect(pass).toHaveBeenCalledTimes(1);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('is called off if the API stops first', () => {
+      jest.useFakeTimers();
+      try {
+        const pass = jest.spyOn(service, 'encryptPlainWebhookSecrets').mockResolvedValue(0);
+        service.onApplicationBootstrap();
+        service.onModuleDestroy();
+        jest.advanceTimersByTime(60_000);
+        expect(pass).not.toHaveBeenCalled();
+      } finally {
+        jest.useRealTimers();
+      }
     });
   });
 });

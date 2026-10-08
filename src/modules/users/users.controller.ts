@@ -90,10 +90,10 @@ export class UsersController {
   @Roles(SystemRole.Owner, SystemRole.Manager)
   @ApiOperation({ summary: 'Outlet assignments for a user' })
   getUserOutlets(
-    @CurrentTenant() tenantId: string,
+    @CurrentUser() user: JwtPayload,
     @Param('id', ParseUUIDPipe) userId: string,
   ): ReturnType<UsersService['getUserOutlets']> {
-    return this.usersService.getUserOutlets(tenantId, userId);
+    return this.usersService.getUserOutlets(user, userId);
   }
 
   @Put('users/:id/outlets')

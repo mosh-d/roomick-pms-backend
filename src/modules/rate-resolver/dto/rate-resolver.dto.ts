@@ -58,6 +58,8 @@ export class CreateRatePlanDto {
   @ApiProperty({ example: 15, description: 'Cascade types: a delta (fixed amount or %). Override types (negotiated/promotional): the absolute nightly rate.' })
   @Type(() => Number)
   @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(-100_000_000)
+  @Max(100_000_000)
   amount!: number;
 
   @ApiPropertyOptional({ enum: AdjustmentType, description: 'Required for base/seasonal/weekend/corporate; omit for negotiated/promotional' })

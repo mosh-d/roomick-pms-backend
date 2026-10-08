@@ -49,6 +49,7 @@ export class CreateGroupBlockDto {
   @Type(() => Number)
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0.01)
+  @Max(1_000_000_000)
   blockRate!: number;
 
   @ApiProperty({ example: '2026-10-05', description: "The group's first night" })
@@ -287,11 +288,11 @@ export class CreateEventBookingDto {
   title!: string;
 
   @ApiProperty({ example: '2026-10-05T09:00:00.000Z' })
-  @IsISO8601()
+  @IsISO8601({ strict: true, strictSeparator: true }) // a day that doesn't exist (30 February) used to roll into March
   startsAt!: string;
 
   @ApiProperty({ example: '2026-10-05T17:00:00.000Z' })
-  @IsISO8601()
+  @IsISO8601({ strict: true, strictSeparator: true })
   endsAt!: string;
 
   @ApiPropertyOptional({ example: 'Jane Smith, Acme Corp' })
@@ -352,10 +353,10 @@ export class UpdateEventBookingDto extends PartialType(CreateEventBookingDto) {}
 /** The calendar window — both ends are instants, since events have times of day. */
 export class EventBookingsQueryDto {
   @ApiProperty({ example: '2026-10-01T00:00:00.000Z' })
-  @IsISO8601()
+  @IsISO8601({ strict: true, strictSeparator: true })
   from!: string;
 
   @ApiProperty({ example: '2026-11-01T00:00:00.000Z', description: 'Exclusive' })
-  @IsISO8601()
+  @IsISO8601({ strict: true, strictSeparator: true })
   to!: string;
 }

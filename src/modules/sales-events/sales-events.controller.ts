@@ -97,8 +97,14 @@ export class SalesEventsController {
   @Post('branches/:branchId/event-spaces')
   @Roles(SystemRole.Owner, SystemRole.Manager)
   @ApiOperation({ summary: 'Register a bookable event space (meeting room, ballroom, outdoor venue), with seats per layout' })
-  createSpace(@CurrentTenant() tenantId: string, @Param('branchId', ParseUUIDPipe) branchId: string, @Body() dto: CreateEventSpaceDto): Promise<EventSpaceSummary> {
-    return this.eventSpacesService.createSpace(tenantId, branchId, dto);
+  createSpace(
+    @CurrentTenant() tenantId: string,
+    @CurrentUser() user: JwtPayload,
+    @Param('branchId', ParseUUIDPipe) branchId: string,
+    @Body() dto: CreateEventSpaceDto,
+  ): Promise<EventSpaceSummary> {
+    // Who added it — the audit row had nobody's name on it.
+    return this.eventSpacesService.createSpace(tenantId, branchId, dto, user.sub);
   }
 
   @Get('branches/:branchId/event-spaces')

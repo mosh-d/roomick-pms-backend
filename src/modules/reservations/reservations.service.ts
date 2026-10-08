@@ -12,7 +12,8 @@ import { FoliosService } from '../folios/folios.service';
 import { RefundsService } from '../folios/refunds.service';
 import { TaxesService } from '../taxes/taxes.service';
 import { HousekeepingService } from '../housekeeping/housekeeping.service';
-import { RateResolverService, StayResolution } from '../rate-resolver/rate-resolver.service';
+import { MAX_STAY_NIGHTS, RateResolverService, StayResolution } from '../rate-resolver/rate-resolver.service';
+import { outsideGroupBlock } from '../sales-events/group-block-window';
 import { RegistrationCardsService } from '../registration-cards/registration-cards.service';
 import { CommsLogService } from '../comms-log/comms-log.service';
 import { RestrictionsService } from '../revenue-management/restrictions.service';
@@ -74,7 +75,8 @@ const RESERVATION_INCLUDE = {
   noShowRecords: { orderBy: { markedAt: 'desc' as const }, take: 1 },
 } as const;
 
-const MAX_AVAILABILITY_RANGE_DAYS = 92;
+/** The longest stay, and the longest availability window — one limit, shared with the rate resolver's quotes. */
+const MAX_AVAILABILITY_RANGE_DAYS = MAX_STAY_NIGHTS;
 
 /** Reservation statuses that hold inventory against a room type (§4.2). */
 const HOLDING_STATUSES = ['confirmed', 'checked_in'] as const;
@@ -482,6 +484,39 @@ export class ReservationsService {
   }
 
   /**
+   * What a re-dated stay is recorded at. A stay with a nightly rate pinned —
+   * its group block's, or a manager's override — is billed that rate every
+   * night (the folio posts `overrideRate`), so that is what its total says;
+   * re-pricing it at the public rate on a date change left the record, the
+   * registration card and the reports showing a price nobody was charged.
+   * Anything else takes the resolver's price for the new dates.
+   */
+  private async repricedStay(
+    tx: TenantTx,
+    reservation: { branchId: string; overrideRate: Prisma.Decimal | null },
+    resolved: StayResolution,
+    checkInDate: Date,
+    checkOutDate: Date,
+  ): Promise<{ subtotal: Prisma.Decimal; nightlyRates: ReturnType<typeof nightlyRatesOf> }> {
+    if (!reservation.overrideRate) return { subtotal: resolved.subtotal, nightlyRates: nightlyRatesOf(resolved) };
+    const pinned = await this.blockPricing(tx, reservation.branchId, reservation.overrideRate, checkInDate, checkOutDate);
+    return { subtotal: pinned.subtotal, nightlyRates: pinned.nightlyRates };
+  }
+
+  /** A group booking stays one: its block's room type, and its block's nights (give or take the shoulder nights). */
+  private async assertStaysInGroupBlock(tx: TenantTx, groupBlockId: string, roomTypeId: string, checkInDate: Date, checkOutDate: Date): Promise<void> {
+    const block = await tx.groupBlock.findFirst({ where: { id: groupBlockId }, select: { roomTypeId: true, arrivalDate: true, departureDate: true } });
+    if (!block) return;
+    if (block.roomTypeId !== roomTypeId) {
+      throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: "A group booking stays in its block's room type" });
+    }
+    const outside = outsideGroupBlock(block, checkInDate.toISOString().slice(0, 10), checkOutDate.toISOString().slice(0, 10));
+    if (outside) {
+      throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: `A group booking keeps to its block's nights: ${outside}` });
+    }
+  }
+
+  /**
    * A group block's own nightly rate for every night of the stay, with the
    * branch's room tax on top — the same arithmetic the folio applies when
    * the nights post (`priceCharge` taxes the stay's total; `units` only
@@ -535,7 +570,8 @@ export class ReservationsService {
     branchId: string,
     dto: CreateReservationDto,
     actorId: string | null,
-    options: { groupBlockId?: string } = {},
+    /** `publicBooking`: made on the public booking page — the guest is matched as `GuestsService.publicBookingGuest` says. */
+    options: { groupBlockId?: string; publicBooking?: boolean } = {},
   ) {
     const checkInDate = toBranchDate(dto.checkInDate);
     const checkOutDate = toBranchDate(dto.checkOutDate);
@@ -550,7 +586,7 @@ export class ReservationsService {
       // behavior change; a match throws the SAME RESERVATION_NOT_AVAILABLE
       // conflict the plain availability check below already uses.
       await this.restrictionsService.assertNoViolation(tx, branchId, dto.roomTypeId, checkInDate, checkOutDate);
-      const guest = await this.guestsService.findOrCreateGuestInTx(tx, tenantId, guestInput);
+      const guest = await this.guestsService.findOrCreateGuestInTx(tx, tenantId, guestInput, { publicBooking: options.publicBooking });
 
       // Serializes concurrent creates for the SAME room type only — closes
       // the common "double-book the last room" race without needing a
@@ -1419,6 +1455,7 @@ export class ReservationsService {
       const checkOutDate = toBranchDate(dto.checkOutDate);
       this.assertValidRange(checkInDate, checkOutDate);
       const roomType = await this.assertRoomType(tx, reservation.branchId, reservation.roomTypeId);
+      if (reservation.groupBlockId) await this.assertStaysInGroupBlock(tx, reservation.groupBlockId, reservation.roomTypeId, checkInDate, checkOutDate);
       await this.restrictionsService.assertNoViolation(tx, reservation.branchId, reservation.roomTypeId, checkInDate, checkOutDate);
       await this.lockRoomType(tx, reservation.roomTypeId);
       await this.assertAvailableForStay(tx, reservation.branchId, reservation.roomTypeId, checkInDate, checkOutDate, reservationId, reservation.groupBlockId ?? undefined);
@@ -1433,10 +1470,11 @@ export class ReservationsService {
         this.storedDeal(reservation),
         { triggeredBy: 'modify', userId: actorId, reservationId },
       );
+      const pricing = await this.repricedStay(tx, reservation, resolved, checkInDate, checkOutDate);
 
       const updated = await tx.reservation.update({
         where: { id: reservationId },
-        data: { status: 'confirmed', checkInDate, checkOutDate, ratePlanId: resolved.ratePlanId, confirmedRate: resolved.subtotal, nightlyRates: nightlyRatesOf(resolved) },
+        data: { status: 'confirmed', checkInDate, checkOutDate, ratePlanId: resolved.ratePlanId, confirmedRate: pricing.subtotal, nightlyRates: pricing.nightlyRates },
         include: RESERVATION_INCLUDE,
       });
 
@@ -1487,6 +1525,7 @@ export class ReservationsService {
       const roomTypeId = dto.roomTypeId ?? reservation.roomTypeId;
       const roomType = await this.assertRoomType(tx, reservation.branchId, roomTypeId);
       this.assertWithinCapacity(roomType, dto.adults ?? reservation.adults, dto.children ?? reservation.children);
+      if (reservation.groupBlockId) await this.assertStaysInGroupBlock(tx, reservation.groupBlockId, roomTypeId, checkInDate, checkOutDate);
 
       const datesOrRoomTypeChanged =
         checkInDate.getTime() !== reservation.checkInDate.getTime() ||
@@ -1522,6 +1561,7 @@ export class ReservationsService {
         this.storedDeal(reservation),
         { triggeredBy: 'modify', userId: actorId, reservationId },
       );
+      const pricing = await this.repricedStay(tx, reservation, resolved, checkInDate, checkOutDate);
 
       const updated = await tx.reservation.update({
         where: { id: reservationId },
@@ -1530,8 +1570,8 @@ export class ReservationsService {
           checkOutDate,
           roomTypeId,
           ratePlanId: resolved.ratePlanId,
-          confirmedRate: resolved.subtotal,
-          nightlyRates: nightlyRatesOf(resolved),
+          confirmedRate: pricing.subtotal,
+          nightlyRates: pricing.nightlyRates,
           adults: dto.adults ?? reservation.adults,
           children: dto.children ?? reservation.children,
         },
@@ -1541,7 +1581,7 @@ export class ReservationsService {
       await this.audit(tx, tenantId, reservation.branchId, actorId, 'reservation.modified', reservationId, {
         reason: dto.reason,
         before: { checkInDate: reservation.checkInDate, checkOutDate: reservation.checkOutDate, roomTypeId: reservation.roomTypeId, confirmedRate: reservation.confirmedRate.toFixed(2) },
-        after: { checkInDate, checkOutDate, roomTypeId, confirmedRate: resolved.subtotal.toFixed(2) },
+        after: { checkInDate, checkOutDate, roomTypeId, confirmedRate: pricing.subtotal.toFixed(2) },
       });
       return updated;
     });

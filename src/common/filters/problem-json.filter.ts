@@ -6,6 +6,7 @@ import {
   HttpStatus,
   Logger,
 } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { SentryExceptionCaptured } from '@sentry/nestjs';
 import { Response } from 'express';
 import { ErrorCode } from '../errors/error-codes';
@@ -52,6 +53,49 @@ function bodyParserError(exception: unknown): { status: number; code: ErrorCode;
   return { status, code: ErrorCode.VALIDATION_FAILED, detail: 'The request body could not be read' };
 }
 
+/** The database's own date-order rules (`*_dates_check`), in the words a person needs. */
+const CHECK_CONSTRAINT_MESSAGES: Record<string, string> = {
+  reservations_dates_check: 'The check-out date has to be after the check-in date',
+  group_blocks_dates_check: "The block's departure has to be after its arrival",
+  availability_restrictions_dates_check: 'The restriction has to end after it starts',
+  rate_plans_dates_check: 'The plan ends before it starts — "valid to" has to be on or after "valid from"',
+  event_bookings_times_check: 'The event has to end after it starts',
+  room_blocks_dates_check: 'A block has to end on or after the day it starts',
+};
+
+/**
+ * What the database refused, said in words. A unique index, a foreign key,
+ * a CHECK constraint or a transaction that ran out of time used to reach the
+ * client as a bare 500 "Something went wrong" — whatever the service hadn't
+ * checked for itself first.
+ */
+function databaseError(exception: unknown): { status: number; code: ErrorCode; detail: string } | null {
+  if (exception instanceof Prisma.PrismaClientKnownRequestError) {
+    switch (exception.code) {
+      case 'P2002':
+        return { status: HttpStatus.CONFLICT, code: ErrorCode.CONFLICT, detail: 'That already exists — someone may have just made the same thing. Refresh and check.' };
+      case 'P2003':
+        return { status: HttpStatus.CONFLICT, code: ErrorCode.CONFLICT, detail: 'That refers to something that has since been removed — refresh and try again.' };
+      case 'P2025':
+        return { status: HttpStatus.NOT_FOUND, code: ErrorCode.NOT_FOUND, detail: 'That record no longer exists — refresh and try again.' };
+      case 'P2028':
+        return { status: HttpStatus.SERVICE_UNAVAILABLE, code: ErrorCode.TRY_AGAIN, detail: 'That took too long and was stopped before anything was saved — try again in a moment.' };
+    }
+  }
+  if (exception instanceof Prisma.PrismaClientKnownRequestError || exception instanceof Prisma.PrismaClientUnknownRequestError) {
+    // Postgres 23514 — the constraint's name is in the message, quoted (and escaped in Prisma's debug form).
+    const constraint = /violates check constraint \\?"([a-z0-9_]+)\\?"/.exec(exception.message)?.[1];
+    if (constraint) {
+      return {
+        status: HttpStatus.BAD_REQUEST,
+        code: ErrorCode.VALIDATION_FAILED,
+        detail: CHECK_CONSTRAINT_MESSAGES[constraint] ?? 'That would break one of the rules the records keep — check the dates and amounts, and try again',
+      };
+    }
+  }
+  return null;
+}
+
 /**
  * Global exception filter producing RFC 9457 application/problem+json bodies
  * with stable error codes. Internals are never leaked (spec §6).
@@ -75,8 +119,13 @@ export class ProblemJsonExceptionFilter implements ExceptionFilter {
     let errors: unknown;
 
     const unreadable = bodyParserError(exception);
+    const refused = unreadable ? null : databaseError(exception);
     if (unreadable) {
       ({ status, code, detail } = unreadable);
+    } else if (refused) {
+      ({ status, code, detail } = refused);
+      // Still worth a look: a service let the database be the first to say no.
+      this.logger.warn(exception instanceof Error ? exception.message : String(exception));
     } else if (exception instanceof HttpException) {
       status = exception.getStatus();
       const body = exception.getResponse();

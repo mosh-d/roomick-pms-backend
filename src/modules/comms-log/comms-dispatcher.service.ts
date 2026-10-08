@@ -18,6 +18,8 @@ const DISPATCHABLE_CHANNEL = 'email' as const;
  */
 export const RETRY_DELAYS_MS = [60_000, 5 * 60_000, 15 * 60_000, 60 * 60_000, 3 * 3_600_000, 6 * 3_600_000, 12 * 3_600_000];
 export const MAX_ATTEMPTS = RETRY_DELAYS_MS.length + 1;
+/** How long a message is held by the dispatcher sending it — long enough for a slow mail server, short enough that one lost mid-send goes out again. */
+const CLAIM_MS = 10 * 60_000;
 
 export interface DispatchSummary {
   sent: number;
@@ -125,6 +127,23 @@ export class CommsDispatcherService {
         continue;
       }
 
+      // Claimed before it goes. Another server, or a tick that overlapped a
+      // slow one, finds it taken and leaves it — two dispatchers used to send
+      // the same email. If this process dies after sending and before
+      // recording it, the claim runs out and it goes once more: a duplicate is
+      // the lesser harm than a confirmation that never went.
+      const now = new Date();
+      const claimed = await this.prisma.withTenant(tenantId, (tx) =>
+        tx.communicationLog.updateMany({
+          where: { id: row.id, deliveryStatus: 'queued', OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: now } }] },
+          data: { nextAttemptAt: new Date(now.getTime() + CLAIM_MS) },
+        }),
+      );
+      if (claimed.count === 0) {
+        summary.skipped += 1;
+        continue;
+      }
+
       try {
         const result = await this.mailTransport.send({
           to: recipient,
@@ -139,7 +158,7 @@ export class CommsDispatcherService {
             // `sent`, never `delivered`: the provider has accepted it, which
             // is not the same as a mailbox receiving it. Only a provider
             // webhook could justify `delivered`, and none is wired.
-            data: { deliveryStatus: 'sent', externalMessageId: result.externalMessageId },
+            data: { deliveryStatus: 'sent', externalMessageId: result.externalMessageId, nextAttemptAt: null },
           }),
         );
         summary.sent += 1;

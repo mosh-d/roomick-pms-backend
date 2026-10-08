@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional, PartialType } from '@nestjs/swagger';
-import { IsObject, IsOptional, IsString, Matches, MaxLength, MinLength } from 'class-validator';
+import { IsObject, IsOptional, IsString, IsUrl, Matches, MaxLength, MinLength } from 'class-validator';
 
 export class CreateBrandDto {
   @ApiProperty({ example: 'Acme Resorts' })
@@ -8,9 +8,10 @@ export class CreateBrandDto {
   @MaxLength(200)
   name!: string;
 
-  @ApiPropertyOptional({ example: 'https://cdn.example.com/logo.png' })
+  @ApiPropertyOptional({ example: 'https://cdn.example.com/logo.png', description: 'An https address, like the registration card logo' })
   @IsOptional()
-  @IsString()
+  @IsUrl({ protocols: ['https'], require_protocol: true }, { message: 'logoUrl must be an https:// address' })
+  @MaxLength(2048)
   logoUrl?: string;
 
   @ApiPropertyOptional({ example: '#2d4a6e' })

@@ -18,6 +18,9 @@ import { PropertyService } from './property.service';
  *  touch occupancy/held axes manually. */
 const SUPERVISOR_ROLES = new Set(['owner', 'manager']);
 
+/** A stored calendar date as the desk reads it: `2026-10-12`. */
+const isoDay = (date: Date) => date.toISOString().slice(0, 10);
+
 /**
  * §4.1 housekeeping ladder: dirty → cleaning → clean → inspected. Any state
  * may drop back to dirty (checkout, spill, re-clean request).
@@ -67,10 +70,19 @@ export class RoomsService {
           sortOrder: dto.sortOrder,
         },
       });
-      await this.audit(tx, tenantId, actorId, 'room_type.created', 'room_type', roomType.id, {
-        name: dto.name,
-        baseRate: dto.baseRate,
-      });
+      await this.audit(
+        tx,
+        tenantId,
+        actorId,
+        'room_type.created',
+        'room_type',
+        roomType.id,
+        {
+          name: dto.name,
+          baseRate: dto.baseRate,
+        },
+        roomType.branchId,
+      );
       return roomType;
     });
   }
@@ -101,7 +113,7 @@ export class RoomsService {
           sortOrder: dto.sortOrder,
         },
       });
-      await this.audit(tx, tenantId, actorId, 'room_type.updated', 'room_type', roomTypeId, dto as unknown as Prisma.InputJsonValue);
+      await this.audit(tx, tenantId, actorId, 'room_type.updated', 'room_type', roomTypeId, dto as unknown as Prisma.InputJsonValue, updated.branchId);
       return updated;
     });
   }
@@ -202,12 +214,21 @@ export class RoomsService {
         });
       }
 
-      await this.audit(tx, tenantId, actorId, 'room.bulk_created', 'room', dto.roomTypeId, {
-        count: numbers.length,
-        numbers,
-        floorId,
-        ...(restored.length > 0 ? { broughtBack: restored } : {}),
-      });
+      await this.audit(
+        tx,
+        tenantId,
+        actorId,
+        'room.bulk_created',
+        'room',
+        dto.roomTypeId,
+        {
+          count: numbers.length,
+          numbers,
+          floorId,
+          ...(restored.length > 0 ? { broughtBack: restored } : {}),
+        },
+        branchId,
+      );
 
       return tx.room.findMany({
         where: { branchId, number: { in: numbers } },
@@ -307,7 +328,7 @@ export class RoomsService {
 
       if (Object.keys(changes).length === 0) return room;
       const updated = await tx.room.update({ where: { id: roomId }, data });
-      await this.audit(tx, tenantId, actorId, 'room.updated', 'room', roomId, changes as Prisma.InputJsonValue);
+      await this.audit(tx, tenantId, actorId, 'room.updated', 'room', roomId, changes as Prisma.InputJsonValue, room.branchId);
       return updated;
     });
   }
@@ -327,7 +348,7 @@ export class RoomsService {
       }
       await this.assertTypeCanSpareARoom(tx, room.branchId, room.roomTypeId, room.roomType.name);
       const removed = await tx.room.update({ where: { id: roomId }, data: { deletedAt: new Date() } });
-      await this.audit(tx, tenantId, actorId, 'room.removed', 'room', roomId, { number: room.number, roomType: room.roomType.name });
+      await this.audit(tx, tenantId, actorId, 'room.removed', 'room', roomId, { number: room.number, roomType: room.roomType.name }, room.branchId);
       return removed;
     });
   }
@@ -549,6 +570,36 @@ export class RoomsService {
       if (!room) {
         throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Room not found' });
       }
+      // One block at a time per room: two overlapping blocks showed the room
+      // out of order twice, and ending one left the other quietly holding the dates.
+      const overlapping = await tx.roomBlock.findFirst({ where: { roomId, fromDate: { lte: toDate }, toDate: { gte: fromDate } } });
+      if (overlapping) {
+        throw new ConflictException({
+          code: ErrorCode.CONFLICT,
+          message: `Room ${room.number} is already blocked from ${isoDay(overlapping.fromDate)} to ${isoDay(overlapping.toDate)} — end or cancel that block first`,
+        });
+      }
+      // Never out of order under a guest. A stay holding the room for any of
+      // these nights moves first — a block over it showed the room out of
+      // order while someone slept in it.
+      const branch = await this.propertyService.assertBranch(tx, room.branchId);
+      const today = toBranchDate(todayInTimezone(branch.timezone));
+      const stays = await tx.reservation.findMany({
+        where: { roomId, deletedAt: null, status: { in: ['checked_in', 'confirmed'] }, checkInDate: { lte: toDate } },
+        select: { confirmationNumber: true, status: true, checkInDate: true, checkOutDate: true, guest: { select: { name: true } } },
+      });
+      for (const stay of stays) {
+        // A guest still in the room after their departure date is there tonight too.
+        const leaves = stay.status === 'checked_in' && stay.checkOutDate < today ? new Date(today.getTime() + 86_400_000) : stay.checkOutDate;
+        if (leaves <= fromDate) continue;
+        throw new ConflictException({
+          code: ErrorCode.CONFLICT,
+          message:
+            stay.status === 'checked_in'
+              ? `${stay.guest.name} (${stay.confirmationNumber}) is staying in room ${room.number} until ${isoDay(leaves)} — block it from that day, or move them to another room first`
+              : `Room ${room.number} is given to ${stay.guest.name}'s booking ${stay.confirmationNumber} (${isoDay(stay.checkInDate)} to ${isoDay(stay.checkOutDate)}) — move that booking to another room first`,
+        });
+      }
       const block = await tx.roomBlock.create({
         data: {
           tenantId,
@@ -560,12 +611,21 @@ export class RoomsService {
           createdBy: actorId,
         },
       });
-      await this.audit(tx, tenantId, actorId, 'room.blocked', 'room_block', block.id, {
-        roomId,
-        reason: dto.reason,
-        fromDate: dto.fromDate,
-        toDate: dto.toDate,
-      });
+      await this.audit(
+        tx,
+        tenantId,
+        actorId,
+        'room.blocked',
+        'room_block',
+        block.id,
+        {
+          roomId,
+          reason: dto.reason,
+          fromDate: dto.fromDate,
+          toDate: dto.toDate,
+        },
+        room.branchId,
+      );
       return block;
     });
   }
@@ -584,11 +644,19 @@ export class RoomsService {
   }
 
   /**
-   * Ends a block early by pulling `toDate` back to today, rather than
-   * deleting the row — the block's own history (who created it, why, when)
-   * stays queryable, same "correct forward, don't erase" preference the
-   * append-only ledger uses for money, applied here to inventory. A block
-   * already in the past is left alone; there's nothing to end.
+   * Ends a block now, so the room can be sold tonight. A block that had
+   * already started keeps its row — `toDate` comes back to last night, the
+   * last one it actually held — the same "correct forward, don't erase"
+   * preference the append-only ledger uses for money, applied to inventory.
+   * One that hasn't started yet, or starts today, never held a night: it's
+   * cancelled outright, and the audit trail keeps what it was. A block
+   * already over is left alone.
+   *
+   * It used to pull `toDate` back to today whatever the block's start. For a
+   * block entered for next week that put `toDate` before its own `fromDate`,
+   * which the database refuses — "End Block" failed with a server error and
+   * nothing else could remove it — and a block that had started kept
+   * tonight blocked after it was "ended".
    */
   async unblockRoom(tenantId: string, blockId: string, actorId: string): Promise<RoomBlock> {
     return this.prisma.withTenant(tenantId, async (tx) => {
@@ -601,8 +669,29 @@ export class RoomsService {
       if (block.toDate < today) {
         throw new ConflictException({ code: ErrorCode.INVALID_STATUS_TRANSITION, message: 'This block has already ended' });
       }
-      const updated = await tx.roomBlock.update({ where: { id: blockId }, data: { toDate: today } });
-      await this.audit(tx, tenantId, actorId, 'room.unblocked', 'room_block', blockId, { roomId: block.roomId });
+      if (block.fromDate >= today) {
+        const cancelled = await tx.roomBlock.delete({ where: { id: blockId } });
+        await this.audit(
+          tx,
+          tenantId,
+          actorId,
+          'room.block_cancelled',
+          'room_block',
+          blockId,
+          {
+            roomId: block.roomId,
+            reason: block.reason,
+            fromDate: isoDay(block.fromDate),
+            toDate: isoDay(block.toDate),
+            ...(block.notes ? { notes: block.notes } : {}),
+          },
+          block.room.branchId,
+        );
+        return cancelled;
+      }
+      const lastNight = new Date(today.getTime() - 86_400_000);
+      const updated = await tx.roomBlock.update({ where: { id: blockId }, data: { toDate: lastNight } });
+      await this.audit(tx, tenantId, actorId, 'room.unblocked', 'room_block', blockId, { roomId: block.roomId, toDate: isoDay(lastNight), wasUntil: isoDay(block.toDate) }, block.room.branchId);
       return updated;
     });
   }
@@ -654,7 +743,9 @@ export class RoomsService {
     entityType: string,
     entityId: string,
     after?: Prisma.InputJsonValue,
+    /** The branch it happened at — what the audit-log viewer scopes a branch manager by. */
+    branchId?: string | null,
   ): Promise<void> {
-    await tx.auditLog.create({ data: { tenantId, userId, action, entityType, entityId, after } });
+    await tx.auditLog.create({ data: { tenantId, branchId: branchId ?? null, userId, action, entityType, entityId, after } });
   }
 }

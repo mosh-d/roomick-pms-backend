@@ -336,6 +336,8 @@ export class UsersService {
       }
 
       if (dto.roleId !== undefined) {
+        // Counted from their next request, not when their token is next renewed.
+        this.accountStatus.forget(userId);
         // Replace the user's assignment at this scope (one role per user per branch).
         await tx.userBranchRole.deleteMany({
           where: { userId, branchId: dto.branchId ?? null },
@@ -371,10 +373,10 @@ export class UsersService {
     });
   }
 
-  async getUserOutlets(tenantId: string, userId: string): Promise<UserOutlet[]> {
-    return this.prisma.withTenant(tenantId, (tx) =>
-      tx.userOutlet.findMany({ where: { userId }, include: { outlet: true } }),
-    );
+  /** Someone's outlets at the branches the asker manages — a manager at one property used to see another's assignments too. */
+  async getUserOutlets(actor: JwtPayload, userId: string): Promise<UserOutlet[]> {
+    const rows = await this.prisma.withTenant(actor.tenantId, (tx) => tx.userOutlet.findMany({ where: { userId }, include: { outlet: true } }));
+    return rows.filter((row) => managesBranch(actor, row.outlet.branchId));
   }
 
   async setUserOutlets(actor: JwtPayload, userId: string, dto: SetUserOutletsDto): Promise<UserOutlet[]> {
@@ -398,7 +400,9 @@ export class UsersService {
           after: { outletIds: dto.outletIds },
         },
       });
-      return tx.userOutlet.findMany({ where: { userId }, include: { outlet: true } });
+      // What the asker may see, as on the read: not this person's outlets at other properties.
+      const rows = await tx.userOutlet.findMany({ where: { userId }, include: { outlet: true } });
+      return rows.filter((row) => managesBranch(actor, row.outlet.branchId));
     });
   }
 

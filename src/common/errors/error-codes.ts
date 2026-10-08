@@ -11,6 +11,8 @@ export enum ErrorCode {
   NOT_FOUND = 'NOT_FOUND',
   CONFLICT = 'CONFLICT',
   INTERNAL = 'INTERNAL',
+  /** The database gave up on the work (a transaction ran out of time) — worth trying again. */
+  TRY_AGAIN = 'TRY_AGAIN',
   NOT_IMPLEMENTED = 'NOT_IMPLEMENTED',
   TOO_MANY_REQUESTS = 'TOO_MANY_REQUESTS',
 

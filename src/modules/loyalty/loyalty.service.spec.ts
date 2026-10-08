@@ -58,7 +58,7 @@ describe('LoyaltyService', () => {
       },
       branch: { findFirst: jest.fn().mockResolvedValue({ currency: 'NGN' }), findMany: jest.fn().mockResolvedValue([{ currency: 'NGN' }]) },
       lineItem: { aggregate: jest.fn().mockResolvedValue({ _sum: { amount: new Prisma.Decimal('32000') } }) },
-      guestProfile: { findFirst: jest.fn().mockResolvedValue(GUEST), findMany: jest.fn().mockResolvedValue([]), update: jest.fn().mockResolvedValue({}) },
+      guestProfile: { findFirst: jest.fn().mockResolvedValue(GUEST), findMany: jest.fn().mockResolvedValue([]), update: jest.fn().mockResolvedValue({}), updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
       folio: { findFirst: jest.fn().mockResolvedValue({ id: FOLIO_ID, branchId: BRANCH_ID, guestId: GUEST_ID }) },
       auditLog: { create: jest.fn().mockResolvedValue({}) },
     };
@@ -174,7 +174,24 @@ describe('LoyaltyService', () => {
       tx.loyaltyTransaction.groupBy.mockResolvedValue([{ guestId: GUEST_ID, _sum: { points: 1600 } }]);
       tx.guestProfile.findMany.mockResolvedValue([{ id: GUEST_ID, loyaltyTier: 'Silver' }]);
       await service.saveProgram(TENANT_ID, base, ACTOR_ID);
-      expect(tx.guestProfile.update).toHaveBeenCalledWith({ where: { id: GUEST_ID }, data: { loyaltyTier: 'Gold' } });
+      expect(tx.guestProfile.updateMany).toHaveBeenCalledWith({ where: { id: { in: [GUEST_ID] } }, data: { loyaltyTier: 'Gold' } });
+    });
+
+    it("re-tiers members one update per tier, not one per member", async () => {
+      tx.loyaltyTransaction.groupBy.mockResolvedValue([
+        { guestId: 'g1', _sum: { points: 1600 } },
+        { guestId: 'g2', _sum: { points: 1700 } },
+        { guestId: 'g3', _sum: { points: 1800 } },
+      ]);
+      tx.guestProfile.findMany.mockResolvedValue([
+        { id: 'g1', loyaltyTier: 'Silver' },
+        { id: 'g2', loyaltyTier: null },
+        { id: 'g3', loyaltyTier: 'Gold' }, // already there — left alone
+      ]);
+      await service.saveProgram(TENANT_ID, base, ACTOR_ID);
+      expect(tx.guestProfile.updateMany).toHaveBeenCalledTimes(1);
+      expect(tx.guestProfile.updateMany).toHaveBeenCalledWith({ where: { id: { in: ['g1', 'g2'] } }, data: { loyaltyTier: 'Gold' } });
+      expect(tx.guestProfile.update).not.toHaveBeenCalled();
     });
   });
 });

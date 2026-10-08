@@ -133,6 +133,13 @@ describe('RegistrationCardsService', () => {
       await service.generateCardInTx(tx as never, TENANT_ID, reservationForCard({ branch: { currency: 'NGN', regCardTemplate: null } }), ACTOR_ID);
       const fields = (tx.registrationCard.create.mock.calls[0] as [{ data: { fields: Record<string, unknown> } }])[0].data.fields;
       expect(fields.houseRules).toBeNull();
+      expect(fields.showRate).toBe(true);
+    });
+
+    it('carries the template’s "Show Rate on Card: No" onto the card', async () => {
+      await service.generateCardInTx(tx as never, TENANT_ID, reservationForCard({ branch: { currency: 'NGN', regCardTemplate: { showRate: false } } }), ACTOR_ID);
+      const fields = (tx.registrationCard.create.mock.calls[0] as [{ data: { fields: Record<string, unknown> } }])[0].data.fields;
+      expect(fields.showRate).toBe(false);
     });
   });
 
@@ -158,6 +165,13 @@ describe('RegistrationCardsService', () => {
     it('404s on a missing card', async () => {
       tx.registrationCard.findFirst.mockResolvedValue(null);
       await expect(service.signCard(TENANT_ID, 'card-1', { signatureData: SIGNATURE_PNG }, ACTOR_ID)).rejects.toThrow(NotFoundException);
+    });
+
+    it('refuses a "signature" that isn’t really an image before the card is signed — a card signed with it could never print', async () => {
+      tx.registrationCard.findFirst.mockResolvedValue({ id: 'card-1', signedAt: null, purgedAt: null, branchId: BRANCH_ID, reservationId: RESERVATION_ID, fields: CARD_FIELDS });
+      const notAnImage = `data:image/png;base64,${Buffer.from('hello, this is not a png at all').toString('base64')}`;
+      await expect(service.signCard(TENANT_ID, 'card-1', { signatureData: notAnImage }, ACTOR_ID)).rejects.toThrow(/didn’t come through as a picture/);
+      expect(tx.registrationCard.update).not.toHaveBeenCalled();
     });
 
     it('captures signatureData, signedAt, and witnessedBy', async () => {

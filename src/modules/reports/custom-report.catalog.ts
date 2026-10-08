@@ -123,7 +123,7 @@ export const DATASETS: Dataset[] = [
   },
   {
     key: 'guests',
-    label: 'Guests',
+    label: 'Guests who booked here',
     dateLabel: 'First seen between',
     fields: [
       { key: 'name', label: 'Name', type: 'text' },

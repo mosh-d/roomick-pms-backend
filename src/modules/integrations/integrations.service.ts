@@ -1,7 +1,8 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException, OnApplicationBootstrap, OnModuleDestroy } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { randomBytes } from 'node:crypto';
 import { hashApiKey } from '../../common/auth/api-key-auth.service';
+import { EncryptionService } from '../../common/crypto/encryption.service';
 import { ErrorCode } from '../../common/errors/error-codes';
 import { PERMISSION_MODULES } from '../../common/permissions/permission-catalogue';
 import { PrismaService, TenantTx } from '../../prisma/prisma.service';
@@ -65,6 +66,8 @@ const WEBHOOK_SELECT = {
 } satisfies Prisma.WebhookSelect;
 
 const production = () => process.env.NODE_ENV === 'production';
+/** How long after start the plain-text webhook secrets are looked for — after the start-up rush. */
+const SECRETS_PASS_DELAY_MS = 15_000;
 
 /**
  * Integrations & APIs: the API keys another system reads with, and the
@@ -81,8 +84,69 @@ const production = () => process.env.NODE_ENV === 'production';
  * third card) stays unbuilt: no payment processor is connected to configure.
  */
 @Injectable()
-export class IntegrationsService {
-  constructor(private readonly prisma: PrismaService) {}
+export class IntegrationsService implements OnApplicationBootstrap, OnModuleDestroy {
+  private readonly logger = new Logger(IntegrationsService.name);
+
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly encryption: EncryptionService,
+  ) {}
+
+  /** The background pass that encrypts secrets stored before they were encrypted — see `onApplicationBootstrap`. */
+  private secretsPass: NodeJS.Timeout | null = null;
+
+  /**
+   * Webhook signing secrets used to be stored as generated. Any still in plain
+   * text are encrypted shortly after the API starts — in the background, so a
+   * start never waits on it (it reads every organisation), and a busy database
+   * at boot can't fail the start either. Anything it couldn't do is logged and
+   * tried again at the next start: the dispatcher signs with either form.
+   */
+  onApplicationBootstrap(): void {
+    this.secretsPass = setTimeout(() => void this.encryptPlainWebhookSecrets(), SECRETS_PASS_DELAY_MS);
+    this.secretsPass.unref();
+  }
+
+  onModuleDestroy(): void {
+    if (this.secretsPass) clearTimeout(this.secretsPass);
+  }
+
+  /** Encrypts every webhook secret still stored in plain text, one organisation at a time. Returns how many it encrypted. */
+  async encryptPlainWebhookSecrets(): Promise<number> {
+    let tenants: Array<{ id: string }>;
+    try {
+      tenants = await this.prisma.tenant.findMany({ select: { id: true } });
+    } catch (error) {
+      this.logger.error('Encrypting stored webhook secrets failed — tried again at the next start', error);
+      return 0;
+    }
+    let encrypted = 0;
+    let failed = 0;
+    for (const tenant of tenants) {
+      try {
+        encrypted += await this.prisma.withTenant(
+          tenant.id,
+          async (tx) => {
+            const plain = await tx.webhook.findMany({ where: { NOT: { secret: { contains: ':' } } }, select: { id: true, secret: true } });
+            let done = 0;
+            for (const webhook of plain) {
+              // Only while it is still the plain one: two servers starting together both find it.
+              const { count } = await tx.webhook.updateMany({ where: { id: webhook.id, secret: webhook.secret }, data: { secret: this.encryption.encrypt(webhook.secret) } });
+              done += count;
+            }
+            return done;
+          },
+          { maxWait: 10_000 },
+        );
+      } catch (error) {
+        failed++;
+        this.logger.warn(`Couldn't encrypt the stored webhook secrets of organisation ${tenant.id}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    if (encrypted > 0) this.logger.log(`Encrypted ${encrypted} webhook signing secret(s) stored in plain text`);
+    if (failed > 0) this.logger.error(`Webhook secrets of ${failed} organisation(s) are still to encrypt — tried again at the next start`);
+    return encrypted;
+  }
 
   // --- API Keys -------------------------------------------------------------
 
@@ -162,8 +226,10 @@ export class IntegrationsService {
     const secret = randomBytes(24).toString('hex');
     return this.prisma.withTenant(tenantId, async (tx) => {
       if (dto.branchId) await this.assertBranch(tx, dto.branchId);
+      // Encrypted at rest: a copy of the database (or a backup) must not be
+      // enough to sign deliveries the customer's server will trust.
       const created = await tx.webhook.create({
-        data: { tenantId, url: dto.url, eventTypes: [...new Set(dto.eventTypes)], secret, branchId: dto.branchId ?? null, createdBy: actorId },
+        data: { tenantId, url: dto.url, eventTypes: [...new Set(dto.eventTypes)], secret: this.encryption.encrypt(secret), branchId: dto.branchId ?? null, createdBy: actorId },
         select: WEBHOOK_SELECT,
       });
       await this.audit(tx, tenantId, actorId, 'webhook.created', 'webhook', created.id, { url: created.url, eventTypes: created.eventTypes, branchId: dto.branchId ?? null });

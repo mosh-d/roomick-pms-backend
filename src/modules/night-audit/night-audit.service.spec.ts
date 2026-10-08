@@ -39,6 +39,7 @@ function makeTx() {
       findMany: jest.fn().mockResolvedValue([]),
       create: jest.fn().mockResolvedValue({ id: BigInt(1) }),
       update: jest.fn().mockResolvedValue({ id: BigInt(1) }),
+      updateMany: jest.fn().mockResolvedValue({ count: 1 }),
     },
     reservation: { findMany: jest.fn().mockResolvedValue([]), update: jest.fn().mockResolvedValue({}) },
     folio: { findMany: jest.fn().mockResolvedValue([]) },
@@ -48,11 +49,23 @@ function makeTx() {
   };
 }
 
+type Stay = ReturnType<typeof reservation>;
+
 describe('NightAuditService', () => {
   let service: NightAuditService;
   let tx: ReturnType<typeof makeTx>;
+  let withTenant: jest.Mock;
   let foliosService: { ensurePrimaryFolio: jest.Mock; postRoomChargeForDate: jest.Mock };
   let reservationsService: { markNoShowInTx: jest.Mock };
+
+  /** The branch's in-house stays and unarrived bookings, as every listing and batch re-read of them finds them. */
+  function stays(inHouse: Stay[], unarrived: Stay[] = []) {
+    tx.reservation.findMany.mockImplementation(({ where }: { where: { status?: string; id?: { in: string[] } } }) => {
+      const pool = where.status === 'checked_in' ? inHouse : where.status === 'confirmed' ? unarrived : [];
+      const ids = where.id?.in;
+      return Promise.resolve(ids ? pool.filter((r) => ids.includes(r.id)) : pool);
+    });
+  }
 
   beforeEach(async () => {
     tx = makeTx();
@@ -61,13 +74,14 @@ describe('NightAuditService', () => {
       postRoomChargeForDate: jest.fn().mockResolvedValue({ amount: new Prisma.Decimal('100'), taxAmount: new Prisma.Decimal('7.5') }),
     };
     reservationsService = { markNoShowInTx: jest.fn().mockResolvedValue({ reservation: {}, noShowRecord: {} }) };
+    withTenant = jest.fn((_t: string, fn: (x: unknown) => unknown) => fn(tx));
     const moduleRef = await Test.createTestingModule({
       providers: [
         NightAuditService,
         {
           provide: PrismaService,
           useValue: {
-            withTenant: jest.fn((_t: string, fn: (x: unknown) => unknown) => fn(tx)),
+            withTenant,
             tenant: { findMany: jest.fn().mockResolvedValue([]) },
           },
         },
@@ -92,7 +106,7 @@ describe('NightAuditService', () => {
     });
 
     it('closes each stay inside its own savepoint, rolling back only the one that failed', async () => {
-      tx.reservation.findMany.mockResolvedValueOnce([reservation({ id: 'bad' }), reservation({ id: 'good' })]).mockResolvedValueOnce([]);
+      stays([reservation({ id: 'bad' }), reservation({ id: 'good' })]);
       foliosService.postRoomChargeForDate
         .mockRejectedValueOnce(new Error('folio is settled'))
         .mockResolvedValueOnce({ amount: new Prisma.Decimal('100'), taxAmount: new Prisma.Decimal('0') });
@@ -101,14 +115,75 @@ describe('NightAuditService', () => {
       expect(calls).toEqual(['SAVEPOINT night_audit_stay', 'ROLLBACK TO SAVEPOINT night_audit_stay', 'SAVEPOINT night_audit_stay', 'RELEASE SAVEPOINT night_audit_stay']);
     });
 
-    it('refuses a second run for the same branch and date', async () => {
-      tx.nightAuditLog.findFirst.mockResolvedValue({ id: BigInt(1) });
-      await expect(service.runAudit(TENANT_ID, BRANCH_ID, AUDIT_DATE, ACTOR_ID)).rejects.toThrow(ConflictException);
+    it('refuses a second run once the night is closed', async () => {
+      tx.nightAuditLog.findFirst.mockResolvedValue({ id: BigInt(1), status: 'completed', triggeredAt: new Date() });
+      await expect(service.runAudit(TENANT_ID, BRANCH_ID, AUDIT_DATE, ACTOR_ID)).rejects.toThrow(/has already run/);
       expect(tx.nightAuditLog.create).not.toHaveBeenCalled();
+      expect(tx.nightAuditLog.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('refuses a run while another is still closing the same night', async () => {
+      tx.nightAuditLog.findFirst.mockResolvedValue({ id: BigInt(1), status: 'running', triggeredAt: new Date(Date.now() - 60_000) });
+      await expect(service.runAudit(TENANT_ID, BRANCH_ID, AUDIT_DATE, ACTOR_ID)).rejects.toThrow(/running now/);
+      expect(foliosService.postRoomChargeForDate).not.toHaveBeenCalled();
+    });
+
+    it('turns a run that raced it to the insert into the same "running now" refusal', async () => {
+      tx.nightAuditLog.create.mockRejectedValue(new Prisma.PrismaClientKnownRequestError('Unique constraint failed', { code: 'P2002', clientVersion: 'test' }));
+      await expect(service.runAudit(TENANT_ID, BRANCH_ID, AUDIT_DATE, ACTOR_ID)).rejects.toThrow(ConflictException);
+    });
+
+    it('picks up a failed run where it stopped, keeping what it had already posted', async () => {
+      tx.nightAuditLog.findFirst.mockResolvedValue({ id: BigInt(7), status: 'failed', triggeredAt: new Date(), chargesPosted: 3, totalAmountPosted: new Prisma.Decimal('322.50') });
+      stays([reservation()]);
+      const result = await service.runAudit(TENANT_ID, BRANCH_ID, AUDIT_DATE, ACTOR_ID);
+      expect(tx.nightAuditLog.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: BigInt(7), status: 'failed' }, data: expect.objectContaining({ status: 'running', triggeredBy: ACTOR_ID }) }),
+      );
+      expect(tx.nightAuditLog.create).not.toHaveBeenCalled();
+      expect(result.chargesPosted).toBe(4); // the three from before, and this one
+      expect(result.totalAmountPosted).toBe('430.00');
+      expect(result.status).toBe('completed');
+    });
+
+    it('takes over a run that died part-way once it has gone stale — and only one taker wins', async () => {
+      tx.nightAuditLog.findFirst.mockResolvedValue({ id: BigInt(7), status: 'running', triggeredAt: new Date(Date.now() - 11 * 60_000), chargesPosted: null, totalAmountPosted: null });
+      tx.nightAuditLog.updateMany.mockResolvedValueOnce({ count: 0 }); // someone else took it first
+      await expect(service.runAudit(TENANT_ID, BRANCH_ID, AUDIT_DATE, ACTOR_ID)).rejects.toThrow(/running now/);
+      const where = (tx.nightAuditLog.updateMany.mock.calls[0] as [{ where: Record<string, unknown> }])[0].where;
+      expect(where).toMatchObject({ id: BigInt(7), status: 'running', triggeredAt: { lt: expect.any(Date) } });
+
+      stays([reservation()]);
+      const result = await service.runAudit(TENANT_ID, BRANCH_ID, AUDIT_DATE, ACTOR_ID);
+      expect(result.status).toBe('completed');
+    });
+
+    it('closes the stays in batches, each its own transaction with room to finish, moving the totals with each', async () => {
+      stays(Array.from({ length: 60 }, (_, i) => reservation({ id: `res-${String(i).padStart(2, '0')}` })));
+      const result = await service.runAudit(TENANT_ID, BRANCH_ID, AUDIT_DATE, ACTOR_ID);
+      expect(result.chargesPosted).toBe(60);
+      const batchCalls = withTenant.mock.calls.filter((call) => (call[2] as { timeout?: number } | undefined)?.timeout);
+      expect(batchCalls).toHaveLength(3); // 25 + 25 + 10 stays; no-shows had none to batch
+      // Progress after each batch, then the finished row.
+      const progress = tx.nightAuditLog.update.mock.calls.map((call) => (call[0] as { data: { chargesPosted: number; status?: string } }).data);
+      expect(progress.map((d) => d.chargesPosted)).toEqual([25, 50, 60, 60]);
+      expect(progress.at(-1)?.status).toBe('completed');
+    });
+
+    it('a batch that fails as a whole leaves the run failed, its stays named, and the other batches posted', async () => {
+      stays(Array.from({ length: 60 }, (_, i) => reservation({ id: `res-${String(i).padStart(2, '0')}` })));
+      tx.nightAuditLog.update.mockResolvedValueOnce({}).mockRejectedValueOnce(new Error('connection lost'));
+      const result = await service.runAudit(TENANT_ID, BRANCH_ID, AUDIT_DATE, ACTOR_ID);
+      expect(result.status).toBe('failed');
+      expect(result.chargesPosted).toBe(35); // batches one and three
+      expect(result.errors).toHaveLength(25);
+      expect(result.errors[0]).toEqual({ reservationId: 'res-25', reason: 'Not closed this run, run it again: connection lost' });
+      const finished = (tx.nightAuditLog.update.mock.calls.at(-1)?.[0] as { data: { status: string } }).data;
+      expect(finished.status).toBe('failed');
     });
 
     it('posts one night per in-house reservation and totals the amount incl. tax', async () => {
-      tx.reservation.findMany.mockResolvedValueOnce([reservation(), reservation({ id: 'res-2' })]).mockResolvedValueOnce([]);
+      stays([reservation(), reservation({ id: 'res-2' })]);
       const result = await service.runAudit(TENANT_ID, BRANCH_ID, AUDIT_DATE, ACTOR_ID);
       expect(result.chargesPosted).toBe(2);
       expect(result.foliosProcessed).toBe(2);
@@ -123,9 +198,21 @@ describe('NightAuditService', () => {
       expect(where).not.toHaveProperty('checkOutDate');
     });
 
+    it('does not bill a stay checked out after the run listed it', async () => {
+      const leaving = reservation({ id: 'leaving' });
+      const staying = reservation({ id: 'staying' });
+      // Listed while in-house; checked out by the time its batch reads it again.
+      tx.reservation.findMany.mockImplementation(({ where }: { where: { status?: string; id?: { in: string[] } } }) =>
+        Promise.resolve(where.status !== 'checked_in' ? [] : where.id?.in ? [staying] : [leaving, staying]),
+      );
+      const result = await service.runAudit(TENANT_ID, BRANCH_ID, AUDIT_DATE, ACTOR_ID);
+      expect(result.chargesPosted).toBe(1);
+      expect(foliosService.postRoomChargeForDate).toHaveBeenCalledTimes(1);
+    });
+
     it('charges a guest still in the room after their departure date, and labels the night an overstay', async () => {
       const overstayer = reservation({ id: 'stayed-on', checkInDate: new Date('2026-08-28T00:00:00.000Z'), checkOutDate: new Date('2026-08-30T00:00:00.000Z') });
-      tx.reservation.findMany.mockResolvedValueOnce([overstayer, reservation()]).mockResolvedValueOnce([]);
+      stays([overstayer, reservation()]);
       const result = await service.runAudit(TENANT_ID, BRANCH_ID, AUDIT_DATE, ACTOR_ID);
       expect(result.chargesPosted).toBe(2);
       const labels = foliosService.postRoomChargeForDate.mock.calls.map((call) => (call as unknown[])[4]);
@@ -133,7 +220,7 @@ describe('NightAuditService', () => {
     });
 
     it('counts a night the guard already billed as processed but not re-posted', async () => {
-      tx.reservation.findMany.mockResolvedValueOnce([reservation()]).mockResolvedValueOnce([]);
+      stays([reservation()]);
       foliosService.postRoomChargeForDate.mockResolvedValue(null); // already posted for this date
       const result = await service.runAudit(TENANT_ID, BRANCH_ID, AUDIT_DATE, ACTOR_ID);
       expect(result.foliosProcessed).toBe(1);
@@ -142,7 +229,7 @@ describe('NightAuditService', () => {
     });
 
     it('continues the batch when one reservation fails, recording the error', async () => {
-      tx.reservation.findMany.mockResolvedValueOnce([reservation({ id: 'bad' }), reservation({ id: 'good' })]).mockResolvedValueOnce([]);
+      stays([reservation({ id: 'bad' }), reservation({ id: 'good' })]);
       foliosService.postRoomChargeForDate
         .mockRejectedValueOnce(new Error('folio is settled'))
         .mockResolvedValueOnce({ amount: new Prisma.Decimal('100'), taxAmount: new Prisma.Decimal('0') });
@@ -153,9 +240,9 @@ describe('NightAuditService', () => {
     });
 
     it('writes the run log with its counts on completion', async () => {
-      tx.reservation.findMany.mockResolvedValueOnce([reservation()]).mockResolvedValueOnce([]);
+      stays([reservation()]);
       await service.runAudit(TENANT_ID, BRANCH_ID, AUDIT_DATE, ACTOR_ID);
-      expect(tx.nightAuditLog.update).toHaveBeenCalledWith(
+      expect(tx.nightAuditLog.update).toHaveBeenLastCalledWith(
         expect.objectContaining({ data: expect.objectContaining({ status: 'completed', chargesPosted: 1 }) }),
       );
     });
@@ -172,7 +259,7 @@ describe('NightAuditService', () => {
   describe('no-show marking', () => {
     it('marks unarrived confirmed reservations via the shared ReservationsService method', async () => {
       tx.branch.findFirst.mockResolvedValue({ id: BRANCH_ID, noShowPolicy: { defaultPenalty: 'first_night' } });
-      tx.reservation.findMany.mockResolvedValueOnce([]).mockResolvedValueOnce([reservation({ id: 'noshow-1' })]);
+      stays([], [reservation({ id: 'noshow-1' })]);
       const result = await service.runAudit(TENANT_ID, BRANCH_ID, AUDIT_DATE, ACTOR_ID);
       expect(result.noShowsMarked).toBe(1);
       expect(reservationsService.markNoShowInTx).toHaveBeenCalledWith(
@@ -187,28 +274,28 @@ describe('NightAuditService', () => {
 
     it('passes the flat fee amount through when the policy uses it', async () => {
       tx.branch.findFirst.mockResolvedValue({ id: BRANCH_ID, noShowPolicy: { defaultPenalty: 'flat_fee', flatFeeAmount: 50 } });
-      tx.reservation.findMany.mockResolvedValueOnce([]).mockResolvedValueOnce([reservation()]);
+      stays([], [reservation()]);
       await service.runAudit(TENANT_ID, BRANCH_ID, AUDIT_DATE, ACTOR_ID);
       expect(reservationsService.markNoShowInTx).toHaveBeenCalledWith(tx, TENANT_ID, expect.anything(), 'flat_fee', 50, ACTOR_ID);
     });
 
     it('respects autoMark:false — leaves the call to front desk', async () => {
       tx.branch.findFirst.mockResolvedValue({ id: BRANCH_ID, noShowPolicy: { autoMark: false } });
-      tx.reservation.findMany.mockResolvedValueOnce([]).mockResolvedValueOnce([reservation()]);
+      stays([], [reservation()]);
       const result = await service.runAudit(TENANT_ID, BRANCH_ID, AUDIT_DATE, ACTOR_ID);
       expect(result.noShowsMarked).toBe(0);
       expect(reservationsService.markNoShowInTx).not.toHaveBeenCalled();
     });
 
     it('defaults to penaltyType "none" when the branch has no policy set', async () => {
-      tx.reservation.findMany.mockResolvedValueOnce([]).mockResolvedValueOnce([reservation()]);
+      stays([], [reservation()]);
       await service.runAudit(TENANT_ID, BRANCH_ID, AUDIT_DATE, ACTOR_ID);
       expect(reservationsService.markNoShowInTx).toHaveBeenCalledWith(tx, TENANT_ID, expect.anything(), 'none', undefined, ACTOR_ID);
     });
 
     it('one reservation failing to mark does not stop the rest of the batch', async () => {
       tx.branch.findFirst.mockResolvedValue({ id: BRANCH_ID, noShowPolicy: { defaultPenalty: 'none' } });
-      tx.reservation.findMany.mockResolvedValueOnce([]).mockResolvedValueOnce([reservation({ id: 'bad-1' }), reservation({ id: 'good-1' })]);
+      stays([], [reservation({ id: 'bad-1' }), reservation({ id: 'good-1' })]);
       reservationsService.markNoShowInTx.mockRejectedValueOnce(new Error('boom')).mockResolvedValueOnce({ reservation: {}, noShowRecord: {} });
       const result = await service.runAudit(TENANT_ID, BRANCH_ID, AUDIT_DATE, ACTOR_ID);
       expect(result.noShowsMarked).toBe(1);
@@ -223,6 +310,12 @@ describe('NightAuditService', () => {
       return date;
     };
     const iso = (date: Date) => date.toISOString().slice(0, 10);
+
+    it('counts a night as done only once it closed, or while a fresh run is closing it — a failed or abandoned one stays pending', async () => {
+      await service.datesToAudit(TENANT_ID, BRANCH_ID, 'UTC');
+      const where = (tx.nightAuditLog.findMany.mock.calls[0] as [{ where: { OR: unknown[] } }])[0].where;
+      expect(where.OR).toEqual([{ status: 'completed' }, { status: 'running', triggeredAt: { gte: expect.any(Date) } }]);
+    });
 
     it('a branch never audited starts from yesterday — no backfilling its whole history', async () => {
       expect(await service.datesToAudit(TENANT_ID, BRANCH_ID, 'UTC')).toEqual([iso(daysBefore(0))]);
@@ -270,6 +363,20 @@ describe('NightAuditService', () => {
       tx.shift.findMany.mockResolvedValue([{ shiftType: 'night' }]);
       const result = await service.getPreflight(TENANT_ID, BRANCH_ID);
       expect(result.checklist.filter((c) => c.key !== 'departures_resolved').every((c) => c.passed === true)).toBe(true);
+    });
+
+    it('says so when the next night to close stopped part-way last time', async () => {
+      const yesterday = service.yesterdayForBranch('Africa/Lagos');
+      tx.nightAuditLog.findFirst.mockImplementation(({ where }: { where: { status?: unknown } }) =>
+        Promise.resolve(
+          where.status
+            ? { auditDate: new Date(`${yesterday}T00:00:00.000Z`), status: 'failed', chargesPosted: 12, errors: [{ reservationId: 'r1', reason: 'Not closed this run, run it again: connection lost' }] }
+            : null,
+        ),
+      );
+      const result = await service.getPreflight(TENANT_ID, BRANCH_ID);
+      expect(result.pendingDates).toEqual([yesterday]);
+      expect(result.lastStoppedRun).toEqual({ auditDate: yesterday, status: 'failed', chargesPosted: 12, errorCount: 1, reason: 'Not closed this run, run it again: connection lost' });
     });
 
     it('fails the departures check while someone is still in-house past check-out', async () => {

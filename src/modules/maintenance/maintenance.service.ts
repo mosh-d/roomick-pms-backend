@@ -148,6 +148,11 @@ export class MaintenanceService {
 
   async createAsset(tenantId: string, branchId: string, dto: CreateAssetDto, actorId: string) {
     return this.prisma.withTenant(tenantId, async (tx) => {
+      // A room at this branch — a room anywhere in the organisation used to be taken.
+      if (dto.roomId) {
+        const room = await tx.room.findFirst({ where: { id: dto.roomId, branchId, deletedAt: null }, select: { id: true } });
+        if (!room) throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Room not found at this branch' });
+      }
       const asset = await tx.asset.create({
         data: {
           tenantId,

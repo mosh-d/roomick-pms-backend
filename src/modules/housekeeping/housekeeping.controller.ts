@@ -1,4 +1,5 @@
 import { Body, Controller, Get, Param, ParseUUIDPipe, Post, Query } from '@nestjs/common';
+import { BranchOf } from '../../common/decorators/branch-of.decorator';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentTenant, CurrentUser } from '../../common/decorators';
 import { Permission } from '../../common/decorators/permission.decorator';
@@ -48,6 +49,7 @@ export class HousekeepingController {
   }
 
   @Post('housekeeping/tasks/:taskId/assign')
+  @BranchOf('housekeepingTask', 'taskId')
   @Permission('housekeeping', 'update')
   @ApiOperation({ summary: 'Assign a task to a housekeeper — supervisor only' })
   assignTask(
@@ -60,6 +62,7 @@ export class HousekeepingController {
   }
 
   @Post('housekeeping/tasks/:taskId/start')
+  @BranchOf('housekeepingTask', 'taskId')
   @Permission('housekeeping', 'update')
   @ApiOperation({ summary: 'Start cleaning — self-assigns if unclaimed, moves the room dirty → cleaning' })
   startTask(
@@ -71,6 +74,7 @@ export class HousekeepingController {
   }
 
   @Post('housekeeping/tasks/:taskId/complete')
+  @BranchOf('housekeepingTask', 'taskId')
   @Permission('housekeeping', 'update')
   @ApiOperation({ summary: 'Finish cleaning — moves the room cleaning → clean, awaiting inspection' })
   completeTask(
@@ -82,6 +86,7 @@ export class HousekeepingController {
   }
 
   @Post('housekeeping/tasks/:taskId/report-issue')
+  @BranchOf('housekeepingTask', 'taskId')
   @Permission('housekeeping', 'update')
   @ApiOperation({ summary: 'Report an issue instead of a normal clean — marks the task skipped' })
   reportIssue(

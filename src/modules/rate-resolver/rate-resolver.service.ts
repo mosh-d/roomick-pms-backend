@@ -1,6 +1,8 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma, RatePlan, RateType, RoomType } from '@prisma/client';
 import { ErrorCode } from '../../common/errors/error-codes';
+import { JwtPayload } from '../../common/types/request-context';
+import { assertRoleAtBranch } from '../../common/utils/branch-roles';
 import { toBranchDate } from '../../common/utils/branch-date';
 import { PrismaService, TenantTx } from '../../prisma/prisma.service';
 import { PropertyService } from '../property/property.service';
@@ -23,6 +25,8 @@ export function weekendNightsFor(policies: Prisma.JsonValue | null | undefined):
 /** Matches the schema's own comment on `RatePlan.cascadeTier` — the tier is derived from `type`, never client-supplied. */
 const CASCADE_TIER_BY_TYPE: Partial<Record<RateType, number>> = { base: 1, seasonal: 2, weekend: 3, corporate: 4 };
 const OVERRIDE_TYPES: RateType[] = ['negotiated', 'promotional'];
+/** The longest stay one booking or quote can price — the same limit `ReservationsService` books to. */
+export const MAX_STAY_NIGHTS = 92;
 
 export interface CascadeStep {
   tier: number;
@@ -91,6 +95,24 @@ export class RateResolverService {
       if (dto.type === 'promotional' && !dto.promoCode) {
         throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: 'promoCode is required for a promotional plan' });
       }
+      // A negative or zero price reached the public booking page as a quote of
+      // -100, and a stay booked at it posted nothing: the folio skips a night
+      // that isn't worth anything.
+      if (isOverride && dto.amount <= 0) {
+        throw new BadRequestException({
+          code: ErrorCode.VALIDATION_FAILED,
+          message: `A ${dto.type} rate is the nightly price itself, not a discount — it has to be more than zero`,
+        });
+      }
+      if (dto.adjustmentType === 'percentage' && (dto.amount <= -100 || dto.amount > 1000)) {
+        throw new BadRequestException({
+          code: ErrorCode.VALIDATION_FAILED,
+          message: dto.amount <= -100 ? 'A discount of 100% or more makes the night free — use a smaller percentage' : 'A rise of more than 1000% is surely a typo',
+        });
+      }
+      if (dto.validFrom && dto.validTo && dto.validTo < dto.validFrom) {
+        throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: 'The plan ends before it starts — "valid to" must be on or after "valid from"' });
+      }
       return tx.ratePlan.create({
         data: {
           tenantId,
@@ -111,10 +133,12 @@ export class RateResolverService {
     });
   }
 
-  async listRatePlans(tenantId: string, branchId: string): Promise<RatePlan[]> {
+  async listRatePlans(tenantId: string, branchId: string): Promise<Array<RatePlan & { currency: string }>> {
     return this.prisma.withTenant(tenantId, async (tx) => {
-      await this.propertyService.assertBranch(tx, branchId);
-      return tx.ratePlan.findMany({ where: { branchId }, orderBy: [{ cascadeTier: 'asc' }, { name: 'asc' }] });
+      const branch = await this.propertyService.assertBranch(tx, branchId);
+      const plans = await tx.ratePlan.findMany({ where: { branchId }, orderBy: [{ cascadeTier: 'asc' }, { name: 'asc' }] });
+      // The branch's ISO 4217 code with the amounts, as on every money response.
+      return plans.map((plan) => ({ ...plan, currency: branch.currency }));
     });
   }
 
@@ -173,8 +197,13 @@ export class RateResolverService {
     });
   }
 
-  async getAuditTrail(tenantId: string, reservationId: string) {
+  async getAuditTrail(tenantId: string, reservationId: string, actor: JwtPayload) {
     return this.prisma.withTenant(tenantId, async (tx) => {
+      // The stay's own property: the route is addressed by a reservation id in
+      // the query, so the guard can't see which branch it belongs to.
+      const reservation = await tx.reservation.findFirst({ where: { id: reservationId }, select: { branchId: true } });
+      if (!reservation) throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Reservation not found' });
+      assertRoleAtBranch(actor, reservation.branchId, ['owner', 'manager', 'accountant']);
       const rows = await tx.rateAuditLog.findMany({ where: { reservationId }, orderBy: { resolvedAt: 'asc' } });
       // `id` is a BigInt (append-only log, same convention as
       // `NightAuditLog`) — JSON.stringify would throw on it.
@@ -196,8 +225,13 @@ export class RateResolverService {
     options: { promoCode?: string; corporateAccountId?: string },
     context: { triggeredBy: TriggeredBy; userId?: string; reservationId?: string; persistAudit?: boolean },
   ): Promise<StayResolution> {
+    // A four-year quote took seconds and wrote a trail row for every night,
+    // though no booking can be longer than this.
+    const stayLength = Math.round((checkOutDate.getTime() - checkInDate.getTime()) / 86_400_000);
+    if (stayLength > MAX_STAY_NIGHTS) {
+      throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: `A stay can be at most ${MAX_STAY_NIGHTS} nights — book a longer one as two stays` });
+    }
     const nights = this.enumerateNights(checkInDate, checkOutDate);
-    const stayLength = nights.length;
 
     let corporateRatePlanId: string | null = null;
     let isCorporate = false;
@@ -228,6 +262,16 @@ export class RateResolverService {
     const branch = await tx.branch.findFirst({ where: { id: branchId }, select: { policies: true } });
     const weekendNights = weekendNightsFor(branch?.policies);
     const perNight: NightResolution[] = nights.map((date) => this.resolveNight(roomType, date, eligible, options.promoCode, corporateRatePlanId, weekendNights));
+    // Never a free or negative night from the rate plans: it was quoted on the
+    // booking page and booked, and the night audit then posted nothing for it.
+    // (A manager comping a stay does it with a rate override, not here.)
+    const unpriced = perNight.find((night) => night.finalRate.lessThanOrEqualTo(0));
+    if (unpriced) {
+      throw new BadRequestException({
+        code: ErrorCode.VALIDATION_FAILED,
+        message: `This stay can't be priced: the rate for ${unpriced.date} comes to ${unpriced.finalRate.toFixed(2)}. The property's rate plans for that night need checking.`,
+      });
+    }
 
     // `create`, not `createMany` — a booking-create/walk-in call resolves
     // the rate BEFORE the reservation row exists, so `reservationId` is

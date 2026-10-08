@@ -1,6 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
-import { ArrayMinSize, IsArray, IsBoolean, IsIn, IsNumber, IsOptional, IsPositive, IsString, IsUUID, MaxLength, MinLength, ValidateIf } from 'class-validator';
+import { ArrayMinSize, IsArray, IsBoolean, IsIn, IsNumber, IsOptional, IsPositive, IsString, IsUUID, Max, MaxLength, MinLength, ValidateIf } from 'class-validator';
 import { IsDateOnly } from '../../../common/validation/is-date-only.decorator';
 import { ChargeType, PaymentMethod, PaymentPurpose } from '@prisma/client';
 
@@ -18,6 +18,7 @@ export class PostChargeDto {
   @Type(() => Number)
   @IsNumber({ maxDecimalPlaces: 2 })
   @IsPositive()
+  @Max(1_000_000_000)
   amount!: number;
 
   @ApiProperty({ enum: MANUALLY_POSTABLE_CHARGE_TYPES })
@@ -35,6 +36,7 @@ export class RecordPaymentDto {
   @Type(() => Number)
   @IsNumber({ maxDecimalPlaces: 2 })
   @IsPositive()
+  @Max(1_000_000_000)
   amount!: number;
 
   @ApiProperty({ enum: PaymentMethod, example: 'card' })
@@ -116,6 +118,15 @@ export class CorrectLineItemDto {
   @ApiProperty({ example: 'Charged in error — guest disputed minibar item', description: 'Mandatory: a correction without a stated reason is unauditable.' })
   @IsString()
   @MinLength(1)
+  @MaxLength(300)
+  reason!: string;
+}
+
+/** Opening a settled bill again — a supervisor's call, with the reason on record. */
+export class ReopenFolioDto {
+  @ApiProperty({ example: 'Minibar found after check-out' })
+  @IsString()
+  @MinLength(3)
   @MaxLength(300)
   reason!: string;
 }

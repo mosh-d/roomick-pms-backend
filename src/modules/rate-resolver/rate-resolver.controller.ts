@@ -29,10 +29,16 @@ export class RateResolverController {
   }
 
   @Get('rate-resolver/audit')
-  @Roles(...ALL_SYSTEM_ROLES)
+  // The trail names negotiated and corporate rates — for the people who
+  // settle a rate dispute, not every role (a housekeeper could read it).
+  @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.Accountant)
   @ApiOperation({ summary: 'Full per-night rule-resolution trace for a reservation, for dispute handling' })
-  getAudit(@CurrentTenant() tenantId: string, @Query('reservationId', ParseUUIDPipe) reservationId: string): ReturnType<RateResolverService['getAuditTrail']> {
-    return this.rateResolverService.getAuditTrail(tenantId, reservationId);
+  getAudit(
+    @CurrentTenant() tenantId: string,
+    @CurrentUser() user: JwtPayload,
+    @Query('reservationId', ParseUUIDPipe) reservationId: string,
+  ): ReturnType<RateResolverService['getAuditTrail']> {
+    return this.rateResolverService.getAuditTrail(tenantId, reservationId, user);
   }
 
   @Post('branches/:branchId/rate-plans')

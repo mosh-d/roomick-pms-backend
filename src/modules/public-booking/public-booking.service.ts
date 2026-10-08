@@ -1,10 +1,11 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
-import { CommunicationLog, Reservation } from '@prisma/client';
+import { CommunicationLog, Prisma, Reservation } from '@prisma/client';
 import { ErrorCode } from '../../common/errors/error-codes';
 import { todayInTimezone, toBranchDate } from '../../common/utils/branch-date';
 import { PrismaService, TenantTx } from '../../prisma/prisma.service';
 import { CommsLogService } from '../comms-log/comms-log.service';
 import { FoliosService } from '../folios/folios.service';
+import { phoneDigitsOf, samePhone } from '../guests/guests.service';
 import { HousekeepingService } from '../housekeeping/housekeeping.service';
 import { RateResolverService } from '../rate-resolver/rate-resolver.service';
 import { ReservationsService } from '../reservations/reservations.service';
@@ -100,8 +101,12 @@ export interface PublicBookingDetail {
   roomTypeName: string;
   guestName: string;
   guestEmail: string | null;
-  guestPhone: string | null;
-  guestNationality: string | null;
+  /**
+   * The last four digits of the phone on file, so the guest recognises it —
+   * never the number itself, nor the nationality: a booking proves its
+   * booker knows an email and a confirmation number, not who they are.
+   */
+  guestPhoneEnding: string | null;
   totalRate: string;
   currency: string;
   preArrivalCompletedAt: Date | null;
@@ -504,6 +509,7 @@ export class PublicBookingService {
         joinWaitlist: false,
       },
       null,
+      { publicBooking: true },
     );
 
     // After the booking has committed, in its own small write: consent is
@@ -527,10 +533,14 @@ export class PublicBookingService {
    * unticked box is not a withdrawal: a guest who opted in last year and books
    * again without ticking it stays opted in, and leaving is what the
    * unsubscribe link in every campaign is for.
+   *
+   * Never for a guest who unsubscribed: a tick on a public form can't undo
+   * that — anyone who knows their email can tick it. They tell the property,
+   * and the desk records it (Guest Profile → Record Consent).
    */
   private async recordMarketingOptIn(tx: TenantTx, guestId: string, source: 'booking_engine' | 'guest_portal'): Promise<void> {
     await tx.guestProfile.updateMany({
-      where: { id: guestId, marketingOptIn: false, deletedAt: null },
+      where: { id: guestId, marketingOptIn: false, marketingUnsubscribedAt: null, deletedAt: null },
       data: { marketingOptIn: true, marketingOptInAt: new Date(), marketingOptInSource: source },
     });
   }
@@ -636,7 +646,7 @@ export class PublicBookingService {
           estimatedArrivalTime: true,
           cancellationPolicy: true,
           roomType: { select: { name: true } },
-          guest: { select: { name: true, email: true, phone: true, nationality: true } },
+          guest: { select: { name: true, email: true, phone: true } },
           branch: { select: { currency: true, regCardTemplate: true } },
         },
       }),
@@ -657,8 +667,7 @@ export class PublicBookingService {
       roomTypeName: reservation.roomType.name,
       guestName: reservation.guest.name,
       guestEmail: reservation.guest.email,
-      guestPhone: reservation.guest.phone,
-      guestNationality: reservation.guest.nationality,
+      guestPhoneEnding: phoneDigitsOf(reservation.guest.phone)?.slice(-4) ?? null,
       // The stay total the guest agreed to. `overrideRate` is a NIGHTLY
       // absolute set by staff (group blocks, manager overrides), so it can't
       // be shown as a stay total — `confirmedRate` already reflects it.
@@ -686,11 +695,12 @@ export class PublicBookingService {
    * the same `bookingCredentialsWhere`, so the write path can never end up
    * easier to pass than the read path.
    *
-   * Corrected contact details are written to the guest's own `GuestProfile`
-   * rather than copied onto the reservation, because the registration card
-   * generated at check-in snapshots that record at that moment. A guest
-   * fixing their phone number here therefore flows through to the card with
-   * no extra plumbing, which is the whole point of the feature.
+   * A phone or nationality the profile doesn't have yet goes onto the
+   * guest's own `GuestProfile`, so the registration card generated at check-in
+   * carries it. One that differs from what's on file is NOT written over it —
+   * anyone holding the confirmation number and the email can fill this form
+   * in — it's left for the desk as a note on the profile, to confirm at
+   * arrival.
    *
    * Only forward-looking states accept a pre-arrival: someone already checked
    * in, checked out, cancelled or no-showed has nothing to pre-arrive for,
@@ -706,7 +716,7 @@ export class PublicBookingService {
     await this.prisma.withTenant(tenantId, async (tx) => {
       const reservation = await tx.reservation.findFirst({
         where: this.bookingCredentialsWhere(branchId, dto),
-        select: { id: true, guestId: true, status: true },
+        select: { id: true, guestId: true, status: true, confirmationNumber: true, guest: { select: { phone: true, nationality: true } } },
       });
       if (!reservation) throw this.bookingNotFound();
 
@@ -717,11 +727,27 @@ export class PublicBookingService {
         });
       }
 
-      const guestUpdates: { phone?: string; nationality?: string } = {};
-      if (dto.phone?.trim()) guestUpdates.phone = dto.phone.trim();
-      if (dto.nationality?.trim()) guestUpdates.nationality = dto.nationality.trim().toUpperCase();
+      // Filled in where the profile has nothing; a different value is a note for the desk.
+      const phone = dto.phone?.trim() || undefined;
+      const nationality = dto.nationality?.trim().toUpperCase() || undefined;
+      const guestUpdates: { phone?: string; phoneDigits?: string | null; nationality?: string } = {};
+      const differs: string[] = [];
+      if (phone && !reservation.guest.phone) Object.assign(guestUpdates, { phone, phoneDigits: phoneDigitsOf(phone) });
+      else if (phone && !samePhone(reservation.guest.phone, phone)) differs.push(`phone ${phone} (on file: ${reservation.guest.phone})`);
+      if (nationality && !reservation.guest.nationality) guestUpdates.nationality = nationality;
+      else if (nationality && nationality !== reservation.guest.nationality) differs.push(`nationality ${nationality} (on file: ${reservation.guest.nationality})`);
       if (Object.keys(guestUpdates).length > 0) {
         await tx.guestProfile.update({ where: { id: reservation.guestId }, data: guestUpdates });
+      }
+      if (differs.length > 0) {
+        await tx.guestNote.create({
+          data: {
+            tenantId,
+            guestId: reservation.guestId,
+            authorId: null,
+            body: `Online check-in for ${reservation.confirmationNumber} gave ${differs.join(' and ')}. Check which is right at arrival.`,
+          },
+        });
       }
       if (dto.marketingOptIn) {
         await this.recordMarketingOptIn(tx, reservation.guestId, 'guest_portal');
@@ -749,7 +775,7 @@ export class PublicBookingService {
           action: 'reservation.pre_arrival_completed',
           entityType: 'reservation',
           entityId: reservation.id,
-          after: { estimatedArrivalTime: dto.estimatedArrivalTime ?? null, updatedGuestFields: Object.keys(guestUpdates) },
+          after: { estimatedArrivalTime: dto.estimatedArrivalTime ?? null, updatedGuestFields: Object.keys(guestUpdates).filter((key) => key !== 'phoneDigits'), leftForTheDesk: differs.length },
         },
       });
     });
@@ -1042,17 +1068,28 @@ export class PublicBookingService {
       throw new ConflictException({ code: ErrorCode.CONFLICT, message: 'That booking address is already taken' });
     }
 
+    // One transaction: the address is claimed in the index — the one place it
+    // is unique across every organisation — and the branch row follows, or
+    // neither happens. Two properties publishing the same address at once used
+    // to both pass the check above; the second got a 500 and a branch row
+    // pointing at an address that wasn't its own.
     await this.prisma.withTenant(tenantId, async (tx) => {
       const branch = await tx.branch.findFirst({ where: { id: branchId, deletedAt: null }, select: { id: true } });
       if (!branch) throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Branch not found' });
+      // Clear any previous slug this branch held before claiming the new one,
+      // so an old public URL stops resolving instead of lingering as a second
+      // live address for the same property.
+      await tx.bookingSlugIndex.deleteMany({ where: { branchId } });
+      try {
+        await tx.bookingSlugIndex.create({ data: { slug: dto.slug, tenantId, branchId } });
+      } catch (error) {
+        if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+          throw new ConflictException({ code: ErrorCode.CONFLICT, message: 'That booking address is already taken' });
+        }
+        throw error;
+      }
       await tx.branch.update({ where: { id: branchId }, data: { bookingSlug: dto.slug, bookingEngineEnabled: true } });
     });
-
-    // Clear any previous slug this branch held before claiming the new one,
-    // so an old public URL stops resolving instead of lingering as a second
-    // live address for the same property.
-    await this.prisma.bookingSlugIndex.deleteMany({ where: { branchId } });
-    await this.prisma.bookingSlugIndex.create({ data: { slug: dto.slug, tenantId, branchId } });
 
     return { slug: dto.slug, bookingEngineEnabled: true };
   }

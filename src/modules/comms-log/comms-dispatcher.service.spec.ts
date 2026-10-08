@@ -12,11 +12,11 @@ function queuedRow(overrides: Record<string, unknown> = {}) {
 describe('CommsDispatcherService', () => {
   let service: CommsDispatcherService;
   let prisma: { withTenant: jest.Mock; tenant: { findMany: jest.Mock } };
-  let tx: { communicationLog: { findMany: jest.Mock; update: jest.Mock } };
+  let tx: { communicationLog: { findMany: jest.Mock; update: jest.Mock; updateMany: jest.Mock } };
   let transport: { send: jest.Mock; name: string };
 
   beforeEach(async () => {
-    tx = { communicationLog: { findMany: jest.fn().mockResolvedValue([]), update: jest.fn().mockResolvedValue({}) } };
+    tx = { communicationLog: { findMany: jest.fn().mockResolvedValue([]), update: jest.fn().mockResolvedValue({}), updateMany: jest.fn().mockResolvedValue({ count: 1 }) } };
     prisma = {
       withTenant: jest.fn((_t: string, fn: (x: unknown) => unknown) => fn(tx)),
       tenant: { findMany: jest.fn().mockResolvedValue([{ id: TENANT_ID }]) },
@@ -55,8 +55,23 @@ describe('CommsDispatcherService', () => {
 
     it('marks the row sent and stores the provider message id', async () => {
       const summary = await service.dispatchForTenant(TENANT_ID);
-      expect(tx.communicationLog.update).toHaveBeenCalledWith({ where: { id: 'log-1' }, data: { deliveryStatus: 'sent', externalMessageId: 'prov-1' } });
+      expect(tx.communicationLog.update).toHaveBeenCalledWith({ where: { id: 'log-1' }, data: { deliveryStatus: 'sent', externalMessageId: 'prov-1', nextAttemptAt: null } });
       expect(summary).toEqual({ sent: 1, failed: 0, skipped: 0 });
+    });
+
+    it('claims each message before sending it — one another dispatcher already holds is left alone', async () => {
+      await service.dispatchForTenant(TENANT_ID);
+      expect(tx.communicationLog.updateMany).toHaveBeenCalledWith({
+        where: { id: 'log-1', deliveryStatus: 'queued', OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: expect.any(Date) } }] },
+        data: { nextAttemptAt: expect.any(Date) },
+      });
+      expect(tx.communicationLog.updateMany.mock.invocationCallOrder[0]).toBeLessThan(transport.send.mock.invocationCallOrder[0]);
+
+      transport.send.mockClear();
+      tx.communicationLog.updateMany.mockResolvedValueOnce({ count: 0 });
+      const summary = await service.dispatchForTenant(TENANT_ID);
+      expect(transport.send).not.toHaveBeenCalled();
+      expect(summary).toEqual({ sent: 0, failed: 0, skipped: 1 });
     });
 
     it('never marks a row delivered — provider acceptance is not mailbox delivery', async () => {

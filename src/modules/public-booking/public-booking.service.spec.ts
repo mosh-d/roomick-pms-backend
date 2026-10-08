@@ -41,8 +41,10 @@ describe('PublicBookingService', () => {
     roomType: { findMany: jest.Mock; findFirst: jest.Mock };
     reservation: { findFirstOrThrow: jest.Mock; findFirst: jest.Mock; update: jest.Mock };
     guestProfile: { update: jest.Mock; updateMany: jest.Mock };
+    guestNote: { create: jest.Mock };
     auditLog: { create: jest.Mock };
     folio: { findFirst: jest.Mock; count: jest.Mock };
+    bookingSlugIndex?: { findUnique: jest.Mock; create: jest.Mock; deleteMany: jest.Mock };
   };
 
   beforeEach(async () => {
@@ -57,6 +59,7 @@ describe('PublicBookingService', () => {
       roomType: { findMany: jest.fn().mockResolvedValue([]), findFirst: jest.fn().mockResolvedValue({ id: ROOM_TYPE_ID, name: 'Standard' }) },
       reservation: { findFirstOrThrow: jest.fn(), findFirst: jest.fn().mockResolvedValue(null), update: jest.fn().mockResolvedValue({}) },
       guestProfile: { update: jest.fn().mockResolvedValue({}), updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
+      guestNote: { create: jest.fn().mockResolvedValue({}) },
       auditLog: { create: jest.fn().mockResolvedValue({}) },
       folio: { findFirst: jest.fn().mockResolvedValue(null), count: jest.fn().mockResolvedValue(0) },
     };
@@ -69,6 +72,8 @@ describe('PublicBookingService', () => {
       },
       tenant: { findUnique: jest.fn().mockResolvedValue({ status: 'active' }) },
     };
+    // The slug index isn't tenant-scoped, but publishing writes it inside the tenant's transaction — the same mock either way.
+    tx.bookingSlugIndex = prisma.bookingSlugIndex;
     reservationsService = {
       createReservation: jest.fn().mockResolvedValue({ id: 'res-1' }),
       getAvailability: jest.fn().mockResolvedValue([]),
@@ -281,25 +286,26 @@ describe('PublicBookingService', () => {
 
       await service.createReservation(SLUG, { ...validDto, marketingOptIn: true });
       expect(tx.guestProfile.updateMany).toHaveBeenCalledWith({
-        // Only a guest who hasn't already opted in, so the date on file stays the first one.
-        where: { id: 'guest-1', marketingOptIn: false, deletedAt: null },
+        // Only a guest who hasn't already opted in, so the date on file stays the
+        // first one — and never one who unsubscribed: a public tick can't undo that.
+        where: { id: 'guest-1', marketingOptIn: false, marketingUnsubscribedAt: null, deletedAt: null },
         data: { marketingOptIn: true, marketingOptInAt: expect.any(Date), marketingOptInSource: 'booking_engine' },
       });
     });
 
-    it('goes through the ordinary createReservation path with a NULL actor', async () => {
+    it('goes through the ordinary createReservation path with a NULL actor, matching its guest as a public booking', async () => {
       await service.createReservation(SLUG, validDto);
-      expect(reservationsService.createReservation).toHaveBeenCalledWith(TENANT_ID, BRANCH_ID, expect.anything(), null);
+      expect(reservationsService.createReservation).toHaveBeenCalledWith(TENANT_ID, BRANCH_ID, expect.anything(), null, { publicBooking: true });
     });
 
     it('forces channel to direct so a public booking can never masquerade as an OTA one', async () => {
       await service.createReservation(SLUG, validDto);
-      expect(reservationsService.createReservation).toHaveBeenCalledWith(TENANT_ID, BRANCH_ID, expect.objectContaining({ channel: 'direct' }), null);
+      expect(reservationsService.createReservation).toHaveBeenCalledWith(TENANT_ID, BRANCH_ID, expect.objectContaining({ channel: 'direct' }), null, { publicBooking: true });
     });
 
     it('forces joinWaitlist false so the public can never bypass the availability check', async () => {
       await service.createReservation(SLUG, validDto);
-      expect(reservationsService.createReservation).toHaveBeenCalledWith(TENANT_ID, BRANCH_ID, expect.objectContaining({ joinWaitlist: false }), null);
+      expect(reservationsService.createReservation).toHaveBeenCalledWith(TENANT_ID, BRANCH_ID, expect.objectContaining({ joinWaitlist: false }), null, { publicBooking: true });
     });
 
     it('never forwards a guestId or corporateAccountId, even though the internal DTO accepts them', async () => {
@@ -400,10 +406,19 @@ describe('PublicBookingService', () => {
       // the property's own public information.
       expect(Object.keys(result).sort()).toEqual([
         'adults', 'cancellationPolicySummary', 'checkInDate', 'checkOutDate', 'children', 'confirmationNumber', 'currency',
-        'estimatedArrivalTime', 'guestEmail', 'guestName', 'guestNationality', 'guestPhone',
+        'estimatedArrivalTime', 'guestEmail', 'guestName', 'guestPhoneEnding',
         'houseRules', 'preArrivalCompletedAt', 'property', 'roomTypeName', 'specialRequests',
         'status', 'totalRate',
       ]);
+    });
+
+    it('shows the last four digits of the phone on file, never the number or the nationality', async () => {
+      tx.reservation.findFirst.mockResolvedValue({ ...(await tx.reservation.findFirst()), guest: { name: 'Ada Okafor', email: 'ada@example.com', phone: '+2348012345678' } });
+      const result = await service.lookupBooking(SLUG, lookup);
+      expect(result.guestPhoneEnding).toBe('5678');
+      expect(JSON.stringify(result)).not.toContain('2348012345678');
+      const select = (tx.reservation.findFirst.mock.calls.at(-1)?.[0] as { select: { guest: { select: Record<string, boolean> } } }).select;
+      expect(select.guest.select).not.toHaveProperty('nationality');
     });
 
     it('reports the confirmed stay total rather than any nightly override', async () => {
@@ -431,7 +446,7 @@ describe('PublicBookingService', () => {
       // First call resolves the reservation for the write; the re-read at the
       // end goes through lookupBooking and needs the fuller shape.
       tx.reservation.findFirst
-        .mockResolvedValueOnce({ id: 'res-1', guestId: 'guest-1', status: 'confirmed' })
+        .mockResolvedValueOnce({ id: 'res-1', guestId: 'guest-1', status: 'confirmed', confirmationNumber: 'RES-2026-00001', guest: { phone: null, nationality: null } })
         .mockResolvedValue({
           confirmationNumber: 'RES-2026-00001', status: 'confirmed',
           checkInDate: new Date('2026-10-01T00:00:00.000Z'), checkOutDate: new Date('2026-10-04T00:00:00.000Z'),
@@ -484,12 +499,32 @@ describe('PublicBookingService', () => {
       expect(data.houseRulesAcceptedAt).toBeInstanceOf(Date);
     });
 
-    it('writes corrected contact details to the GUEST profile, not onto the reservation', async () => {
+    it('fills in contact details the GUEST profile lacks, not onto the reservation', async () => {
       await service.preArrivalCheckIn(SLUG, { ...preArrival, phone: ' +2348012345678 ', nationality: 'ng' });
-      expect(tx.guestProfile.update).toHaveBeenCalledWith({ where: { id: 'guest-1' }, data: { phone: '+2348012345678', nationality: 'NG' } });
+      expect(tx.guestProfile.update).toHaveBeenCalledWith({ where: { id: 'guest-1' }, data: { phone: '+2348012345678', phoneDigits: '2348012345678', nationality: 'NG' } });
       const reservationData = (tx.reservation.update.mock.calls[0][0] as { data: Record<string, unknown> }).data;
       expect(reservationData).not.toHaveProperty('phone');
       expect(reservationData).not.toHaveProperty('nationality');
+      expect(tx.guestNote.create).not.toHaveBeenCalled();
+    });
+
+    it('never writes over details already on file — a different one is a note for the desk', async () => {
+      tx.reservation.findFirst.mockReset();
+      tx.reservation.findFirst
+        .mockResolvedValueOnce({ id: 'res-1', guestId: 'guest-1', status: 'confirmed', confirmationNumber: 'RES-2026-00001', guest: { phone: '+2348031234567', nationality: 'NG' } })
+        .mockResolvedValue({
+          confirmationNumber: 'RES-2026-00001', status: 'confirmed',
+          checkInDate: new Date('2026-10-01T00:00:00.000Z'), checkOutDate: new Date('2026-10-04T00:00:00.000Z'),
+          adults: 2, children: 0, specialRequests: null, confirmedRate: { toFixed: () => '90000.00' }, overrideRate: null,
+          preArrivalCompletedAt: new Date(), estimatedArrivalTime: null, roomType: { name: 'Standard' },
+          guest: { name: 'Ada Okafor', email: 'ada@example.com', phone: '+2348031234567' },
+          branch: { currency: 'NGN', regCardTemplate: null },
+        });
+      await service.preArrivalCheckIn(SLUG, { ...preArrival, phone: '+2349990000000', nationality: 'xx' });
+      expect(tx.guestProfile.update).not.toHaveBeenCalled();
+      expect(tx.guestNote.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({ guestId: 'guest-1', authorId: null, body: expect.stringContaining('phone +2349990000000 (on file: +2348031234567) and nationality XX (on file: NG)') }),
+      });
     });
 
     it('does not touch the guest profile when no contact details were supplied', async () => {
@@ -829,6 +864,13 @@ describe('PublicBookingService', () => {
       await service.unpublish(TENANT_ID, BRANCH_ID);
       expect(prisma.bookingSlugIndex.deleteMany).toHaveBeenCalledWith({ where: { branchId: BRANCH_ID } });
       expect(tx.branch.update).toHaveBeenCalledWith({ where: { id: BRANCH_ID }, data: { bookingEngineEnabled: false } });
+    });
+
+    it('two properties publishing one address at once: the second gets a clear 409, and its branch row is left alone', async () => {
+      prisma.bookingSlugIndex.findUnique.mockResolvedValue(null);
+      prisma.bookingSlugIndex.create.mockRejectedValueOnce(new Prisma.PrismaClientKnownRequestError('Unique constraint failed', { code: 'P2002', clientVersion: 'test' }));
+      await expect(service.publish(TENANT_ID, BRANCH_ID, { slug: 'contested' })).rejects.toMatchObject({ status: 409 });
+      expect(tx.branch.update).not.toHaveBeenCalled();
     });
 
     it('404s when publishing a branch that does not exist in this tenant', async () => {

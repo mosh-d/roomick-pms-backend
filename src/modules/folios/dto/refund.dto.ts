@@ -1,6 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
-import { IsIn, IsNumber, IsOptional, IsPositive, IsString, IsUUID, MaxLength, MinLength } from 'class-validator';
+import { IsIn, IsNumber, IsOptional, IsPositive, IsString, IsUUID, Max, MaxLength, MinLength } from 'class-validator';
 import { RefundStatus } from '@prisma/client';
 
 /** The ways money can go back to a guest. Points go back as a loyalty adjustment, and a voucher isn't money. */
@@ -12,6 +12,7 @@ export class RequestRefundDto {
   @Type(() => Number)
   @IsNumber({ maxDecimalPlaces: 2 })
   @IsPositive()
+  @Max(1_000_000_000)
   amount!: number;
 
   @ApiPropertyOptional({ description: "The payment being refunded. Its method is the refund's, unless another is given." })

@@ -18,6 +18,29 @@ interface NoShowPolicy {
 /** How many nights back the scheduled sweep will close out a branch it missed — see `datesToAudit`. */
 const CATCH_UP_DAYS = 7;
 
+/**
+ * Stays closed per transaction. The audit used to close a whole branch in
+ * one transaction, and at a few hundred in-house guests it ran past the
+ * transaction timeout and rolled back every charge it had posted. A batch
+ * this size finishes in well under a second on a slow database; a batch that
+ * still fails costs only its own stays, which the next run picks up.
+ */
+const STAY_BATCH = 25;
+/** How long one batch may hold its transaction. */
+const BATCH_TIMEOUT_MS = 120_000;
+/** A run still "running" after this long died part-way (a deploy, a crash) — the next run picks it up. The schema's own rule. */
+const STALE_RUN_MS = 10 * 60_000;
+
+type RunError = { reservationId: string; reason: string };
+
+function inBatches<T>(items: T[], size: number): T[][] {
+  const batches: T[][] = [];
+  for (let i = 0; i < items.length; i += size) batches.push(items.slice(i, i + size));
+  return batches;
+}
+
+const reasonOf = (error: unknown) => (error instanceof Error ? error.message : 'Unknown error');
+
 export interface NightAuditRunResult {
   auditDate: string;
   foliosProcessed: number;
@@ -50,18 +73,181 @@ export class NightAuditService {
   /**
    * Runs the night audit for one branch and one date (spec §4.6).
    *
-   * Ordering matters: the `night_audit_log` row is written FIRST, inside
-   * the transaction, so the `@@unique([branchId, auditDate])` constraint
-   * is what actually prevents a double run — a check-then-act guard alone
-   * would race two concurrent triggers. The pre-check below exists only to
-   * turn that race into a clean 409 in the common case.
+   * The run is claimed first, in its own short transaction: the
+   * `night_audit_log` row is written as `running` before any work starts,
+   * and the `@@unique([branchId, auditDate])` constraint is what actually
+   * prevents a double run — the pre-check only turns the common case into a
+   * clean 409.
+   *
+   * Then the stays are closed in batches, each in its own transaction, and
+   * the no-shows the same way; the log row's totals move with every batch.
+   * Every step skips what's already done — a night already posted to a folio
+   * isn't posted again, a stay-over task already waiting isn't raised again,
+   * a no-show already marked is no longer `confirmed` — so a run that failed
+   * or died part-way is simply run again and carries on where it stopped.
+   * Nothing it posted is lost, and nothing is charged twice.
    *
    * Per-reservation failures are collected into `errors` and the batch
    * continues — one broken folio must never stop the branch's whole
-   * close-out (spec §4.6: "continue on error, never abort the batch").
+   * close-out (spec §4.6: "continue on error, never abort the batch"). A
+   * batch that fails as a whole (a lost connection, a timeout) marks the run
+   * `failed`, which leaves the night pending for the next run.
    */
   async runAudit(tenantId: string, branchId: string, auditDateStr: string, triggeredBy: string | null): Promise<NightAuditRunResult> {
     const auditDate = toBranchDate(auditDateStr);
+    const claim = await this.claimRun(tenantId, branchId, auditDate, auditDateStr, triggeredBy);
+
+    const errors: RunError[] = [];
+    let foliosProcessed = 0;
+    let chargesPosted = claim.chargesPosted;
+    let totalAmountPosted = claim.totalAmountPosted;
+    let noShowsMarked = 0;
+    let unfinished = false;
+
+    try {
+      // 1. Post the night that just ended for everyone in the hotel that
+      //    night. Occupancy is what counts, not the booked dates — a guest
+      //    still checked in after their departure date is still in the room,
+      //    and owes the night like any other (the in-house PMS's own rule).
+      //    Those overstay nights are labelled so they stand out on the bill
+      //    and on Alerts until the desk checks the guest out or extends the
+      //    stay. A booked departure day is never billed: someone who leaves
+      //    on it is checked out before this runs.
+      const inHouseWhere = { branchId, deletedAt: null, status: 'checked_in' as const, checkInDate: { lte: auditDate } };
+      const stayIds = (
+        await this.prisma.withTenant(tenantId, (tx) => tx.reservation.findMany({ where: inHouseWhere, select: { id: true }, orderBy: { id: 'asc' } }))
+      ).map((stay) => stay.id);
+
+      // Stay-over service: every room still occupied this morning gets its
+      // daily housekeeping task, unless one is already waiting for it.
+      const serviceDate = new Date(auditDate.getTime() + 86_400_000);
+      let stayoverTasks = 0;
+
+      for (const ids of inBatches(stayIds, STAY_BATCH)) {
+        try {
+          const batch = await this.prisma.withTenant(
+            tenantId,
+            async (tx) => {
+              // Read again inside the batch: a guest checked out since the run
+              // started isn't billed for a night their check-out already settled.
+              const stays = await tx.reservation.findMany({ where: { id: { in: ids }, ...inHouseWhere }, include: { roomType: { select: { name: true } } } });
+              const done = { processed: 0, posted: 0, amount: new Prisma.Decimal(0), tasks: 0, errors: [] as RunError[] };
+              for (const reservation of stays) {
+                // Each stay in its own savepoint: a failed statement aborts a
+                // Postgres transaction, so without one a single bad folio would
+                // poison every post after it in the batch.
+                await tx.$executeRawUnsafe('SAVEPOINT night_audit_stay');
+                try {
+                  // `triggeredBy` straight through: NULL for the scheduled sweep
+                  // is `postedBy`'s own "system-posted". It used to fall back to
+                  // `''` for an online booking (no `createdBy`), which Postgres
+                  // rejects in the UUID column.
+                  const folio = await this.foliosService.ensurePrimaryFolio(tx, reservation, triggeredBy);
+                  const posted = await this.foliosService.postRoomChargeForDate(
+                    tx,
+                    reservation,
+                    folio,
+                    auditDate,
+                    reservation.checkOutDate <= auditDate ? 'Night Audit — overstay' : 'Night Audit',
+                    triggeredBy,
+                  );
+                  done.processed++;
+                  if (posted) {
+                    done.posted++;
+                    done.amount = done.amount.plus(posted.amount).plus(posted.taxAmount);
+                  }
+                  await tx.$executeRawUnsafe('RELEASE SAVEPOINT night_audit_stay');
+                } catch (error) {
+                  await tx.$executeRawUnsafe('ROLLBACK TO SAVEPOINT night_audit_stay');
+                  done.errors.push({ reservationId: reservation.id, reason: reasonOf(error) });
+                }
+                if (!reservation.roomId) continue;
+                await tx.$executeRawUnsafe('SAVEPOINT night_audit_housekeeping');
+                try {
+                  if (await this.housekeepingService.ensureStayoverTaskInTx(tx, tenantId, branchId, reservation.roomId, reservation.id, serviceDate)) done.tasks++;
+                  await tx.$executeRawUnsafe('RELEASE SAVEPOINT night_audit_housekeeping');
+                } catch (error) {
+                  await tx.$executeRawUnsafe('ROLLBACK TO SAVEPOINT night_audit_housekeeping');
+                  done.errors.push({ reservationId: reservation.id, reason: `Housekeeping task: ${reasonOf(error)}` });
+                }
+              }
+              // The totals move with the posts, so a run that dies after this
+              // batch is picked up again with the right figures.
+              await tx.nightAuditLog.update({
+                where: { id: claim.logId },
+                data: { chargesPosted: chargesPosted + done.posted, totalAmountPosted: totalAmountPosted.plus(done.amount) },
+              });
+              return done;
+            },
+            { timeout: BATCH_TIMEOUT_MS },
+          );
+          foliosProcessed += batch.processed;
+          chargesPosted += batch.posted;
+          totalAmountPosted = totalAmountPosted.plus(batch.amount);
+          stayoverTasks += batch.tasks;
+          errors.push(...batch.errors);
+        } catch (error) {
+          // The whole batch rolled back. Its stays are still owed the night —
+          // the run is marked failed, so the next one closes them.
+          unfinished = true;
+          this.logger.error(`Night audit ${auditDateStr} branch ${branchId}: a batch of ${ids.length} stays failed`, error);
+          for (const id of ids) errors.push({ reservationId: id, reason: `Not closed this run, run it again: ${reasonOf(error)}` });
+        }
+      }
+      if (stayoverTasks > 0) this.logger.log(`Night audit ${auditDateStr}: ${stayoverTasks} stay-over housekeeping task(s) raised`);
+
+      // 2. Mark no-shows: confirmed arrivals for this date that never checked in.
+      const noShows = await this.markNoShows(tenantId, branchId, auditDate, triggeredBy, errors);
+      noShowsMarked = noShows.marked;
+      unfinished ||= noShows.unfinished;
+    } catch (error) {
+      // Anything that stopped the run outright is on record — the night stays pending.
+      unfinished = true;
+      errors.push({ reservationId: '', reason: `The run stopped: ${reasonOf(error)}` });
+      this.logger.error(`Night audit ${auditDateStr} branch ${branchId} stopped`, error);
+    }
+
+    const status: 'completed' | 'failed' = unfinished || (errors.length > 0 && chargesPosted === 0 && foliosProcessed === 0) ? 'failed' : 'completed';
+    await this.prisma.withTenant(tenantId, (tx) =>
+      tx.nightAuditLog.update({
+        where: { id: claim.logId },
+        data: {
+          status,
+          foliosProcessed,
+          chargesPosted,
+          totalAmountPosted,
+          errors: errors.length > 0 ? (errors as unknown as Prisma.InputJsonValue) : Prisma.DbNull,
+          completedAt: new Date(),
+        },
+      }),
+    );
+
+    return {
+      auditDate: auditDateStr,
+      foliosProcessed,
+      chargesPosted,
+      totalAmountPosted: totalAmountPosted.toFixed(2),
+      noShowsMarked,
+      errors,
+      status,
+    };
+  }
+
+  /**
+   * Puts the run on record before any work starts. A night already closed is
+   * refused; one being closed right now too. One whose last run failed — or
+   * died part-way and has sat "running" past the stale mark — is taken over,
+   * keeping the totals it had already posted.
+   */
+  private async claimRun(
+    tenantId: string,
+    branchId: string,
+    auditDate: Date,
+    auditDateStr: string,
+    triggeredBy: string | null,
+  ): Promise<{ logId: bigint; chargesPosted: number; totalAmountPosted: Prisma.Decimal }> {
+    const runningNow = () =>
+      new ConflictException({ code: ErrorCode.CONFLICT, message: `The night audit for ${auditDateStr} is running now — give it a few minutes, then refresh` });
 
     return this.prisma.withTenant(tenantId, async (tx) => {
       const branch = await this.propertyService.assertBranch(tx, branchId);
@@ -78,114 +264,31 @@ export class NightAuditService {
         });
       }
 
-      const already = await tx.nightAuditLog.findFirst({ where: { branchId, auditDate } });
-      if (already) {
-        throw new ConflictException({
-          code: ErrorCode.AUDIT_ALREADY_RAN,
-          message: `Night audit for ${auditDateStr} has already run for this branch`,
+      const existing = await tx.nightAuditLog.findFirst({ where: { branchId, auditDate } });
+      if (existing) {
+        if (existing.status === 'completed') {
+          throw new ConflictException({ code: ErrorCode.AUDIT_ALREADY_RAN, message: `Night audit for ${auditDateStr} has already run for this branch` });
+        }
+        const staleBefore = new Date(Date.now() - STALE_RUN_MS);
+        if (existing.status === 'running' && existing.triggeredAt >= staleBefore) throw runningNow();
+        // Compare-and-set on the status (and, for an abandoned run, its age),
+        // so two people picking up the same failed night can't both run it.
+        const taken = await tx.nightAuditLog.updateMany({
+          where: { id: existing.id, status: existing.status, ...(existing.status === 'running' ? { triggeredAt: { lt: staleBefore } } : {}) },
+          data: { status: 'running', triggeredAt: new Date(), triggeredBy, completedAt: null, errors: Prisma.DbNull },
         });
+        if (taken.count === 0) throw runningNow();
+        return { logId: existing.id, chargesPosted: existing.chargesPosted ?? 0, totalAmountPosted: existing.totalAmountPosted ?? new Prisma.Decimal(0) };
       }
 
-      const log = await tx.nightAuditLog.create({
-        data: { tenantId, branchId, auditDate, triggeredBy, status: 'running' },
-      });
-
-      const errors: { reservationId: string; reason: string }[] = [];
-      let foliosProcessed = 0;
-      let chargesPosted = 0;
-      let totalAmountPosted = new Prisma.Decimal(0);
-
-      // 1. Post the night that just ended for everyone in the hotel that
-      //    night. Occupancy is what counts, not the booked dates — a guest
-      //    still checked in after their departure date is still in the room,
-      //    and owes the night like any other (the in-house PMS's own rule).
-      //    Those overstay nights are labelled so they stand out on the bill
-      //    and on Alerts until the desk checks the guest out or extends the
-      //    stay. A booked departure day is never billed: someone who leaves
-      //    on it is checked out before this runs.
-      const inHouse = await tx.reservation.findMany({
-        where: {
-          branchId,
-          deletedAt: null,
-          status: 'checked_in',
-          checkInDate: { lte: auditDate },
-        },
-        include: { roomType: { select: { name: true } } },
-      });
-
-      for (const reservation of inHouse) {
-        // Each stay in its own savepoint: a failed statement aborts a Postgres
-        // transaction, so without one a single bad folio would have poisoned
-        // every post after it — and the run's own log row with them.
-        await tx.$executeRawUnsafe('SAVEPOINT night_audit_stay');
-        try {
-          // `triggeredBy` straight through: NULL for the scheduled sweep is
-          // `postedBy`'s own "system-posted". It used to fall back to `''` for
-          // an online booking (no `createdBy`), which Postgres rejects in the
-          // UUID column — aborting the whole audit transaction.
-          const folio = await this.foliosService.ensurePrimaryFolio(tx, reservation, triggeredBy);
-          const posted = await this.foliosService.postRoomChargeForDate(
-            tx,
-            reservation,
-            folio,
-            auditDate,
-            reservation.checkOutDate <= auditDate ? 'Night Audit — overstay' : 'Night Audit',
-            triggeredBy,
-          );
-          foliosProcessed++;
-          if (posted) {
-            chargesPosted++;
-            totalAmountPosted = totalAmountPosted.plus(posted.amount).plus(posted.taxAmount);
-          }
-          await tx.$executeRawUnsafe('RELEASE SAVEPOINT night_audit_stay');
-        } catch (error) {
-          await tx.$executeRawUnsafe('ROLLBACK TO SAVEPOINT night_audit_stay');
-          errors.push({ reservationId: reservation.id, reason: error instanceof Error ? error.message : 'Unknown error' });
-        }
+      try {
+        const log = await tx.nightAuditLog.create({ data: { tenantId, branchId, auditDate, triggeredBy, status: 'running' } });
+        return { logId: log.id, chargesPosted: 0, totalAmountPosted: new Prisma.Decimal(0) };
+      } catch (error) {
+        // Someone else's run claimed the night between the check and the insert.
+        if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') throw runningNow();
+        throw error;
       }
-
-      // Stay-over service: every room still occupied this morning gets its
-      // daily housekeeping task, unless one is already waiting for it.
-      const serviceDate = new Date(auditDate.getTime() + 86_400_000);
-      let stayoverTasks = 0;
-      for (const reservation of inHouse) {
-        if (!reservation.roomId) continue;
-        await tx.$executeRawUnsafe('SAVEPOINT night_audit_housekeeping');
-        try {
-          if (await this.housekeepingService.ensureStayoverTaskInTx(tx, tenantId, branchId, reservation.roomId, reservation.id, serviceDate)) stayoverTasks += 1;
-          await tx.$executeRawUnsafe('RELEASE SAVEPOINT night_audit_housekeeping');
-        } catch (error) {
-          await tx.$executeRawUnsafe('ROLLBACK TO SAVEPOINT night_audit_housekeeping');
-          errors.push({ reservationId: reservation.id, reason: `Housekeeping task: ${error instanceof Error ? error.message : 'Unknown error'}` });
-        }
-      }
-      if (stayoverTasks > 0) this.logger.log(`Night audit ${auditDateStr}: ${stayoverTasks} stay-over housekeeping task(s) raised`);
-
-      // 2. Mark no-shows: confirmed arrivals for this date that never checked in.
-      const noShowsMarked = await this.markNoShows(tx, tenantId, branchId, auditDate, triggeredBy, errors);
-
-      const status = errors.length > 0 && chargesPosted === 0 && foliosProcessed === 0 ? 'failed' : 'completed';
-      await tx.nightAuditLog.update({
-        where: { id: log.id },
-        data: {
-          status,
-          foliosProcessed,
-          chargesPosted,
-          totalAmountPosted,
-          errors: errors.length > 0 ? (errors as unknown as Prisma.InputJsonValue) : undefined,
-          completedAt: new Date(),
-        },
-      });
-
-      return {
-        auditDate: auditDateStr,
-        foliosProcessed,
-        chargesPosted,
-        totalAmountPosted: totalAmountPosted.toFixed(2),
-        noShowsMarked,
-        errors,
-        status,
-      };
     });
   }
 
@@ -195,51 +298,71 @@ export class NightAuditService {
    * property that wants front desk to make that call manually gets left
    * alone rather than having reservations silently cancelled out from
    * under them.
-   */
-  /**
+   *
    * `ReservationsService.markNoShowInTx` does the actual work (status
    * flip, `NoShowRecord`, penalty charge, folio settle) — shared with the
    * manual "mark as no-show now" entry point so a night-audit-marked
    * no-show and a front-desk-marked one get identical treatment. This
-   * batch loop's own job is just: honour `autoMark`, find who's unarrived,
-   * and keep one bad reservation from stopping the rest (spec §4.6).
+   * loop's own job is just: honour `autoMark`, find who's unarrived, keep
+   * one bad reservation from stopping the rest (spec §4.6), and work in
+   * batches like the stays.
    */
   private async markNoShows(
-    tx: TenantTx,
     tenantId: string,
     branchId: string,
     auditDate: Date,
     triggeredBy: string | null,
-    errors: { reservationId: string; reason: string }[],
-  ): Promise<number> {
-    const branch = await tx.branch.findFirst({ where: { id: branchId } });
-    const policy = (branch?.noShowPolicy ?? {}) as NoShowPolicy;
-    if (policy.autoMark === false) return 0;
-
-    const penaltyType: PenaltyType = policy.defaultPenalty ?? 'none';
-    const unarrived = await tx.reservation.findMany({
-      where: { branchId, deletedAt: null, status: 'confirmed', checkInDate: { lte: auditDate } },
+    errors: RunError[],
+  ): Promise<{ marked: number; unfinished: boolean }> {
+    const unarrivedWhere = { branchId, deletedAt: null, status: 'confirmed' as const, checkInDate: { lte: auditDate } };
+    const { policy, ids } = await this.prisma.withTenant(tenantId, async (tx) => {
+      const branch = await tx.branch.findFirst({ where: { id: branchId } });
+      const noShowPolicy = (branch?.noShowPolicy ?? {}) as NoShowPolicy;
+      if (noShowPolicy.autoMark === false) return { policy: noShowPolicy, ids: [] as string[] };
+      const unarrived = await tx.reservation.findMany({ where: unarrivedWhere, select: { id: true }, orderBy: { id: 'asc' } });
+      return { policy: noShowPolicy, ids: unarrived.map((r) => r.id) };
     });
+    const penaltyType: PenaltyType = policy.defaultPenalty ?? 'none';
 
     let marked = 0;
-    for (const reservation of unarrived) {
-      await tx.$executeRawUnsafe('SAVEPOINT night_audit_no_show');
+    let unfinished = false;
+    for (const batchIds of inBatches(ids, STAY_BATCH)) {
       try {
-        // `triggeredBy` here is whoever triggered THIS AUDIT RUN — `null`
-        // for the scheduled sweep, or a real user id for a manually
-        // triggered run — carried straight through as `markedBy` (the
-        // schema's own "NULL = auto-marked" convention still holds for
-        // the sweep; a human-triggered audit correctly attributes the
-        // no-shows it marks to that human, same as the original code did).
-        await this.reservationsService.markNoShowInTx(tx, tenantId, reservation, penaltyType, policy.flatFeeAmount, triggeredBy);
-        marked++;
-        await tx.$executeRawUnsafe('RELEASE SAVEPOINT night_audit_no_show');
+        const batch = await this.prisma.withTenant(
+          tenantId,
+          async (tx) => {
+            const unarrived = await tx.reservation.findMany({ where: { id: { in: batchIds }, ...unarrivedWhere } });
+            const done = { marked: 0, errors: [] as RunError[] };
+            for (const reservation of unarrived) {
+              await tx.$executeRawUnsafe('SAVEPOINT night_audit_no_show');
+              try {
+                // `triggeredBy` here is whoever triggered THIS AUDIT RUN — `null`
+                // for the scheduled sweep, or a real user id for a manually
+                // triggered run — carried straight through as `markedBy` (the
+                // schema's own "NULL = auto-marked" convention still holds for
+                // the sweep; a human-triggered audit correctly attributes the
+                // no-shows it marks to that human).
+                await this.reservationsService.markNoShowInTx(tx, tenantId, reservation, penaltyType, policy.flatFeeAmount, triggeredBy);
+                done.marked++;
+                await tx.$executeRawUnsafe('RELEASE SAVEPOINT night_audit_no_show');
+              } catch (error) {
+                await tx.$executeRawUnsafe('ROLLBACK TO SAVEPOINT night_audit_no_show');
+                done.errors.push({ reservationId: reservation.id, reason: reasonOf(error) });
+              }
+            }
+            return done;
+          },
+          { timeout: BATCH_TIMEOUT_MS },
+        );
+        marked += batch.marked;
+        errors.push(...batch.errors);
       } catch (error) {
-        await tx.$executeRawUnsafe('ROLLBACK TO SAVEPOINT night_audit_no_show');
-        errors.push({ reservationId: reservation.id, reason: error instanceof Error ? error.message : 'Unknown error' });
+        unfinished = true;
+        this.logger.error(`Night audit branch ${branchId}: a batch of ${batchIds.length} no-shows failed`, error);
+        for (const id of batchIds) errors.push({ reservationId: id, reason: `Not marked this run, run it again: ${reasonOf(error)}` });
       }
     }
-    return marked;
+    return { marked, unfinished };
   }
 
   /**
@@ -282,12 +405,21 @@ export class NightAuditService {
         pendingDates.length > 0
           ? (
               await tx.nightAuditLog.findMany({
-                where: { branchId, auditDate: { gt: toBranchDate(pendingDates[0]) } },
+                where: { branchId, status: 'completed', auditDate: { gt: toBranchDate(pendingDates[0]) } },
                 select: { auditDate: true },
                 orderBy: { auditDate: 'asc' },
               })
             ).map((run) => run.auditDate.toISOString().slice(0, 10))
           : [];
+      // The next night to close, if its last run failed or died part-way — said
+      // on the page, so a stopped audit is never a silent one.
+      const stopped =
+        pendingDates.length > 0
+          ? await tx.nightAuditLog.findFirst({ where: { branchId, auditDate: toBranchDate(pendingDates[0]), status: { in: ['failed', 'running'] } } })
+          : null;
+      const stoppedErrors = ((stopped?.errors ?? []) as RunError[]).filter((e) => typeof e?.reason === 'string');
+      // A reason about the run itself (a lost connection, a batch cut off) before any one stay's.
+      const stoppedReason = (stoppedErrors.find((e) => e.reason.startsWith('The run stopped') || e.reason.startsWith('Not ')) ?? stoppedErrors[0])?.reason;
 
       return {
         auditDate: pendingDates[0] ?? auditDate,
@@ -296,6 +428,16 @@ export class NightAuditService {
         pendingDates,
         /** Nights already closed that come AFTER the oldest pending one — closed out of order, worth a look. */
         closedAhead,
+        /** The oldest pending night's last run, when it failed or was cut off — running it again carries on where it stopped. */
+        lastStoppedRun: stopped
+          ? {
+              auditDate: stopped.auditDate.toISOString().slice(0, 10),
+              status: stopped.status,
+              chargesPosted: stopped.chargesPosted ?? 0,
+              errorCount: stoppedErrors.length,
+              reason: stoppedReason ?? (stopped.status === 'running' ? 'It stopped part-way — the server restarted or lost the database.' : null),
+            }
+          : null,
         checklist: [
           {
             key: 'departures_resolved',
@@ -361,7 +503,17 @@ export class NightAuditService {
     const yesterday = toBranchDate(this.yesterdayForBranch(timezone));
     const earliest = new Date(yesterday);
     earliest.setUTCDate(earliest.getUTCDate() - (CATCH_UP_DAYS - 1));
-    const done = await tx.nightAuditLog.findMany({ where: { branchId, auditDate: { gte: earliest, lte: yesterday } }, select: { auditDate: true } });
+    // Closed, or being closed right now. A failed run, or one that died
+    // part-way and went stale, leaves its night pending — run again, it
+    // carries on where it stopped.
+    const done = await tx.nightAuditLog.findMany({
+      where: {
+        branchId,
+        auditDate: { gte: earliest, lte: yesterday },
+        OR: [{ status: 'completed' }, { status: 'running', triggeredAt: { gte: new Date(Date.now() - STALE_RUN_MS) } }],
+      },
+      select: { auditDate: true },
+    });
     const doneDates = new Set(done.map((run) => run.auditDate.toISOString().slice(0, 10)));
     const latest = await tx.nightAuditLog.findFirst({ where: { branchId }, orderBy: { auditDate: 'desc' }, select: { auditDate: true } });
     // Nothing ever run, or nothing within the week: just yesterday.
@@ -414,6 +566,13 @@ export class NightAuditService {
 
           for (const auditDate of await this.datesToAudit(tenant.id, branch.id, branch.timezone)) {
             const result = await this.runAudit(tenant.id, branch.id, auditDate, null);
+            if (result.status === 'failed') {
+              // Nights close in order: a later one waits until this one is
+              // through. The next sweep carries on where this run stopped, and
+              // the Night Audit page says it stopped.
+              this.logger.error(`Night audit failed: branch ${branch.id} date ${auditDate} — ${result.errors.length} error(s); retried next hour`);
+              break;
+            }
             this.logger.log(
               `Night audit ${result.status}: branch ${branch.id} date ${auditDate} — ${result.chargesPosted} charges, ${result.noShowsMarked} no-shows`,
             );

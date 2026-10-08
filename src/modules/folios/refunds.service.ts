@@ -152,9 +152,12 @@ export class RefundsService {
           message: `The bill has changed since this was asked for — only ${available.toFixed(2)} can be refunded now. Turn this one down and ask again.`,
         });
       }
-      const approved = await tx.refund.update({ where: { id: refundId }, data: { status: 'approved', approvedBy: actor.sub } });
+      // Only while it's still waiting — two managers approving at once, or one
+      // approving as another turns it down, used to both go through.
+      const { count } = await tx.refund.updateMany({ where: { id: refundId, status: 'pending' }, data: { status: 'approved', approvedBy: actor.sub } });
+      if (count === 0) throw this.changedMeanwhile();
       await this.audit(tx, tenantId, refund.folio.branchId, actor.sub, 'refund.approved', refundId, { amount: refund.amount.toFixed(2) });
-      return approved;
+      return tx.refund.findUniqueOrThrow({ where: { id: refundId } });
     });
   }
 
@@ -165,9 +168,12 @@ export class RefundsService {
       if (!OUTSTANDING.includes(refund.status)) {
         throw new ConflictException({ code: ErrorCode.CONFLICT, message: `This refund is already ${refund.status}` });
       }
-      const rejected = await tx.refund.update({ where: { id: refundId }, data: { status: 'rejected', rejectionReason: reason.trim() } });
+      // Not one that's being paid out this moment: a refund handed over and
+      // then marked "turned down" would leave the money gone and the record wrong.
+      const { count } = await tx.refund.updateMany({ where: { id: refundId, status: { in: OUTSTANDING } }, data: { status: 'rejected', rejectionReason: reason.trim() } });
+      if (count === 0) throw this.changedMeanwhile();
       await this.audit(tx, tenantId, refund.folio.branchId, actor.sub, 'refund.rejected', refundId, { amount: refund.amount.toFixed(2), reason: reason.trim() });
-      return rejected;
+      return tx.refund.findUniqueOrThrow({ where: { id: refundId } });
     });
   }
 
@@ -192,6 +198,14 @@ export class RefundsService {
       const openShift =
         refund.method === 'cash' ? await tx.shift.findFirst({ where: { branchId: refund.folio.branchId, agentId: actor.sub, closedAt: null } }) : null;
       if (refund.method === 'cash' && !openShift) throw this.foliosService.shiftRequired();
+      // Claimed before the money moves. A second pay-out of the same refund —
+      // a double click, two desks at once — waits on this row and then finds
+      // it already paid: three at once used to post the refund twice.
+      const claimed = await tx.refund.updateMany({
+        where: { id: refundId, status: 'approved' },
+        data: { status: 'processed', processedAt: new Date(), processedBy: actor.sub },
+      });
+      if (claimed.count === 0) throw this.changedMeanwhile();
       const payment = await tx.payment.create({
         data: {
           tenantId,
@@ -204,10 +218,7 @@ export class RefundsService {
           recordedBy: actor.sub,
         },
       });
-      const paid = await tx.refund.update({
-        where: { id: refundId },
-        data: { status: 'processed', processedAt: new Date(), processedBy: actor.sub, refundPaymentId: payment.id },
-      });
+      const paid = await tx.refund.update({ where: { id: refundId }, data: { refundPaymentId: payment.id } });
       await this.audit(tx, tenantId, refund.folio.branchId, actor.sub, 'refund.paid_out', refundId, {
         amount: refund.amount.toFixed(2),
         method: refund.method,
@@ -217,6 +228,11 @@ export class RefundsService {
       await this.webhookEvents.paymentRecorded(tx, { tenantId, branchId: refund.folio.branchId, type: 'refund.paid', paymentId: payment.id, refundId });
       return paid;
     });
+  }
+
+  /** Someone else acted on the refund between reading it and changing it. */
+  private changedMeanwhile(): ConflictException {
+    return new ConflictException({ code: ErrorCode.CONFLICT, message: 'This refund was just paid out or turned down by someone else — refresh to see where it stands' });
   }
 
   async listForBranch(tenantId: string, branchId: string, status?: RefundStatus) {

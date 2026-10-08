@@ -1,6 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
-import { IsArray, IsIn, IsInt, IsNumber, IsOptional, IsPositive, IsString, Min, MaxLength, MinLength, ValidateNested } from 'class-validator';
+import { IsArray, IsIn, IsInt, IsNumber, IsOptional, IsPositive, IsString, Max, MaxLength, Min, MinLength, ValidateNested } from 'class-validator';
 import { IssuePriority, IssueStatus, ShiftType } from '@prisma/client';
 
 export class CashDenominationDto {
@@ -8,6 +8,7 @@ export class CashDenominationDto {
   @Type(() => Number)
   @IsNumber({ maxDecimalPlaces: 2 })
   @IsPositive()
+  @Max(1_000_000_000)
   denomination!: number;
 
   @ApiProperty({ example: 12 })
@@ -26,6 +27,7 @@ export class OpenShiftDto {
   @Type(() => Number)
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0)
+  @Max(1_000_000_000)
   openingFloat!: number;
 
   @ApiPropertyOptional({ type: [CashDenominationDto] })
@@ -54,6 +56,7 @@ export class CloseShiftDto {
   @Type(() => Number)
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0)
+  @Max(1_000_000_000)
   closingCashCounted!: number;
 
   @ApiPropertyOptional({ type: [CashDenominationDto] })

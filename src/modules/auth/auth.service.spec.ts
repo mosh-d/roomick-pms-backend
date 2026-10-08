@@ -2,6 +2,7 @@ import { BadRequestException, ConflictException, ForbiddenException, Unauthorize
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { Test } from '@nestjs/testing';
+import { Prisma } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import { AccountMailService } from '../../common/mail/account-mail.service';
 import { PermissionsService } from '../../common/permissions/permissions.service';
@@ -147,6 +148,19 @@ describe('AuthService', () => {
       prisma.userEmailIndex.findUnique.mockResolvedValue({ email: dto.email, tenantId: 'existing', userId: 'u' });
       await expect(service.register(dto)).rejects.toThrow(ConflictException);
       expect(tx.tenant.create).not.toHaveBeenCalled();
+    });
+
+    it.each(['User', 'UserEmailIndex'])('a sign-up that loses the race to the same email (clash on %s) is told the email is taken, not a 500', async (modelName) => {
+      // What Prisma reports for the users.email index: the model, no column.
+      const clash = new Prisma.PrismaClientKnownRequestError('Unique constraint failed on the (not available)', { code: 'P2002', clientVersion: '6', meta: { modelName, target: null } });
+      prisma.$transaction.mockRejectedValueOnce(clash);
+      await expect(service.register(dto)).rejects.toMatchObject({ response: { code: 'EMAIL_TAKEN' } });
+    });
+
+    it('a clash on anything else is left to the error filter, not called an email clash', async () => {
+      const clash = new Prisma.PrismaClientKnownRequestError('Unique constraint failed on the fields: (`subdomain`)', { code: 'P2002', clientVersion: '6', meta: { modelName: 'Tenant', target: ['subdomain'] } });
+      prisma.$transaction.mockRejectedValueOnce(clash);
+      await expect(service.register(dto)).rejects.toBe(clash);
     });
 
     it('retries subdomain generation on a collision instead of failing', async () => {
@@ -427,6 +441,13 @@ describe('AuthService', () => {
       await expect(
         service.acceptInvite(`${TENANT_ID}.${'a'.repeat(96)}`, { name: 'A', password: 'Pw1aaaaa' }),
       ).rejects.toThrow(BadRequestException);
+    });
+
+    it('refuses an invitation into a suspended organisation — no account is made', async () => {
+      tx.inviteToken.findUnique.mockResolvedValue({ id: 'inv', acceptedAt: null, expiresAt: new Date(Date.now() + 60_000), email: 'new@x.t' });
+      tx.tenant.findUnique.mockResolvedValueOnce({ status: 'suspended' });
+      await expect(service.acceptInvite(`${TENANT_ID}.${'a'.repeat(96)}`, { name: 'A', password: 'Pw1aaaaa' })).rejects.toMatchObject({ status: 403 });
+      expect(tx.user.create).not.toHaveBeenCalled();
     });
 
     it('rejects already-used invites', async () => {

@@ -12,11 +12,19 @@ interface RegistrationCardFields {
   checkOutDate: string;
   adults: number;
   children: number;
+  /** The stay's total — `confirmedRate` — not a nightly price. */
   rate: string;
   currency: string;
+  /** The template's "Show Rate on Card". Absent on cards made before it was honoured — shown, as it was. */
+  showRate?: boolean;
   confirmationNumber: string;
   houseRules: string | null;
   logoUrl: string | null;
+}
+
+/** Nights in the stay, from the card's own dates. */
+export function stayNights(fields: { checkInDate: string; checkOutDate: string }): number {
+  return Math.max(1, Math.round((Date.parse(fields.checkOutDate) - Date.parse(fields.checkInDate)) / 86_400_000));
 }
 
 function row(doc: PDFKit.PDFDocument, label: string, value: string) {
@@ -53,7 +61,10 @@ export function renderRegistrationCardPdf(card: RegistrationCard): Promise<Buffe
     row(doc, 'Check-in:', f.checkInDate);
     row(doc, 'Check-out:', f.checkOutDate);
     row(doc, 'Guests:', `${f.adults} adult(s)${f.children ? `, ${f.children} child(ren)` : ''}`);
-    row(doc, 'Rate:', `${f.currency} ${f.rate} / night`);
+    // The stay's total, said as one: it used to read "/ night", so a guest
+    // staying three nights signed a card claiming the room cost three times
+    // its price.
+    if (f.showRate !== false) row(doc, 'Rate:', `${f.currency} ${f.rate} for ${stayNights(f)} ${stayNights(f) === 1 ? 'night' : 'nights'}`);
     doc.moveDown(0.8);
 
     if (f.houseRules) {

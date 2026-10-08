@@ -46,12 +46,18 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
    * This is the ONLY sanctioned way to touch tenant-scoped tables.
    * Application-layer guards still filter by tenantId (defense in depth) —
    * RLS is the backstop, not the only gate (spec §1.2).
+   *
+   * A request's transaction gets Prisma's default 5 seconds. Work that walks
+   * a whole branch or tenant — the night audit's batches, a backup, a
+   * restore drill, re-tiering every loyalty member — passes its own
+   * `timeout`; without it the transaction is killed part-way and everything
+   * it did rolls back (a 300-stay night audit failed exactly like that).
    */
-  async withTenant<T>(tenantId: string, fn: (tx: TenantTx) => Promise<T>): Promise<T> {
+  async withTenant<T>(tenantId: string, fn: (tx: TenantTx) => Promise<T>, options?: { timeout?: number; maxWait?: number }): Promise<T> {
     return this.$transaction(async (tx) => {
       // set_config(..., true) = SET LOCAL — reverts at transaction end
       await tx.$executeRaw`SELECT set_config('app.tenant_id', ${tenantId}, true)`;
       return fn(tx);
-    });
+    }, options);
   }
 }

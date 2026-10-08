@@ -82,6 +82,15 @@ export class HousekeepingService {
       actorId: string | null;
     },
   ): Promise<HousekeepingTask> {
+    // A room given a cleaning task needs cleaning. One still marked clean or
+    // inspected — a guest slept in it (the night audit's stay-over task), the
+    // guest asked from the portal, a supervisor wants it redone — goes back to
+    // dirty: the ladder starts from dirty, so the housekeeper's Start was
+    // refused ("clean → cleaning") on every such task.
+    const room = await tx.room.findFirst({ where: { id: opts.roomId, deletedAt: null }, select: { cleanlinessStatus: true } });
+    if (room && (room.cleanlinessStatus === 'clean' || room.cleanlinessStatus === 'inspected')) {
+      await this.transitionRoomCleanliness(tx, tenantId, opts.roomId, 'dirty', opts.actorId);
+    }
     const task = await tx.housekeepingTask.create({
       data: {
         tenantId,
@@ -137,7 +146,8 @@ export class HousekeepingService {
   /** Staff Assignment (ref p29) — every housekeeper visible at this branch, reusing `UsersService.listStaff` rather than a second staff query. */
   async listHousekeepers(tenantId: string, branchId: string) {
     const staff = await this.usersService.listStaff(tenantId, branchId);
-    return staff.filter((s) => s.roles.some((r) => r.role === 'housekeeper' && (r.branchId === null || r.branchId === branchId)));
+    // Someone deactivated can't be given a room — they were offered, and the assignment then failed.
+    return staff.filter((s) => s.active && s.roles.some((r) => r.role === 'housekeeper' && (r.branchId === null || r.branchId === branchId)));
   }
 
   /** Supervisor distributes a room to a specific housekeeper — assignment alone doesn't start the clock; the housekeeper still calls `startTask`. */
@@ -235,6 +245,9 @@ export class HousekeepingService {
         throw new ConflictException({ code: ErrorCode.INVALID_STATUS_TRANSITION, message: 'This task is already done — raise the issue on a new task for the room' });
       }
       const note = `[${dto.areaOfIssue}] ${dto.description}`;
+      // A task given up part-way leaves the room as it is — not clean. It used
+      // to stay "cleaning" on the board until someone set it by hand.
+      if (task.status === 'in_progress') await this.transitionRoomCleanliness(tx, tenantId, task.roomId, 'dirty', actorId);
       const updated = await tx.housekeepingTask.update({
         where: { id: taskId },
         data: { status: 'skipped', notes: task.notes ? `${task.notes}\n${note}` : note },
@@ -245,7 +258,8 @@ export class HousekeepingService {
     });
   }
 
-  private async transitionRoomCleanliness(tx: TenantTx, tenantId: string, roomId: string, to: 'cleaning' | 'clean', actorId: string): Promise<void> {
+  /** `actorId` is null when no member of staff did it — the night audit, or a guest from the booking portal. */
+  private async transitionRoomCleanliness(tx: TenantTx, tenantId: string, roomId: string, to: 'cleaning' | 'clean' | 'dirty', actorId: string | null): Promise<void> {
     const room = await tx.room.findFirst({ where: { id: roomId, deletedAt: null } });
     if (!room) {
       throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Room not found' });
@@ -264,7 +278,7 @@ export class HousekeepingService {
     // this shows up in the room's own audit trail alongside every other
     // status change, not siloed under a housekeeping-only event.
     await tx.auditLog.create({
-      data: { tenantId, userId: actorId, action: 'room.status_changed', entityType: 'room', entityId: roomId, after: { cleanlinessStatus: to, reason: 'housekeeping_task' } },
+      data: { tenantId, branchId: room.branchId, userId: actorId, action: 'room.status_changed', entityType: 'room', entityId: roomId, after: { cleanlinessStatus: to, reason: 'housekeeping_task' } },
     });
   }
 

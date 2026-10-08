@@ -27,6 +27,7 @@ export class BackupsController {
   }
 
   @Post(':backupId/verify')
+  @Throttle({ default: { limit: 10, ttl: 3_600_000 } })
   @ApiOperation({ summary: 'Confirm a stored backup file is readable and has the expected tables/row counts' })
   verify(
     @CurrentTenant() tenantId: string,
@@ -36,6 +37,8 @@ export class BackupsController {
   }
 
   @Post(':backupId/restore-drill')
+  // Each drill builds and tears down a whole copy of the organisation.
+  @Throttle({ default: { limit: 3, ttl: 3_600_000 } })
   @ApiOperation({ summary: 'Restore this backup into a throwaway tenant, verify row counts, then delete it — proves the backup is actually restorable' })
   restoreDrill(@CurrentTenant() tenantId: string, @Param('backupId', ParseUUIDPipe) backupId: string): Promise<RestoreDrillResult> {
     return this.backupsService.restoreDrillOwnedBackup(tenantId, backupId);

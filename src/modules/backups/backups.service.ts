@@ -18,6 +18,8 @@ export interface BackupRecordSummary {
 }
 
 const RETENTION_DAYS = 30;
+/** A backup reads, and a restore drill writes, every table of the tenant in one transaction — minutes for a busy one, not the default 5 seconds. */
+const BACKUP_TX_TIMEOUT_MS = 10 * 60_000;
 
 type DynamicDelegate = {
   findMany: (args: Record<string, never>) => Promise<unknown[]>;
@@ -77,14 +79,20 @@ export class BackupsService {
     });
 
     try {
-      const snapshot = await this.prisma.withTenant(tenantId, async (tx) => {
-        const dynamicTx = tx as unknown as Record<string, DynamicDelegate>;
-        const result: Record<string, unknown[]> = {};
-        for (const { modelName, accessor } of this.tenantScopedModels) {
-          result[modelName] = await dynamicTx[accessor].findMany({});
-        }
-        return result;
-      });
+      const snapshot = await this.prisma.withTenant(
+        tenantId,
+        async (tx) => {
+          const dynamicTx = tx as unknown as Record<string, DynamicDelegate>;
+          const result: Record<string, unknown[]> = {};
+          for (const { modelName, accessor } of this.tenantScopedModels) {
+            result[modelName] = await dynamicTx[accessor].findMany({});
+          }
+          return result;
+        },
+        // Every table of a busy tenant, read in one transaction: far past the
+        // default 5 seconds, which used to fail the nightly backup outright.
+        { timeout: BACKUP_TX_TIMEOUT_MS },
+      );
 
       const json = JSON.stringify(snapshot, (_key, value: unknown) => (typeof value === 'bigint' ? value.toString() : value));
       // Encrypted at rest with the same key as ID photos and GDPR exports: a
@@ -363,18 +371,22 @@ export class BackupsService {
           if (modelCounts[meta.modelName].expected === 0) continue;
           modelCounts[meta.modelName].restored = await dynamicTx[meta.accessor].count({ where: { tenantId: drillTenant.id } });
         }
-      });
+      }, { timeout: BACKUP_TX_TIMEOUT_MS });
     } catch (err) {
       restoreError = err instanceof Error ? err.message : String(err);
     }
 
     try {
-      await this.prisma.withTenant(drillTenant.id, async (tx) => {
-        const dynamicTx = tx as unknown as Record<string, DynamicDelegate>;
-        for (const meta of [...this.restoreInsertOrder].reverse()) {
-          await dynamicTx[meta.accessor].deleteMany({ where: { tenantId: drillTenant.id } });
-        }
-      });
+      await this.prisma.withTenant(
+        drillTenant.id,
+        async (tx) => {
+          const dynamicTx = tx as unknown as Record<string, DynamicDelegate>;
+          for (const meta of [...this.restoreInsertOrder].reverse()) {
+            await dynamicTx[meta.accessor].deleteMany({ where: { tenantId: drillTenant.id } });
+          }
+        },
+        { timeout: BACKUP_TX_TIMEOUT_MS },
+      );
       await this.prisma.tenant.delete({ where: { id: drillTenant.id } });
     } catch (cleanupErr) {
       this.logger.error(

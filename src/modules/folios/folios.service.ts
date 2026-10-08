@@ -907,6 +907,24 @@ export class FoliosService {
     });
   }
 
+  /**
+   * A settled bill opened again for something found after it closed — the
+   * minibar after check-out, a charge on the wrong night. A supervisor's call
+   * (the route says so), with the reason in the audit trail. Posting to a
+   * settled bill has always said "reopen it first", and there was no way to.
+   */
+  async reopenFolio(tenantId: string, folioId: string, reason: string, actorId: string): Promise<Folio> {
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const folio = await this.findFolioOrThrow(tx, folioId);
+      const { count } = await tx.folio.updateMany({ where: { id: folioId, status: 'settled' }, data: { status: 'open', closedAt: null } });
+      if (count === 0) {
+        throw new ConflictException({ code: ErrorCode.CONFLICT, message: 'This bill is already open' });
+      }
+      await this.audit(tx, tenantId, folio.branchId, actorId, 'folio.reopened', folioId, { reason: reason.trim() });
+      return tx.folio.findUniqueOrThrow({ where: { id: folioId } });
+    });
+  }
+
   /** Settles a folio if it is fully paid, WITHOUT throwing when it isn't — the check-out path (which must never block). Returns whether it settled. */
   async settleIfFullyPaid(tx: TenantTx, folio: Folio, actorId: string | null, via: string): Promise<boolean> {
     const totals = await this.computeTotals(tx, folio.id);

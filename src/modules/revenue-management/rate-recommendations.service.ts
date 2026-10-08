@@ -18,6 +18,8 @@ export interface RateRecommendation {
   currentBaseRate: string;
   suggestedAdjustmentPct: number;
   suggestedRate: string;
+  /** The branch's ISO 4217 code — the two rates are in it. */
+  currency: string;
   rationale: string;
 }
 
@@ -42,7 +44,7 @@ export class RateRecommendationsService {
   ) {}
 
   async getRecommendations(tenantId: string, branchId: string, roomTypeId: string, horizonDays = 14): Promise<RateRecommendation[]> {
-    const roomType = await this.prisma.withTenant(tenantId, (tx) => tx.roomType.findFirst({ where: { id: roomTypeId, branchId } }));
+    const roomType = await this.prisma.withTenant(tenantId, (tx) => tx.roomType.findFirst({ where: { id: roomTypeId, branchId }, include: { branch: { select: { currency: true } } } }));
     if (!roomType) throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Room type not found at this branch' });
 
     const forecast = await this.demandForecastService.getForecast(tenantId, branchId, horizonDays);
@@ -68,6 +70,7 @@ export class RateRecommendationsService {
         currentBaseRate: baseRate.toFixed(2),
         suggestedAdjustmentPct: adjustmentPct,
         suggestedRate: suggestedRate.toFixed(2),
+        currency: roomType.branch.currency,
         rationale,
       };
     });
@@ -77,7 +80,6 @@ export class RateRecommendationsService {
     if (dto.adjustmentPct === 0) {
       throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: 'There is no adjustment to approve for this date' });
     }
-    const nextDay = new Date(new Date(`${dto.date}T00:00:00.000Z`).getTime() + 86_400_000).toISOString().slice(0, 10);
     // Approving the same night twice used to stack two seasonal plans on it;
     // the newer approval retires the earlier one for that night first.
     await this.prisma.withTenant(tenantId, (tx) =>
@@ -92,8 +94,10 @@ export class RateRecommendationsService {
       type: 'seasonal',
       amount: dto.adjustmentPct,
       adjustmentType: 'percentage',
+      // One night: a plan's `validTo` is the last night it prices, so ending
+      // it the day after priced the next night too.
       validFrom: dto.date,
-      validTo: nextDay,
+      validTo: dto.date,
     });
   }
 }

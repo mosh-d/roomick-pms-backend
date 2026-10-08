@@ -2,6 +2,7 @@ import { ConflictException, Injectable, Logger, NotFoundException } from '@nestj
 import { Cron, CronExpression, Interval } from '@nestjs/schedule';
 import { Prisma, WebhookDeliveryStatus } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
+import { EncryptionService } from '../../common/crypto/encryption.service';
 import { ErrorCode } from '../../common/errors/error-codes';
 import { PrismaService } from '../../prisma/prisma.service';
 import { TEST_EVENT_TYPE, WebhookPayload } from './webhook-events';
@@ -111,7 +112,13 @@ export class WebhookDispatcherService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly sender: WebhookSender,
+    private readonly encryption: EncryptionService,
   ) {}
+
+  /** The signing secret as generated: stored encrypted (`iv:tag:ciphertext`), or — from before that — as it was. */
+  private signingSecret(stored: string): string {
+    return stored.includes(':') ? this.encryption.decrypt(stored) : stored;
+  }
 
   /** Something was queued for this tenant — look within seconds rather than at the next sweep. */
   kick(tenantId: string): void {
@@ -215,7 +222,7 @@ export class WebhookDispatcherService {
       'User-Agent': 'Roomick-Webhooks/1.0',
       'Roomick-Event': claimed.eventType,
       'Roomick-Delivery': claimed.id,
-      'Roomick-Signature': signatureHeader(claimed.webhook.secret, body, Math.floor(Date.now() / 1000)),
+      'Roomick-Signature': signatureHeader(this.signingSecret(claimed.webhook.secret), body, Math.floor(Date.now() / 1000)),
     });
 
     const attempts = claimed.attempts + 1;

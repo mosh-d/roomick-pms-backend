@@ -38,6 +38,7 @@ function makeTx() {
         stay({ confirmationNumber: 'RES-3', status: 'cancelled', guest: { name: 'Chi Eze', email: null, phone: null }, confirmedRate: d('100000'), corporateAccount: null }),
       ]),
     },
+    guestProfile: { findMany: jest.fn().mockResolvedValue([]) },
     reportTemplate: {
       upsert: jest.fn().mockImplementation(({ create }: { create: Record<string, unknown> }) => Promise.resolve({ id: 'tpl-1', ...create })),
       findMany: jest.fn().mockResolvedValue([]),
@@ -108,6 +109,11 @@ describe('CustomReportsService', () => {
   it('the CSV has every row, quoted only where a cell needs it', async () => {
     const csv = await service.runCsv(TENANT_ID, BRANCH_ID, { ...base, fields: ['guestName', 'company'] });
     expect(csv.split('\n')).toEqual(['Guest,Company', 'Ada Obi,Dangote Group', 'Bayo Ade,', 'Chi Eze,']);
+  });
+
+  it('the guests list is this property’s guests only — not every guest of the group', async () => {
+    await service.run(TENANT_ID, BRANCH_ID, { ...base, dataset: 'guests', fields: ['name', 'email'] });
+    expect(tx.guestProfile.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ reservations: { some: { branchId: BRANCH_ID } } }) }));
   });
 
   it('refuses a range that ends before it starts', async () => {

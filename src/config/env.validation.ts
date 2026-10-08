@@ -20,6 +20,8 @@ export const envValidationSchema = Joi.object({
   SWAGGER_ENABLED: Joi.string().valid('true', 'false').optional(),
   // Optional — error tracking (src/instrument.ts) stays off entirely until this is set.
   SENTRY_DSN: Joi.string().uri().allow('').optional(),
+  // Optional — the share of requests traced, 0 to 1; a tenth in production when unset.
+  SENTRY_TRACES_SAMPLE_RATE: Joi.number().min(0).max(1).optional(),
   // Optional — defaults to <os temp dir>/roomick-backups (see LocalFilesystemBackupStorage).
   BACKUP_STORAGE_DIR: Joi.string().allow('').optional(),
   // Optional — defaults to <os temp dir>/roomick-documents (see LocalFilesystemDocumentStorage).

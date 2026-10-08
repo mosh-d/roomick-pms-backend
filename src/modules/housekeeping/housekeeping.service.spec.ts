@@ -92,6 +92,31 @@ describe('HousekeepingService', () => {
         expect.objectContaining({ data: expect.objectContaining({ roomId: ROOM_ID, triggerEvent: 'manual', notes: 'Guest complaint' }) }),
       );
     });
+
+    it.each(['clean', 'inspected'])('puts a room still marked %s back to dirty, so the task can be started', async (status) => {
+      tx.room.findFirst.mockResolvedValue({ id: ROOM_ID, branchId: BRANCH_ID, cleanlinessStatus: status, deletedAt: null });
+      await service.createTask(TENANT_ID, BRANCH_ID, { roomId: ROOM_ID }, MANAGER_ID);
+      expect(tx.room.update).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: ROOM_ID }, data: expect.objectContaining({ cleanlinessStatus: 'dirty', statusChangedBy: MANAGER_ID }) }),
+      );
+      expect(tx.auditLog.create).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ action: 'room.status_changed', entityId: ROOM_ID, branchId: BRANCH_ID }) }),
+      );
+    });
+
+    it.each(['dirty', 'cleaning'])('leaves a room that is %s as it is', async (status) => {
+      tx.room.findFirst.mockResolvedValue({ id: ROOM_ID, branchId: BRANCH_ID, cleanlinessStatus: status, deletedAt: null });
+      await service.createTask(TENANT_ID, BRANCH_ID, { roomId: ROOM_ID }, MANAGER_ID);
+      expect(tx.room.update).not.toHaveBeenCalled();
+    });
+
+    it('a stay-over task the night audit raises marks the occupied room dirty, by nobody', async () => {
+      tx.housekeepingTask.findFirst.mockResolvedValue(null);
+      tx.room.findFirst.mockResolvedValue({ id: ROOM_ID, branchId: BRANCH_ID, cleanlinessStatus: 'clean', deletedAt: null });
+      await expect(service.ensureStayoverTaskInTx(tx as never, TENANT_ID, BRANCH_ID, ROOM_ID, 'res-1', new Date('2026-10-08T00:00:00.000Z'))).resolves.toBe(true);
+      expect(tx.room.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ cleanlinessStatus: 'dirty', statusChangedBy: null }) }));
+      expect(tx.housekeepingTask.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ triggerEvent: 'stayover' }) }));
+    });
   });
 
   describe('startTask — self-claim + drives the room ladder', () => {
@@ -179,6 +204,13 @@ describe('HousekeepingService', () => {
       // above already proves didn't happen.
     });
 
+    it('a task given up part-way puts its room back to dirty — not left "cleaning" on the board', async () => {
+      tx.housekeepingTask.findFirst.mockResolvedValue(task({ status: 'in_progress' }));
+      tx.room.findFirst.mockResolvedValue({ id: 'room-1', cleanlinessStatus: 'cleaning' });
+      await service.reportIssue(TENANT_ID, TASK_ID, { areaOfIssue: 'Bathroom', description: 'Leaking tap' }, HOUSEKEEPER_ID);
+      expect(tx.room.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ cleanlinessStatus: 'dirty' }) }));
+    });
+
     it('appends to existing notes rather than overwriting them', async () => {
       tx.housekeepingTask.findFirst.mockResolvedValue(task({ notes: 'Earlier note' }));
       await service.reportIssue(TENANT_ID, TASK_ID, { areaOfIssue: 'Room', description: 'AC noisy' }, HOUSEKEEPER_ID);
@@ -191,10 +223,11 @@ describe('HousekeepingService', () => {
   describe('listHousekeepers', () => {
     it('filters listStaff down to the housekeeper role at this branch', async () => {
       usersService.listStaff.mockResolvedValue([
-        { id: 'a', roles: [{ branchId: BRANCH_ID, role: 'housekeeper', roleId: 'r1' }] },
-        { id: 'b', roles: [{ branchId: BRANCH_ID, role: 'front_desk', roleId: 'r2' }] },
-        { id: 'c', roles: [{ branchId: null, role: 'housekeeper', roleId: 'r3' }] },
-        { id: 'd', roles: [{ branchId: 'other-branch', role: 'housekeeper', roleId: 'r4' }] },
+        { id: 'a', active: true, roles: [{ branchId: BRANCH_ID, role: 'housekeeper', roleId: 'r1' }] },
+        { id: 'b', active: true, roles: [{ branchId: BRANCH_ID, role: 'front_desk', roleId: 'r2' }] },
+        { id: 'c', active: true, roles: [{ branchId: null, role: 'housekeeper', roleId: 'r3' }] },
+        { id: 'd', active: true, roles: [{ branchId: 'other-branch', role: 'housekeeper', roleId: 'r4' }] },
+        { id: 'e', active: false, roles: [{ branchId: BRANCH_ID, role: 'housekeeper', roleId: 'r5' }] }, // deactivated
       ]);
       const result = await service.listHousekeepers(TENANT_ID, BRANCH_ID);
       expect(result.map((r) => r.id)).toEqual(['a', 'c']);

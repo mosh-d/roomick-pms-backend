@@ -15,7 +15,7 @@ describe('RateRecommendationsService', () => {
   let rateResolverService: { createRatePlan: jest.Mock };
 
   beforeEach(async () => {
-    prisma = { withTenant: jest.fn((_t: string, fn: (x: unknown) => unknown) => fn({ roomType: { findFirst: jest.fn().mockResolvedValue({ id: ROOM_TYPE_ID, baseRate: 100 }) }, ratePlan: { updateMany: jest.fn().mockResolvedValue({ count: 0 }) } })) };
+    prisma = { withTenant: jest.fn((_t: string, fn: (x: unknown) => unknown) => fn({ roomType: { findFirst: jest.fn().mockResolvedValue({ id: ROOM_TYPE_ID, baseRate: 100, branch: { currency: 'NGN' } }) }, ratePlan: { updateMany: jest.fn().mockResolvedValue({ count: 0 }) } })) };
     demandForecastService = { getForecast: jest.fn() };
     rateResolverService = { createRatePlan: jest.fn().mockResolvedValue({ id: 'plan-1' }) };
     const moduleRef = await Test.createTestingModule({
@@ -82,7 +82,7 @@ describe('RateRecommendationsService', () => {
         amount: 15,
         adjustmentType: 'percentage',
         validFrom: '2026-09-15',
-        validTo: '2026-09-16',
+        validTo: '2026-09-15', // the last night it prices — ending it on the 16th priced the 16th as well
       });
     });
 

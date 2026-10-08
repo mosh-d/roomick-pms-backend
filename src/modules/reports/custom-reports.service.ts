@@ -327,8 +327,11 @@ export class CustomReportsService {
         }));
       }
       case 'guests': {
+        // This property's guests — anyone with a booking here. It listed every
+        // guest of every property in the group, with their contact details,
+        // for any manager or accountant at any one of them.
         const rows = await tx.guestProfile.findMany({
-          where: { deletedAt: null, createdAt: { gte: branchDayStart(fromStr, timezone), lt: branchDayStart(toStr, timezone) } },
+          where: { deletedAt: null, createdAt: { gte: branchDayStart(fromStr, timezone), lt: branchDayStart(toStr, timezone) }, reservations: { some: { branchId } } },
           select: { name: true, email: true, phone: true, nationality: true, vipLevel: true, loyaltyTier: true, loyaltyPoints: true, createdAt: true },
           take,
         });

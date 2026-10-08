@@ -8,6 +8,7 @@ import { assertRoleAtBranch } from '../../common/utils/branch-roles';
 import { PrismaService, TenantTx } from '../../prisma/prisma.service';
 import { ReservationsService } from '../reservations/reservations.service';
 import { BookIntoGroupBlockDto, CreateGroupBlockDto, RoomingListDto } from './dto/sales-events.dto';
+import { outsideGroupBlock } from './group-block-window';
 
 const PICKUP_STATUSES = ['confirmed', 'checked_in', 'checked_out'] as const;
 const MAX_BLOCK_NIGHTS = 92;
@@ -29,6 +30,8 @@ export interface GroupBlockSummary {
   roomTypeName: string;
   blockSize: number;
   blockRate: string;
+  /** The branch's ISO 4217 code, with the rate — as on every money response. */
+  currency: string;
   arrivalDate: Date | null;
   departureDate: Date | null;
   cutoffDate: Date;
@@ -47,9 +50,6 @@ export interface RoomingListResult {
   created: Array<{ row: number; guestName: string; confirmationNumber: string; reservationId: string }>;
   failed: Array<{ row: number; guestName: string; message: string }>;
 }
-
-/** How far outside a block's own nights a group booking may reach — the early-arrival and late-departure nights a group contract covers. */
-const SHOULDER_NIGHTS = 2;
 
 function invalid(message: string): BadRequestException {
   return new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message });
@@ -109,7 +109,7 @@ export class GroupBlocksService {
     if (cutoff > arrival) throw invalid('The cut-off date must be on or before the arrival date');
 
     return this.prisma.withTenant(tenantId, async (tx) => {
-      const today = await this.branchToday(tx, branchId);
+      const { today, currency } = await this.branchDay(tx, branchId);
       if (cutoff < today) throw invalid('That cut-off date has already passed');
       const roomType = await tx.roomType.findFirst({ where: { id: dto.roomTypeId, branchId, deletedAt: null } });
       if (!roomType) {
@@ -153,7 +153,7 @@ export class GroupBlocksService {
         departureDate: dto.departureDate,
         cutoffDate: dto.cutoffDate,
       });
-      return this.toSummary(block, 0, today);
+      return this.toSummary(block, 0, today, currency);
     });
   }
 
@@ -166,14 +166,14 @@ export class GroupBlocksService {
       });
       if (blocks.length === 0) return [];
 
-      const today = await this.branchToday(tx, branchId);
+      const { today, currency } = await this.branchDay(tx, branchId);
       const pickups = await tx.reservation.groupBy({
         by: ['groupBlockId'],
         where: { groupBlockId: { in: blocks.map((b) => b.id) }, deletedAt: null, status: { in: [...PICKUP_STATUSES] } },
         _count: { _all: true },
       });
       const pickupByBlock = new Map(pickups.map((p) => [p.groupBlockId, p._count._all]));
-      return blocks.map((b) => this.toSummary(b, pickupByBlock.get(b.id) ?? 0, today));
+      return blocks.map((b) => this.toSummary(b, pickupByBlock.get(b.id) ?? 0, today, currency));
     });
   }
 
@@ -193,7 +193,8 @@ export class GroupBlocksService {
       });
       await this.audit(tx, tenantId, block.branchId, actor.sub, 'group_block.released', blockId, { name: block.name });
       const pickup = await this.pickupOf(tx, blockId);
-      return this.toSummary(updated, pickup, await this.branchToday(tx, block.branchId));
+      const { today, currency } = await this.branchDay(tx, block.branchId);
+      return this.toSummary(updated, pickup, today, currency);
     });
   }
 
@@ -239,24 +240,9 @@ export class GroupBlocksService {
    * left. A row the booking itself refuses (a room type that sleeps two, say)
    * is reported with its reason and the rest carry on.
    */
-  /**
-   * A block books its own nights only. Its rate was negotiated for those
-   * dates; a booking outside them took a room off the block's allotment while
-   * the guest paid the group rate for a weekend months away. A block made
-   * before stay dates existed has none to check against.
-   */
+  /** See `outsideGroupBlock` — the same rule a group booking's later date changes meet. */
   private outsideBlock(block: { arrivalDate: Date | null; departureDate: Date | null }, checkInDate: string, checkOutDate: string): string | null {
-    const arrival = isoDate(block.arrivalDate);
-    const departure = isoDate(block.departureDate);
-    if (!arrival || !departure) return null;
-    // A group contract usually covers a night or two either side of the event
-    // for early arrivals and late departures — the shoulder nights. Anything
-    // beyond that is not the group's stay.
-    const shift = (day: string, nights: number) => new Date(new Date(`${day}T00:00:00.000Z`).getTime() + nights * 86_400_000).toISOString().slice(0, 10);
-    if (checkInDate < shift(arrival, -SHOULDER_NIGHTS) || checkOutDate > shift(departure, SHOULDER_NIGHTS)) {
-      return `the stay must fall within the block's dates (${arrival} to ${departure}, give or take ${SHOULDER_NIGHTS} shoulder nights) — book other dates as an ordinary reservation`;
-    }
-    return null;
+    return outsideGroupBlock(block, checkInDate, checkOutDate);
   }
 
   async importRoomingList(tenantId: string, blockId: string, dto: RoomingListDto, actor: JwtPayload): Promise<RoomingListResult> {
@@ -334,17 +320,18 @@ export class GroupBlocksService {
 
   // -------------------------------------------------------------------------
 
-  private async branchToday(tx: TenantTx, branchId: string): Promise<Date> {
-    const branch = await tx.branch.findFirst({ where: { id: branchId, deletedAt: null }, select: { timezone: true } });
+  /** Today at the branch, and the currency its rates are in. */
+  private async branchDay(tx: TenantTx, branchId: string): Promise<{ today: Date; currency: string }> {
+    const branch = await tx.branch.findFirst({ where: { id: branchId, deletedAt: null }, select: { timezone: true, currency: true } });
     if (!branch) throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Branch not found' });
-    return toBranchDate(todayInTimezone(branch.timezone));
+    return { today: toBranchDate(todayInTimezone(branch.timezone)), currency: branch.currency };
   }
 
   private pickupOf(tx: TenantTx, blockId: string): Promise<number> {
     return tx.reservation.count({ where: { groupBlockId: blockId, deletedAt: null, status: { in: [...PICKUP_STATUSES] } } });
   }
 
-  private toSummary(block: GroupBlock & { roomType: { name: string } }, pickup: number, today: Date): GroupBlockSummary {
+  private toSummary(block: GroupBlock & { roomType: { name: string } }, pickup: number, today: Date, currency: string): GroupBlockSummary {
     let holdState: GroupBlockHoldState;
     if (block.status !== 'active') holdState = 'released';
     else if (!block.arrivalDate || !block.departureDate) holdState = 'none';
@@ -357,6 +344,7 @@ export class GroupBlocksService {
       roomTypeName: block.roomType.name,
       blockSize: block.blockSize,
       blockRate: block.blockRate.toFixed(2),
+      currency,
       arrivalDate: block.arrivalDate,
       departureDate: block.departureDate,
       cutoffDate: block.cutoffDate,

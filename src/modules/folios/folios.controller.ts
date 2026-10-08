@@ -4,7 +4,7 @@ import { CurrentTenant, CurrentUser } from '../../common/decorators';
 import { Permission } from '../../common/decorators/permission.decorator';
 import { ALL_SYSTEM_ROLES, Roles, SystemRole } from '../../common/decorators/roles.decorator';
 import { JwtPayload } from '../../common/types/request-context';
-import { CorrectLineItemDto, CreateFolioDto, ListTransfersQueryDto, PostChargeDto, RecordPaymentDto, SplitFolioDto } from './dto/folio.dto';
+import { CorrectLineItemDto, CreateFolioDto, ListTransfersQueryDto, PostChargeDto, RecordPaymentDto, SplitFolioDto, ReopenFolioDto } from './dto/folio.dto';
 import { ListFoliosQueryDto } from './dto/list-folios-query.dto';
 import { FoliosService } from './folios.service';
 import { BranchOf } from '../../common/decorators/branch-of.decorator';
@@ -100,6 +100,20 @@ export class FoliosController {
     @Param('folioId', ParseUUIDPipe) folioId: string,
   ): ReturnType<FoliosService['closeFolio']> {
     return this.foliosService.closeFolio(tenantId, folioId, user.sub);
+  }
+
+  @Post('folios/:folioId/reopen')
+  @BranchOf('folio', 'folioId')
+  @Permission('folios', 'update')
+  @Roles(SystemRole.Owner, SystemRole.Manager)
+  @ApiOperation({ summary: 'Open a settled bill again, with a reason — for a charge found after it closed' })
+  reopenFolio(
+    @CurrentTenant() tenantId: string,
+    @CurrentUser() user: JwtPayload,
+    @Param('folioId', ParseUUIDPipe) folioId: string,
+    @Body() dto: ReopenFolioDto,
+  ): ReturnType<FoliosService['reopenFolio']> {
+    return this.foliosService.reopenFolio(tenantId, folioId, dto.reason, user.sub);
   }
 
   @Post('reservations/:reservationId/folios')

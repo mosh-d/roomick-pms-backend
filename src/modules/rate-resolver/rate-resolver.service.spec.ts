@@ -37,6 +37,7 @@ function makeTx() {
   return {
     ratePlan: { findMany: jest.fn().mockResolvedValue([]), findFirst: jest.fn(), create: jest.fn().mockImplementation(({ data }: { data: Record<string, unknown> }) => Promise.resolve({ id: 'new-plan', ...data })), update: jest.fn() },
     roomType: { findFirst: jest.fn().mockResolvedValue(ROOM_TYPE) },
+    reservation: { findFirst: jest.fn() },
     branch: { findFirst: jest.fn().mockResolvedValue({ policies: null }) },
     corporateAccount: { findFirst: jest.fn().mockResolvedValue(null) },
     rateAuditLog: {
@@ -139,12 +140,21 @@ describe('RateResolverService', () => {
      * exactly what crashed this endpoint with a real 500 before this
      * fix (found live, not by inspection).
      */
+    const manager = { sub: 'm-1', tenantId: TENANT_ID, email: 'm@x.t', roles: [{ branchId: BRANCH_ID, role: 'manager' }], tokenType: 'access' as const };
+
     it('stringifies the BigInt id so the response can actually be JSON-serialized', async () => {
+      tx.reservation.findFirst.mockResolvedValue({ branchId: BRANCH_ID });
       tx.rateAuditLog.findMany.mockResolvedValue([{ id: 123n, reservationId: 'res-1', tenantId: TENANT_ID }]);
-      const result = await service.getAuditTrail(TENANT_ID, 'res-1');
+      const result = await service.getAuditTrail(TENANT_ID, 'res-1', manager);
       expect(result[0].id).toBe('123');
       expect(typeof result[0].id).toBe('string');
       expect(() => JSON.stringify(result)).not.toThrow();
+    });
+
+    it('only for a manager or accountant at the stay’s own property', async () => {
+      tx.reservation.findFirst.mockResolvedValue({ branchId: 'another-branch' });
+      await expect(service.getAuditTrail(TENANT_ID, 'res-1', manager)).rejects.toThrow(/Insufficient role/);
+      expect(tx.rateAuditLog.findMany).not.toHaveBeenCalled();
     });
   });
 
@@ -319,6 +329,43 @@ describe('RateResolverService', () => {
     it('404s when roomTypeId does not belong to this branch', async () => {
       tx.roomType.findFirst.mockResolvedValueOnce(null);
       await expect(service.createRatePlan(TENANT_ID, BRANCH_ID, { ...base, roomTypeId: 'nope' })).rejects.toThrow(NotFoundException);
+    });
+
+    it('refuses a promotional or negotiated price of zero or less — it is the nightly rate itself, not a discount', async () => {
+      await expect(service.createRatePlan(TENANT_ID, BRANCH_ID, { name: 'Neg', type: 'promotional', amount: -100, promoCode: 'NEG' })).rejects.toThrow(/has to be more than zero/);
+      await expect(service.createRatePlan(TENANT_ID, BRANCH_ID, { name: 'Zero', type: 'negotiated', amount: 0 })).rejects.toThrow(/has to be more than zero/);
+      expect(tx.ratePlan.create).not.toHaveBeenCalled();
+    });
+
+    it('refuses a percentage discount of 100% or more', async () => {
+      await expect(service.createRatePlan(TENANT_ID, BRANCH_ID, { name: 'Free', type: 'seasonal', amount: -100, adjustmentType: 'percentage' })).rejects.toThrow(/makes the night free/);
+    });
+
+    it('refuses a plan that ends before it starts — a clear 400, not the database constraint', async () => {
+      await expect(service.createRatePlan(TENANT_ID, BRANCH_ID, { ...base, validFrom: '2026-10-18', validTo: '2026-10-13' })).rejects.toThrow(/ends before it starts/);
+    });
+  });
+
+  describe('resolveStay — limits', () => {
+    it('refuses a night the plans take to zero or below, naming the night', async () => {
+      tx.ratePlan.findMany.mockResolvedValue([plan({ adjustmentType: 'fixed', amount: new Prisma.Decimal('-150') })]); // 100 base - 150
+      await expect(
+        service.resolveStay(tx as never, TENANT_ID, BRANCH_ID, ROOM_TYPE as never, new Date('2026-09-01'), new Date('2026-09-03'), {}, { triggeredBy: 'booking_create' }),
+      ).rejects.toThrow(/the rate for 2026-09-01 comes to -50.00/);
+      expect(tx.rateAuditLog.create).not.toHaveBeenCalled();
+    });
+
+    it('refuses a stay longer than a booking can be, before working out a single night', async () => {
+      await expect(
+        service.resolveStay(tx as never, TENANT_ID, BRANCH_ID, ROOM_TYPE as never, new Date('2026-09-01'), new Date('2030-09-01'), {}, { triggeredBy: 'booking_create' }),
+      ).rejects.toThrow(/at most 92 nights/);
+      expect(tx.ratePlan.findMany).not.toHaveBeenCalled();
+      expect(tx.rateAuditLog.create).not.toHaveBeenCalled();
+    });
+
+    it('the longest stay a booking allows is fine', async () => {
+      const result = await service.resolveStay(tx as never, TENANT_ID, BRANCH_ID, ROOM_TYPE as never, new Date('2026-09-01'), new Date('2026-12-02'), {}, { triggeredBy: 'booking_create', persistAudit: false });
+      expect(result.perNight).toHaveLength(92);
     });
   });
 

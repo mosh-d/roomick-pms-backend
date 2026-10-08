@@ -6,7 +6,10 @@ const USER_ID = '22222222-2222-4222-8222-222222222222';
 const person = { sub: USER_ID, tenantId: TENANT_ID };
 
 function setup() {
-  const tx = { user: { findFirst: jest.fn().mockResolvedValue({ id: USER_ID }) } };
+  const tx = {
+    user: { findFirst: jest.fn().mockResolvedValue({ id: USER_ID }) },
+    userBranchRole: { findMany: jest.fn().mockResolvedValue([{ branchId: null, role: { name: 'manager' } }]) },
+  };
   const prisma = {
     withTenant: jest.fn((_t: string, fn: (x: unknown) => unknown) => fn(tx)),
     tenant: { findUnique: jest.fn().mockResolvedValue({ status: 'active' }) },
@@ -26,6 +29,16 @@ describe('AccountStatusService', () => {
 
     expect(await service.isOpen(person, t0 + ACCOUNT_STATUS_TTL_MS)).toBe(true);
     expect(tx.user.findFirst).toHaveBeenCalledTimes(2);
+  });
+
+  it('answers with the roles held now — the token only knows the ones it was issued with', async () => {
+    const { tx, service } = setup();
+    expect(await service.current(person, 1_000)).toEqual({ state: 'open', roles: [{ branchId: null, role: 'manager' }] });
+    // Demoted: remembered until the answer lapses, or at once once forgotten.
+    tx.userBranchRole.findMany.mockResolvedValue([{ branchId: 'branch-1', role: { name: 'front_desk' } }]);
+    expect((await service.current(person, 2_000)).roles).toEqual([{ branchId: null, role: 'manager' }]);
+    service.forget(USER_ID);
+    expect((await service.current(person, 3_000)).roles).toEqual([{ branchId: 'branch-1', role: 'front_desk' }]);
   });
 
   it('refuses an account that is deactivated or gone, and keeps asking', async () => {

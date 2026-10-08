@@ -1,12 +1,14 @@
 import { ApiProperty, ApiPropertyOptional, PartialType } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
+  ArrayMaxSize,
   IsArray,
   IsInt,
   IsNumber,
   IsOptional,
   IsPositive,
   IsString,
+  IsUrl,
   Max,
   MaxLength,
   Min,
@@ -45,6 +47,7 @@ export class CreateRoomTypeDto {
   @IsNumber({ maxDecimalPlaces: 2 })
   @IsPositive()
   @Type(() => Number)
+  @Max(1_000_000_000)
   baseRate!: number;
 
   @ApiProperty({ type: CapacityDto })
@@ -70,10 +73,12 @@ export class CreateRoomTypeDto {
   @IsString({ each: true })
   amenities?: string[];
 
-  @ApiPropertyOptional({ type: [String] })
+  @ApiPropertyOptional({ type: [String], description: 'https addresses — shown to guests on the public booking page' })
   @IsOptional()
   @IsArray()
-  @IsString({ each: true })
+  @ArrayMaxSize(20)
+  @IsUrl({ protocols: ['https'], require_protocol: true }, { each: true, message: 'Each photo must be an https:// address' })
+  @MaxLength(2048, { each: true })
   photoUrls?: string[];
 
   @ApiPropertyOptional({ example: 1 })

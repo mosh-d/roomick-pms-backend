@@ -1,4 +1,4 @@
-import { ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma, RegistrationCard } from '@prisma/client';
 import { EncryptionService } from '../../common/crypto/encryption.service';
 import { DOCUMENT_STORAGE_ADAPTER, DocumentStorageAdapter } from '../../common/documents/document-storage.interface';
@@ -60,7 +60,7 @@ export class RegistrationCardsService {
     const existing = await tx.registrationCard.findFirst({ where: { reservationId: reservation.id } });
     if (existing) return existing;
 
-    const template = (reservation.branch.regCardTemplate ?? {}) as { houseRules?: string; logoUrl?: string; language?: string };
+    const template = (reservation.branch.regCardTemplate ?? {}) as { houseRules?: string; logoUrl?: string; language?: string; showRate?: boolean };
     const fields = {
       guestName: reservation.guest.name,
       guestEmail: reservation.guest.email,
@@ -73,6 +73,8 @@ export class RegistrationCardsService {
       children: reservation.children,
       rate: reservation.confirmedRate.toFixed(2),
       currency: reservation.branch.currency,
+      // "Show Rate on Card" was saved and never read — every card printed the price.
+      showRate: template.showRate !== false,
       confirmationNumber: reservation.confirmationNumber,
       houseRules: template.houseRules ?? null,
       logoUrl: template.logoUrl ?? null,
@@ -128,6 +130,14 @@ export class RegistrationCardsService {
    * mistake needs a fresh card, not a silently overwritten signature.
    */
   async signCard(tenantId: string, cardId: string, dto: SignRegistrationCardDto, actorId: string): Promise<RegistrationCard> {
+    // The bytes, not just the label: base64 of anything passed the format
+    // check, signed the card for good, and then every PDF of it failed.
+    const head = Buffer.from(dto.signatureData.slice(dto.signatureData.indexOf(',') + 1, dto.signatureData.indexOf(',') + 17), 'base64');
+    const isPng = head.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+    const isJpeg = head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff;
+    if (!isPng && !isJpeg) {
+      throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: 'The signature didn’t come through as a picture — clear the box and sign again' });
+    }
     const signed = await this.prisma.withTenant(tenantId, async (tx) => {
       const card = await tx.registrationCard.findFirst({ where: { id: cardId } });
       if (!card) {

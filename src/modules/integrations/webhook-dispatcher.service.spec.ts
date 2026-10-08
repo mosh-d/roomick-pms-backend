@@ -1,5 +1,6 @@
 import { createHmac } from 'node:crypto';
 import { PrismaService } from '../../prisma/prisma.service';
+import { EncryptionService } from '../../common/crypto/encryption.service';
 import { MAX_ATTEMPTS, WebhookDispatcherService, WebhookSender } from './webhook-dispatcher.service';
 
 const TENANT_ID = '11111111-1111-4111-8111-111111111111';
@@ -79,6 +80,8 @@ function store(rows: Row[]) {
 
 describe('WebhookDispatcherService', () => {
   const sent: Array<{ url: string; body: string; headers: Record<string, string> }> = [];
+  process.env.ENCRYPTION_KEY ??= '0'.repeat(64);
+  const encryption = new EncryptionService();
   let answer: { ok: boolean; status: number | null; error: string | null };
   const sender = {
     send: jest.fn((url: string, body: string, headers: Record<string, string>) => {
@@ -95,7 +98,7 @@ describe('WebhookDispatcherService', () => {
   it('sends what is due, signed with the webhook’s secret, and records it delivered', async () => {
     const rows = [delivery()];
     const { prisma } = store(rows);
-    const summary = await new WebhookDispatcherService(prisma, sender).dispatchForTenant(TENANT_ID);
+    const summary = await new WebhookDispatcherService(prisma, sender, encryption).dispatchForTenant(TENANT_ID);
 
     expect(summary).toEqual({ delivered: 1, retrying: 0, failed: 0 });
     expect(rows[0]).toMatchObject({ status: 'delivered', attempts: 1, responseStatus: 200, lockedUntil: null, lastError: null });
@@ -107,12 +110,21 @@ describe('WebhookDispatcherService', () => {
     expect(v1).toBe(createHmac('sha256', 'whsec').update(`${t}.${body}`).digest('hex'));
   });
 
+  it('signs with the secret as generated when it is stored encrypted', async () => {
+    const rows = [delivery({ webhook: { url: 'https://partner.example/hook', secret: encryption.encrypt('whsec'), isActive: true } })];
+    const { prisma } = store(rows);
+    await new WebhookDispatcherService(prisma, sender, encryption).dispatchForTenant(TENANT_ID);
+    const [{ body, headers }] = sent;
+    const [, t, v1] = /^t=(\d+),v1=([0-9a-f]{64})$/.exec(headers['Roomick-Signature'])!.slice(0);
+    expect(v1).toBe(createHmac('sha256', 'whsec').update(`${t}.${body}`).digest('hex'));
+  });
+
   it('a failure is retried later — a minute after the first try', async () => {
     answer = { ok: false, status: 503, error: 'HTTP 503' };
     const rows = [delivery()];
     const { prisma } = store(rows);
     const before = Date.now();
-    const summary = await new WebhookDispatcherService(prisma, sender).dispatchForTenant(TENANT_ID);
+    const summary = await new WebhookDispatcherService(prisma, sender, encryption).dispatchForTenant(TENANT_ID);
 
     expect(summary).toEqual({ delivered: 0, retrying: 1, failed: 0 });
     expect(rows[0]).toMatchObject({ status: 'pending', attempts: 1, responseStatus: 503, lastError: 'HTTP 503' });
@@ -124,14 +136,14 @@ describe('WebhookDispatcherService', () => {
     answer = { ok: false, status: null, error: 'Connection refused' };
     const rows = [delivery({ attempts: MAX_ATTEMPTS - 1 })];
     const { prisma } = store(rows);
-    await new WebhookDispatcherService(prisma, sender).dispatchForTenant(TENANT_ID);
+    await new WebhookDispatcherService(prisma, sender, encryption).dispatchForTenant(TENANT_ID);
     expect(rows[0]).toMatchObject({ status: 'failed', attempts: MAX_ATTEMPTS, lastError: 'Connection refused' });
   });
 
   it('never sends one that another server holds', async () => {
     const rows = [delivery({ lockedUntil: new Date(Date.now() + 30_000) })];
     const { prisma } = store(rows);
-    const result = await new WebhookDispatcherService(prisma, sender).attempt(TENANT_ID, 'dlv-1');
+    const result = await new WebhookDispatcherService(prisma, sender, encryption).attempt(TENANT_ID, 'dlv-1');
     expect(result).toBeNull();
     expect(sent).toHaveLength(0);
   });
@@ -139,7 +151,7 @@ describe('WebhookDispatcherService', () => {
   it('a switched-off webhook gets nothing — its deliveries fail without a try', async () => {
     const rows = [delivery({ webhook: { url: 'https://partner.example/hook', secret: 'whsec', isActive: false } })];
     const { prisma } = store(rows);
-    await new WebhookDispatcherService(prisma, sender).dispatchForTenant(TENANT_ID);
+    await new WebhookDispatcherService(prisma, sender, encryption).dispatchForTenant(TENANT_ID);
     expect(sent).toHaveLength(0);
     expect(rows[0]).toMatchObject({ status: 'failed', attempts: 0, lastError: 'The webhook was switched off before this was sent' });
   });
@@ -148,7 +160,7 @@ describe('WebhookDispatcherService', () => {
     answer = { ok: false, status: 404, error: 'HTTP 404' };
     const rows: Row[] = [];
     const { prisma } = store(rows);
-    const result = await new WebhookDispatcherService(prisma, sender).sendTest(TENANT_ID, 'wh-1');
+    const result = await new WebhookDispatcherService(prisma, sender, encryption).sendTest(TENANT_ID, 'wh-1');
     expect(result).toMatchObject({ eventType: 'webhook.test', status: 'failed', attempts: 1, responseStatus: 404, nextAttemptAt: null });
     expect(JSON.parse(sent[0].body)).toMatchObject({ type: 'webhook.test', tenantId: TENANT_ID });
   });
@@ -156,14 +168,14 @@ describe('WebhookDispatcherService', () => {
   it('“Retry” tries a given-up delivery once more, now', async () => {
     const rows = [delivery({ status: 'failed', attempts: MAX_ATTEMPTS, lastError: 'HTTP 500', nextAttemptAt: new Date(Date.now() + 3_600_000) })];
     const { prisma } = store(rows);
-    const result = await new WebhookDispatcherService(prisma, sender).retryNow(TENANT_ID, 'dlv-1');
+    const result = await new WebhookDispatcherService(prisma, sender, encryption).retryNow(TENANT_ID, 'dlv-1');
     expect(result).toMatchObject({ status: 'delivered', attempts: MAX_ATTEMPTS + 1 });
   });
 
   it('won’t retry one that was delivered', async () => {
     const rows = [delivery({ status: 'delivered' })];
     const { prisma } = store(rows);
-    await expect(new WebhookDispatcherService(prisma, sender).retryNow(TENANT_ID, 'dlv-1')).rejects.toMatchObject({ status: 409 });
+    await expect(new WebhookDispatcherService(prisma, sender, encryption).retryNow(TENANT_ID, 'dlv-1')).rejects.toMatchObject({ status: 409 });
     expect(sent).toHaveLength(0);
   });
 });

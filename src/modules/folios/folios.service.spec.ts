@@ -60,7 +60,14 @@ function makeTx() {
       return where.folioId.in.map((folioId) => ({ folioId, _sum: { amount: sum } }));
     });
   return {
-    folio: { findFirst: jest.fn(), findMany: jest.fn().mockResolvedValue([]), create: jest.fn().mockResolvedValue(folio()), update: jest.fn().mockResolvedValue(folio({ status: 'settled' })) },
+    folio: {
+      findFirst: jest.fn(),
+      findMany: jest.fn().mockResolvedValue([]),
+      create: jest.fn().mockResolvedValue(folio()),
+      update: jest.fn().mockResolvedValue(folio({ status: 'settled' })),
+      updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      findUniqueOrThrow: jest.fn().mockResolvedValue(folio({ status: 'open' })),
+    },
     lineItem: {
       findFirst: jest.fn().mockResolvedValue(null),
       findMany: lineItemFindMany,
@@ -705,6 +712,23 @@ describe('FoliosService', () => {
       const [row] = await service.listFolios(TENANT_ID, BRANCH_ID, 'refund_due');
       expect(row.guestStatus).toBe('refund_due');
       expect(row.balanceDue.toFixed(2)).toBe('-50.00');
+    });
+  });
+
+  describe('reopenFolio — a charge found after the bill closed', () => {
+    beforeEach(() => tx.folio.findFirst.mockResolvedValue(folio({ status: 'settled' })));
+
+    it('opens a settled bill again, only while it is still settled, with the reason in the audit trail', async () => {
+      await service.reopenFolio(TENANT_ID, FOLIO_ID, ' Minibar after check-out ', ACTOR_ID);
+      expect(tx.folio.updateMany).toHaveBeenCalledWith({ where: { id: FOLIO_ID, status: 'settled' }, data: { status: 'open', closedAt: null } });
+      expect(tx.auditLog.create).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ action: 'folio.reopened', after: { reason: 'Minibar after check-out' } }) }),
+      );
+    });
+
+    it('says so when the bill is open already', async () => {
+      tx.folio.updateMany.mockResolvedValueOnce({ count: 0 });
+      await expect(service.reopenFolio(TENANT_ID, FOLIO_ID, 'Late charge', ACTOR_ID)).rejects.toThrow(/already open/);
     });
   });
 

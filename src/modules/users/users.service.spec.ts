@@ -303,6 +303,29 @@ describe('UsersService', () => {
       await expect(service.setUserOutlets(MANAGER, USER_ID, { branchId: OTHER_BRANCH, outletIds: [] })).rejects.toThrow(ForbiddenException);
       expect(tx.userOutlet.deleteMany).not.toHaveBeenCalled();
     });
+
+    it('answers with the outlets at the branches the asker manages — not the person’s outlets elsewhere', async () => {
+      tx.user.findFirst.mockResolvedValue({ id: USER_ID, deletedAt: null });
+      const OUTLET_ID = '66666666-6666-4666-8666-666666666666';
+      tx.outlet.findMany.mockResolvedValue([{ id: OUTLET_ID }]);
+      tx.userOutlet.findMany.mockResolvedValue([
+        { userId: USER_ID, outletId: OUTLET_ID, outlet: { id: OUTLET_ID, branchId: BRANCH_ID } },
+        { userId: USER_ID, outletId: 'elsewhere', outlet: { id: 'elsewhere', branchId: OTHER_BRANCH } },
+      ]);
+      const rows = await service.setUserOutlets(MANAGER, USER_ID, { branchId: BRANCH_ID, outletIds: [OUTLET_ID] });
+      expect(rows.map((r) => r.outletId)).toEqual([OUTLET_ID]);
+    });
+  });
+
+  describe('getUserOutlets', () => {
+    it('shows a manager only the outlets at their own branches', async () => {
+      tx.userOutlet.findMany.mockResolvedValue([
+        { userId: USER_ID, outletId: 'here', outlet: { id: 'here', branchId: BRANCH_ID } },
+        { userId: USER_ID, outletId: 'elsewhere', outlet: { id: 'elsewhere', branchId: OTHER_BRANCH } },
+      ]);
+      expect((await service.getUserOutlets(MANAGER, USER_ID)).map((r) => r.outletId)).toEqual(['here']);
+      expect((await service.getUserOutlets(OWNER, USER_ID)).map((r) => r.outletId)).toEqual(['here', 'elsewhere']);
+    });
   });
 
   describe('listStaff', () => {

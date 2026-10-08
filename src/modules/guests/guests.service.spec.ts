@@ -79,18 +79,25 @@ describe('GuestsService', () => {
       expect(guest.id).toBe(GUEST_ID);
     });
 
-    it('sums only non-void, non-deleted payments across the guest\'s folios into totalSpend', async () => {
+    it('sums only non-void, non-deleted payments across the guest\'s folios — one total per currency, never added across them', async () => {
       tx.guestProfile.findFirst.mockResolvedValue({ id: GUEST_ID, name: 'John Doe' });
-      tx.payment.findMany.mockResolvedValue([{ amount: '100.00' }, { amount: '50.50' }]);
+      tx.payment.findMany.mockResolvedValue([
+        { amount: '100.00', currency: 'NGN' },
+        { amount: '50.50', currency: 'NGN' },
+        { amount: '20.00', currency: 'USD' },
+      ]);
       const guest = await service.getGuestById(TENANT_ID, GUEST_ID);
       expect(tx.payment.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { folio: { guestId: GUEST_ID }, isVoid: false, deletedAt: null } }));
-      expect(guest.totalSpend).toBe('150.50');
+      expect(guest.spend).toEqual([
+        { currency: 'NGN', total: '150.50' },
+        { currency: 'USD', total: '20.00' },
+      ]);
     });
 
-    it('totalSpend is "0.00" when there are no payments at all', async () => {
+    it('spend is empty when there are no payments at all', async () => {
       tx.guestProfile.findFirst.mockResolvedValue({ id: GUEST_ID, name: 'John Doe' });
       const guest = await service.getGuestById(TENANT_ID, GUEST_ID);
-      expect(guest.totalSpend).toBe('0.00');
+      expect(guest.spend).toEqual([]);
     });
 
     it('includes stay history ordered by check-in date, newest first', async () => {
@@ -250,6 +257,50 @@ describe('GuestsService', () => {
       await service.findOrCreateGuestInTx(tx as never, TENANT_ID, { guest: { name: 'Jane Doe', phone: '0803 1234' } });
       expect(tx.guestProfile.findFirst).not.toHaveBeenCalled();
       expect(tx.guestProfile.create).toHaveBeenCalled();
+    });
+
+    describe('a booking from the public booking page', () => {
+      const publicBooking = { publicBooking: true };
+      const onFile = { id: GUEST_ID, name: 'Victoria  Okafor', email: 'victoria@example.com', phone: '+2348031234567' };
+
+      it('joins the profile when the name and the email both match — the same person booking again', async () => {
+        tx.guestProfile.findMany.mockResolvedValue([onFile]);
+        const guest = await service.findOrCreateGuestInTx(tx as never, TENANT_ID, { guest: { name: 'victoria okafor', email: 'Victoria@Example.com' } }, publicBooking);
+        expect(guest.id).toBe(GUEST_ID);
+        expect(tx.guestProfile.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { deletedAt: null, email: { equals: 'Victoria@Example.com', mode: 'insensitive' } } }));
+        expect(tx.guestProfile.create).not.toHaveBeenCalled();
+        expect(tx.guestProfile.update).not.toHaveBeenCalled();
+      });
+
+      it('makes a new profile for someone else who typed that email — never lands on the guest already there', async () => {
+        tx.guestProfile.findMany.mockResolvedValue([onFile]);
+        await service.findOrCreateGuestInTx(tx as never, TENANT_ID, { guest: { name: 'Mallory Stranger', email: 'victoria@example.com' } }, publicBooking);
+        expect(tx.guestProfile.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ name: 'Mallory Stranger', email: 'victoria@example.com' }) }));
+        expect(tx.guestProfile.update).not.toHaveBeenCalled();
+      });
+
+      it('never matches by phone, and never fills anything in', async () => {
+        tx.guestProfile.findFirst.mockResolvedValue({ ...onFile, email: null });
+        await service.findOrCreateGuestInTx(tx as never, TENANT_ID, { guest: { name: 'Victoria Okafor', email: 'new@example.com', phone: '0803 123 4567' } }, publicBooking);
+        expect(tx.guestProfile.findFirst).not.toHaveBeenCalled();
+        expect(tx.guestProfile.create).toHaveBeenCalled();
+        expect(tx.guestProfile.update).not.toHaveBeenCalled();
+      });
+
+      it('leaves a different phone number for the desk as a note instead of changing the profile', async () => {
+        tx.guestProfile.findMany.mockResolvedValue([onFile]);
+        await service.findOrCreateGuestInTx(tx as never, TENANT_ID, { guest: { name: 'Victoria Okafor', email: 'victoria@example.com', phone: '+2349990000000' } }, publicBooking);
+        expect(tx.guestProfile.update).not.toHaveBeenCalled();
+        expect(tx.guestNote.create).toHaveBeenCalledWith({
+          data: expect.objectContaining({ guestId: GUEST_ID, authorId: null, body: expect.stringContaining('+2349990000000, not the +2348031234567 on this profile') }),
+        });
+      });
+
+      it('says nothing when the number given is the one on file, however it was typed', async () => {
+        tx.guestProfile.findMany.mockResolvedValue([onFile]);
+        await service.findOrCreateGuestInTx(tx as never, TENANT_ID, { guest: { name: 'Victoria Okafor', email: 'victoria@example.com', phone: '0803 123 4567' } }, publicBooking);
+        expect(tx.guestNote.create).not.toHaveBeenCalled();
+      });
     });
   });
 

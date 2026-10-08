@@ -29,7 +29,9 @@ export type BranchRecord =
   | 'eventBooking'
   | 'competitor'
   | 'taxRule'
-  | 'reportTemplate';
+  | 'reportTemplate'
+  | 'housekeepingTask'
+  | 'marketingCampaign';
 
 export interface BranchOfMetadata {
   record: BranchRecord;

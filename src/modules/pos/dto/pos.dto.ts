@@ -76,6 +76,7 @@ export class ModifierOptionDto {
   @ApiProperty({ example: 0, description: 'Added to the item price; 0 for a free choice' })
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0)
+  @Max(1_000_000_000)
   price!: number;
 }
 
@@ -119,6 +120,7 @@ export class CreateMenuItemDto {
   @ApiProperty({ example: 6500, description: 'Before tax' })
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0)
+  @Max(1_000_000_000)
   price!: number;
 
   @ApiPropertyOptional()

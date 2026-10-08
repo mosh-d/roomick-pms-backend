@@ -1,5 +1,6 @@
 import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Post } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
 import { CurrentTenant, CurrentUser } from '../../common/decorators';
 import { Roles, SystemRole } from '../../common/decorators/roles.decorator';
 import { JwtPayload } from '../../common/types/request-context';
@@ -43,6 +44,9 @@ export class TenantsController {
   @Delete('me')
   @HttpCode(HttpStatus.NO_CONTENT)
   @Roles(SystemRole.Owner)
+  // It checks the owner's password: the same few tries an hour as every other
+  // route that does, or a stolen session could guess the password here.
+  @Throttle({ default: { limit: 5, ttl: 900_000 } })
   @ApiOperation({
     summary:
       'Delete the caller\'s own organization — manual counterpart to the demo-tenant auto-expiry sweep. ' +

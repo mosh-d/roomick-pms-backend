@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 import {
   ArrayMaxSize,
   ArrayMinSize,
@@ -254,6 +254,7 @@ export class SetRateOverrideDto {
   @Type(() => Number)
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0)
+  @Max(1_000_000_000)
   overrideRate!: number;
 
   @ApiProperty({ example: 'Loyalty gesture — service recovery for a delayed check-in' })
@@ -391,6 +392,10 @@ export class ModifyReservationDto {
   children?: number;
 
   @ApiProperty({ example: 'Guest requested an extra night' })
+  @Transform(({ value }: { value: unknown }) => (typeof value === 'string' ? value.trim() : value))
+  @IsString()
+  // Required means something: an empty or blank reason used to pass, leaving the change unexplained in the audit trail.
+  @MinLength(1, { message: 'Give the reason for the change' })
   @MaxLength(500)
   reason!: string;
 }
@@ -433,6 +438,7 @@ export class WalkReservationDto {
   @Type(() => Number)
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0)
+  @Max(1_000_000_000)
   transportCost?: number;
 
   @ApiPropertyOptional({ example: 'One free night + breakfast on next stay' })

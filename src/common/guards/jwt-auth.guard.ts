@@ -47,13 +47,15 @@ export class JwtAuthGuard extends AuthGuard('jwt') {
     const verdict = super.canActivate(context);
     const tokenOk = isObservable(verdict) ? await lastValueFrom(verdict) : await verdict;
     if (!tokenOk || !request.user) return false;
-    const state = await this.accounts.check(request.user);
+    const { state, roles } = await this.accounts.current(request.user);
     if (state === 'suspended') {
       throw new ForbiddenException({ code: ErrorCode.TENANT_SUSPENDED, message: TENANT_SUSPENDED_MESSAGE });
     }
     if (state !== 'open') {
       throw new UnauthorizedException({ code: ErrorCode.UNAUTHORIZED, message: 'This account is no longer active — sign in again' });
     }
+    // The roles held now, not when the token was issued — see AccountStatusService.
+    if (roles) request.user = { ...request.user, roles };
     return true;
   }
 

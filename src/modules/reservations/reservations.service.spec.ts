@@ -1247,6 +1247,19 @@ describe('ReservationsService', () => {
         await expect(service.reinstateFromNoShow(TENANT_ID, RESERVATION_ID, dto, ACTOR_ID)).rejects.toThrow(ConflictException);
       });
 
+      it('a group booking comes back on its block, at its block rate', async () => {
+        tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'no_show', groupBlockId: 'block-1', overrideRate: new Prisma.Decimal('70') }));
+        tx.groupBlock.findFirst.mockResolvedValue({ roomTypeId: TYPE_ID, arrivalDate: new Date('2026-09-10T00:00:00.000Z'), departureDate: new Date('2026-09-12T00:00:00.000Z') });
+        await service.reinstateFromNoShow(TENANT_ID, RESERVATION_ID, dto, ACTOR_ID);
+        const data = (tx.reservation.update.mock.calls[0][0] as { data: { confirmedRate: Prisma.Decimal } }).data;
+        expect(data.confirmedRate.toFixed(2)).toBe('140.00');
+
+        tx.reservation.update.mockClear();
+        tx.groupBlock.findFirst.mockResolvedValue({ roomTypeId: TYPE_ID, arrivalDate: new Date('2026-12-10T00:00:00.000Z'), departureDate: new Date('2026-12-12T00:00:00.000Z') });
+        await expect(service.reinstateFromNoShow(TENANT_ID, RESERVATION_ID, dto, ACTOR_ID)).rejects.toThrow(/keeps to its block's nights/);
+        expect(tx.reservation.update).not.toHaveBeenCalled();
+      });
+
       it('waivePenalty: true also waives the most recent NoShowRecord for this reservation, atomically in the same transaction', async () => {
         tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'no_show' }));
         tx.noShowRecord.findFirst.mockResolvedValue({ id: 'nsr-1', penaltyWaived: false, penaltyAmount: new Prisma.Decimal('50'), reservationId: RESERVATION_ID });
@@ -1416,6 +1429,35 @@ describe('ReservationsService', () => {
       await expect(
         service.modifyReservation(TENANT_ID, RESERVATION_ID, { checkInDate: '2026-09-05', checkOutDate: '2026-09-01', reason: 'x' }, ACTOR_ID),
       ).rejects.toThrow(BadRequestException);
+    });
+
+    describe('a group booking', () => {
+      const block = { roomTypeId: TYPE_ID, arrivalDate: new Date('2026-09-01T00:00:00.000Z'), departureDate: new Date('2026-09-04T00:00:00.000Z') };
+
+      it('keeps its block rate on new dates — the record says what the folio will post', async () => {
+        tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'confirmed', groupBlockId: 'block-1', overrideRate: new Prisma.Decimal('70') }));
+        tx.groupBlock.findFirst.mockResolvedValue(block);
+        const result = await service.modifyReservation(TENANT_ID, RESERVATION_ID, dto, ACTOR_ID); // 4 nights, inside the block plus a shoulder night
+        expect(String((result as unknown as { confirmedRate: unknown }).confirmedRate)).toBe('280'); // 70 x 4, not the public 100 x 4
+        const data = (tx.reservation.update.mock.calls[0][0] as { data: { nightlyRates: Array<{ rate: string }> } }).data;
+        expect(data.nightlyRates.map((n) => n.rate)).toEqual(['70.00', '70.00', '70.00', '70.00']);
+      });
+
+      it("can't be moved off its block's nights, or out of its room type", async () => {
+        tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'confirmed', groupBlockId: 'block-1', overrideRate: new Prisma.Decimal('70') }));
+        tx.groupBlock.findFirst.mockResolvedValue(block);
+        await expect(
+          service.modifyReservation(TENANT_ID, RESERVATION_ID, { checkInDate: '2026-10-01', checkOutDate: '2026-10-03', reason: 'x' }, ACTOR_ID),
+        ).rejects.toThrow(/keeps to its block's nights/);
+        await expect(service.modifyReservation(TENANT_ID, RESERVATION_ID, { roomTypeId: 'another-type', reason: 'x' }, ACTOR_ID)).rejects.toThrow(/its block's room type/);
+        expect(tx.reservation.update).not.toHaveBeenCalled();
+      });
+    });
+
+    it("a manager's pinned nightly rate is what a re-dated stay is recorded at", async () => {
+      tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'confirmed', overrideRate: new Prisma.Decimal('85') }));
+      const result = await service.modifyReservation(TENANT_ID, RESERVATION_ID, dto, ACTOR_ID);
+      expect(String((result as unknown as { confirmedRate: unknown }).confirmedRate)).toBe('340'); // 85 x 4
     });
 
     it('rejects when the new dates/room type have no availability', async () => {

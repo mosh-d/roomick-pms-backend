@@ -39,4 +39,9 @@ export const RECORD_BRANCH: Record<BranchRecord, Lookup> = {
   competitor: async (tx, id) => (await tx.competitor.findFirst({ where: { id }, select: { branchId: true } }))?.branchId,
   taxRule: async (tx, id) => (await tx.taxRule.findFirst({ where: { id }, select: { branchId: true } }))?.branchId,
   reportTemplate: async (tx, id) => (await tx.reportTemplate.findFirst({ where: { id }, select: { branchId: true } }))?.branchId,
+  // A housekeeper at one property could start, finish and report on another
+  // property's room tasks by id; a manager could send or cancel another
+  // property's campaign the same way.
+  housekeepingTask: async (tx, id) => (await tx.housekeepingTask.findFirst({ where: { id }, select: { branchId: true } }))?.branchId,
+  marketingCampaign: async (tx, id) => (await tx.marketingCampaign.findFirst({ where: { id }, select: { branchId: true } }))?.branchId,
 };

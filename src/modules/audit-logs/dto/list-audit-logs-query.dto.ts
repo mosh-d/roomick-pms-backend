@@ -1,6 +1,7 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
-import { IsInt, IsISO8601, IsOptional, IsUUID, Max, MaxLength, Min } from 'class-validator';
+import { IsInt, IsOptional, IsUUID, Max, MaxLength, Min } from 'class-validator';
+import { IsDateOnly } from '../../../common/validation/is-date-only.decorator';
 
 /**
  * Backs the Security & Roles "Audit Log Viewer" (architecture map's own
@@ -26,12 +27,12 @@ export class ListAuditLogsQueryDto {
 
   @ApiPropertyOptional({ example: '2026-08-01' })
   @IsOptional()
-  @IsISO8601({ strict: true })
+  @IsDateOnly() // a full timestamp passed, became an Invalid Date in the query and a 500
   from?: string;
 
   @ApiPropertyOptional({ example: '2026-08-31' })
   @IsOptional()
-  @IsISO8601({ strict: true })
+  @IsDateOnly()
   to?: string;
 
   @ApiPropertyOptional({ example: 'reservation', description: 'The kind of record — everything that happened to reservations, folios, guests…' })

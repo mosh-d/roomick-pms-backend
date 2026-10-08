@@ -71,8 +71,8 @@ export type GuestProfile = GuestSummary & {
   marketingUnsubscribedAt: Date | null;
   /** Every reservation ever made by this guest, newest check-in first. */
   stayHistory: GuestStaySummary[];
-  /** Sum of every non-void payment across every folio this guest has ever had — a plain string, already rounded to 2dp. */
-  totalSpend: string;
+  /** Every non-void payment across every folio this guest has ever had, totalled per currency (never added across currencies), largest first. */
+  spend: Array<{ currency: string; total: string }>;
   /** The append-only feed (`GuestNote`) — distinct from the legacy single `notes` column above, which stays read-only/historical. */
   notesFeed: GuestNoteSummary[];
 };
@@ -105,6 +105,16 @@ export function phoneDigitsOf(phone: string | null | undefined): string | null {
 
 /** Two phones are one number when their last nine digits agree — "0803 123 4567" and "+234 803 123 4567" — so a shorter number never matches. */
 const PHONE_MATCH_DIGITS = 9;
+
+/** "Ada  Obi" and "ada obi" are the same name as typed; anything more different is a different person as far as an unchecked booking goes. */
+const sameName = (a: string, b: string) => a.trim().replace(/\s+/g, ' ').toLowerCase() === b.trim().replace(/\s+/g, ' ').toLowerCase();
+
+/** The same number, by its last nine digits — see `PHONE_MATCH_DIGITS`. */
+export function samePhone(a: string | null | undefined, b: string | null | undefined): boolean {
+  const x = phoneDigitsOf(a);
+  const y = phoneDigitsOf(b);
+  return Boolean(x && y && x.length >= PHONE_MATCH_DIGITS && y.length >= PHONE_MATCH_DIGITS && x.slice(-PHONE_MATCH_DIGITS) === y.slice(-PHONE_MATCH_DIGITS));
+}
 
 @Injectable()
 export class GuestsService {
@@ -141,11 +151,20 @@ export class GuestsService {
       const [stayHistory, payments, notesFeed] = await Promise.all([
         tx.reservation.findMany({
           where: { guestId },
-          select: { id: true, confirmationNumber: true, status: true, checkInDate: true, checkOutDate: true, confirmedRate: true, roomType: { select: { name: true } } },
+          select: {
+            id: true,
+            confirmationNumber: true,
+            status: true,
+            checkInDate: true,
+            checkOutDate: true,
+            confirmedRate: true,
+            roomType: { select: { name: true } },
+            branch: { select: { name: true, currency: true } },
+          },
           orderBy: { checkInDate: 'desc' },
         }),
         // Payment has no direct guestId — only reachable via its folio.
-        tx.payment.findMany({ where: { folio: { guestId }, isVoid: false, deletedAt: null }, select: { amount: true } }),
+        tx.payment.findMany({ where: { folio: { guestId }, isVoid: false, deletedAt: null }, select: { amount: true, currency: true } }),
         tx.guestNote.findMany({
           where: { guestId },
           select: { id: true, body: true, createdAt: true, author: { select: { id: true, name: true } } },
@@ -153,9 +172,13 @@ export class GuestsService {
         }),
       ]);
 
-      const totalSpend = payments.reduce((sum, p) => sum.plus(p.amount), new Prisma.Decimal(0));
+      // One total per currency: a guest of two properties that charge in
+      // different currencies had naira and dollars added together.
+      const byCurrency = new Map<string, Prisma.Decimal>();
+      for (const p of payments) byCurrency.set(p.currency, (byCurrency.get(p.currency) ?? new Prisma.Decimal(0)).plus(p.amount));
+      const spend = [...byCurrency].map(([currency, total]) => ({ currency, total: total.toFixed(2) })).sort((a, b) => Number(b.total) - Number(a.total));
 
-      return { ...guest, stayHistory, totalSpend: totalSpend.toFixed(2), notesFeed };
+      return { ...guest, stayHistory, spend, notesFeed };
     });
   }
 
@@ -356,7 +379,9 @@ export class GuestsService {
     tx: TenantTx,
     tenantId: string,
     input: { guestId: string } | { guest: CreateGuestDto },
+    options: { publicBooking?: boolean } = {},
   ): Promise<GuestSummary> {
+    if (!('guestId' in input) && options.publicBooking) return this.publicBookingGuest(tx, tenantId, input.guest);
     if ('guestId' in input) {
       const guest = await tx.guestProfile.findFirst({
         where: { id: input.guestId, deletedAt: null },
@@ -368,6 +393,43 @@ export class GuestsService {
       return guest;
     }
     return (await this.knownGuest(tx, input.guest)) ?? this.createGuestInTx(tx, tenantId, input.guest);
+  }
+
+  /**
+   * The guest a booking on the public booking page names. Nobody has checked
+   * who typed it, so it joins an existing profile only when the name and the
+   * email both match — the same person booking again — never by phone alone,
+   * and it never changes the profile. A stranger who typed a guest's email,
+   * or their phone number, used to land on that guest's profile: "Manage your
+   * booking" then showed them the guest's phone and nationality, and online
+   * check-in rewrote them. A different number from the profile's is left for
+   * the desk as a note, to settle at check-in.
+   */
+  private async publicBookingGuest(tx: TenantTx, tenantId: string, dto: CreateGuestDto): Promise<GuestSummary> {
+    const email = dto.email?.trim();
+    if (email) {
+      const sameEmail = await tx.guestProfile.findMany({
+        where: { deletedAt: null, email: { equals: email, mode: 'insensitive' } },
+        orderBy: { updatedAt: 'desc' },
+        select: GUEST_SUMMARY_SELECT,
+        take: 25,
+      });
+      const found = sameEmail.find((guest) => sameName(guest.name, dto.name));
+      if (found) {
+        if (dto.phone?.trim() && !samePhone(found.phone, dto.phone)) {
+          await tx.guestNote.create({
+            data: {
+              tenantId,
+              guestId: found.id,
+              authorId: null,
+              body: `Booked online giving the phone number ${dto.phone.trim()}${found.phone ? `, not the ${found.phone} on this profile` : ''}. Check which is right at check-in.`,
+            },
+          });
+        }
+        return found;
+      }
+    }
+    return this.createGuestInTx(tx, tenantId, dto);
   }
 
   /**

@@ -193,12 +193,22 @@ export class LoyaltyService {
         where: { deletedAt: null, OR: [{ loyaltyEnrolledAt: { not: null } }, { loyaltyPoints: { gt: 0 } }] },
         select: { id: true, loyaltyTier: true },
       });
-      let moved = 0;
+      // One update per tier, not per member — re-tiering a few thousand
+      // members one row at a time ran past the transaction's time limit.
+      const movingTo = new Map<string | null, string[]>();
       for (const member of members) {
         const tierName = tierFor(tiers, lifetimes.get(member.id) ?? 0)?.name ?? null;
-        if (tierName !== member.loyaltyTier) {
-          await tx.guestProfile.update({ where: { id: member.id }, data: { loyaltyTier: tierName } });
-          moved++;
+        if (tierName === member.loyaltyTier) continue;
+        const group = movingTo.get(tierName);
+        if (group) group.push(member.id);
+        else movingTo.set(tierName, [member.id]);
+      }
+      let moved = 0;
+      for (const [tierName, ids] of movingTo) {
+        for (let i = 0; i < ids.length; i += 1000) {
+          const chunk = ids.slice(i, i + 1000);
+          await tx.guestProfile.updateMany({ where: { id: { in: chunk } }, data: { loyaltyTier: tierName } });
+          moved += chunk.length;
         }
       }
 
@@ -213,7 +223,7 @@ export class LoyaltyService {
         },
       });
       return this.toProgramView(program, currencies);
-    });
+    }, { timeout: 60_000 });
   }
 
   // -------------------------------------------------------------------------

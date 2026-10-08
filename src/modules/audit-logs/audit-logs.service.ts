@@ -1,5 +1,7 @@
-import { Injectable } from '@nestjs/common';
+import { ForbiddenException, Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import { ErrorCode } from '../../common/errors/error-codes';
+import { JwtPayload } from '../../common/types/request-context';
 import { PrismaService } from '../../prisma/prisma.service';
 import { ListAuditLogsQueryDto } from './dto/list-audit-logs-query.dto';
 
@@ -29,12 +31,21 @@ export class AuditLogsService {
    * the whole calendar day, matching how a person picking an end date in a
    * date-range filter expects it to behave.
    */
-  async listAuditLogs(tenantId: string, query: ListAuditLogsQueryDto): Promise<{ rows: AuditLogRow[]; total: number; page: number; limit: number }> {
+  async listAuditLogs(tenantId: string, query: ListAuditLogsQueryDto, actor: JwtPayload): Promise<{ rows: AuditLogRow[]; total: number; page: number; limit: number }> {
     const page = query.page ?? 1;
     const limit = query.limit ?? 50;
+    // A manager of one property reads that property's trail, and the
+    // organisation-wide entries every property shares (guests, the brand,
+    // settings) — never another property's. Any manager used to read every
+    // branch's trail, guest names in the descriptions included.
+    const supervising = actor.roles.filter((r) => r.role === 'owner' || r.role === 'manager');
+    const mine = supervising.some((r) => r.branchId === null) ? null : supervising.map((r) => r.branchId as string);
+    if (mine && query.branchId && !mine.includes(query.branchId)) {
+      throw new ForbiddenException({ code: ErrorCode.FORBIDDEN, message: 'You can read the audit trail of the properties you manage' });
+    }
     return this.prisma.withTenant(tenantId, async (tx) => {
       const where: Prisma.AuditLogWhereInput = {
-        ...(query.branchId ? { branchId: query.branchId } : {}),
+        ...(query.branchId ? { branchId: query.branchId } : mine ? { OR: [{ branchId: { in: mine } }, { branchId: null }] } : {}),
         ...(query.userId ? { userId: query.userId } : {}),
         ...(query.action ? { action: { contains: query.action, mode: 'insensitive' } } : {}),
         ...(query.entityType ? { entityType: query.entityType } : {}),

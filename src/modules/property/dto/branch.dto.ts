@@ -88,7 +88,7 @@ export class CreateBranchDto {
   @IsIn(['hotel', 'resort', 'motel', 'boutique', 'hostel'])
   category?: string;
 
-  @ApiPropertyOptional({ description: 'Branch policies (overrides brand defaults; merged at read)' })
+  @ApiPropertyOptional({ description: 'Branch policies (overrides brand defaults; merged at read). Keys sent replace those on file; a key sent as null is removed; others are kept.' })
   @IsOptional()
   @IsObject()
   policies?: Record<string, unknown>;
@@ -127,6 +127,7 @@ export class NoShowPolicyDto {
   @ValidateIf((o: NoShowPolicyDto) => o.defaultPenalty === 'flat_fee')
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0.01)
+  @Max(1_000_000_000)
   flatFeeAmount?: number;
 }
 
@@ -146,6 +147,7 @@ export class CancellationPolicyDto {
   @ValidateIf((o: CancellationPolicyDto) => o.lateCancellationPenalty === 'flat_fee')
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0.01)
+  @Max(1_000_000_000)
   flatFeeAmount?: number;
 
   @ApiProperty({ description: 'Whether guests can cancel from "Manage your booking". Staff can always cancel.' })

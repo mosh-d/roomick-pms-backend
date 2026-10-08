@@ -227,6 +227,17 @@ export class AuthService {
         subdomain,
       });
       return { tenant, owner: user };
+    }).catch((error: unknown) => {
+      // Two sign-ups with one email at the same moment both pass the check
+      // above; the index lets one through and the other used to get a 500.
+      // Prisma doesn't name the column here (the target comes back null), so
+      // the table decides: the only unique value a sign-up writes to a user,
+      // or to the email index, is the email.
+      const model = error instanceof Prisma.PrismaClientKnownRequestError ? error.meta?.modelName : undefined;
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002' && (model === 'User' || model === 'UserEmailIndex' || JSON.stringify(error.meta?.target ?? '').includes('email'))) {
+        throw new ConflictException({ code: ErrorCode.EMAIL_TAKEN, message: 'An account with this email already exists' });
+      }
+      throw error;
     });
 
     // The confirmation link goes by email. Until an email provider is set up
@@ -598,6 +609,9 @@ export class AuthService {
           message: 'This invitation has expired or was already used — ask your manager for a new one',
         });
       }
+      // A suspended organisation takes no one new on — an invitation sent
+      // before the suspension still made an account, which then couldn't sign in.
+      await this.assertTenantOpen(tx, tenantId);
 
       const existing = await tx.user.findFirst({ where: { tenantId, email: invite.email } });
       if (existing?.deletedAt) {

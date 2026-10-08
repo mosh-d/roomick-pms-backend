@@ -966,15 +966,16 @@ model ApiKey {
 /**
  * Integrations & APIs' "Webhooks" — another system told when something
  * happens here. `eventTypes` are names from `webhook-events.ts`; `secret`
- * signs every delivery (HMAC-SHA256) and is shown once, at creation. With
- * `branchId`, only that branch's events.
+ * signs every delivery (HMAC-SHA256) and is shown once, at creation — stored
+ * encrypted (`EncryptionService`, "iv:tag:ciphertext"). With `branchId`, only
+ * that branch's events.
  */
 model Webhook {
   id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   tenantId   String   @db.Uuid
   url        String   @db.VarChar(500)
   eventTypes String[]
-  secret     String   @db.VarChar(64)
+  secret     String   @db.VarChar(255)
   branchId   String?  @db.Uuid
   isActive   Boolean  @default(true)
   createdAt  DateTime @default(now()) @db.Timestamptz(6)

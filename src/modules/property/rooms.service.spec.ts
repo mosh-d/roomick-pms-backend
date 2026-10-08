@@ -49,6 +49,7 @@ function makeTx() {
       findMany: jest.fn().mockResolvedValue([]),
       findFirst: jest.fn(),
       update: jest.fn().mockImplementation(({ data }: { data: Record<string, unknown> }) => Promise.resolve({ id: 'block-1', ...data })),
+      delete: jest.fn().mockResolvedValue({ id: 'block-1' }),
     },
     auditLog: { create: jest.fn().mockResolvedValue({}) },
   };
@@ -381,6 +382,48 @@ describe('RoomsService', () => {
       );
       expect(tx.auditLog.create).toHaveBeenCalled();
     });
+
+    it('refuses a block overlapping one the room already has', async () => {
+      tx.room.findFirst.mockResolvedValue(room({ number: '101' }));
+      tx.roomBlock.findFirst.mockResolvedValue({ id: 'block-0', fromDate: new Date('2026-08-03T00:00:00.000Z'), toDate: new Date('2026-08-09T00:00:00.000Z') });
+      await expect(service.blockRoom(TENANT_ID, ROOM_ID, { reason: 'maintenance', fromDate: '2026-08-01', toDate: '2026-08-05' }, manager.sub)).rejects.toThrow(
+        /already blocked from 2026-08-03 to 2026-08-09/,
+      );
+      expect(tx.roomBlock.create).not.toHaveBeenCalled();
+    });
+
+    it('refuses a block over a guest staying in the room, or a booking given the room', async () => {
+      tx.room.findFirst.mockResolvedValue(room({ number: '101' }));
+      tx.roomBlock.findFirst.mockResolvedValue(null);
+      const day = (n: number) => new Date(Date.now() + n * 86_400_000).toISOString().slice(0, 10);
+      tx.reservation.findMany.mockResolvedValueOnce([
+        { confirmationNumber: 'RES-1', status: 'checked_in', checkInDate: new Date(`${day(-2)}T00:00:00.000Z`), checkOutDate: new Date(`${day(3)}T00:00:00.000Z`), guest: { name: 'Ada' } },
+      ]);
+      await expect(service.blockRoom(TENANT_ID, ROOM_ID, { reason: 'maintenance', fromDate: day(1), toDate: day(2) }, manager.sub)).rejects.toThrow(/Ada \(RES-1\) is staying in room 101/);
+
+      tx.reservation.findMany.mockResolvedValueOnce([
+        { confirmationNumber: 'RES-2', status: 'confirmed', checkInDate: new Date(`${day(5)}T00:00:00.000Z`), checkOutDate: new Date(`${day(7)}T00:00:00.000Z`), guest: { name: 'Bo' } },
+      ]);
+      await expect(service.blockRoom(TENANT_ID, ROOM_ID, { reason: 'maintenance', fromDate: day(6), toDate: day(9) }, manager.sub)).rejects.toThrow(/given to Bo's booking RES-2/);
+      expect(tx.roomBlock.create).not.toHaveBeenCalled();
+    });
+
+    it('lets a block start the day a guest leaves — and not the day an overstaying guest is still there', async () => {
+      tx.room.findFirst.mockResolvedValue(room({ number: '101' }));
+      tx.roomBlock.findFirst.mockResolvedValue(null);
+      const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Africa/Lagos' });
+      const at = (iso: string, n: number) => new Date(new Date(`${iso}T00:00:00.000Z`).getTime() + n * 86_400_000);
+      tx.reservation.findMany.mockResolvedValueOnce([
+        { confirmationNumber: 'RES-1', status: 'checked_in', checkInDate: at(today, -3), checkOutDate: at(today, 0), guest: { name: 'Ada' } },
+      ]);
+      await service.blockRoom(TENANT_ID, ROOM_ID, { reason: 'maintenance', fromDate: today, toDate: today }, manager.sub);
+      expect(tx.roomBlock.create).toHaveBeenCalledTimes(1);
+
+      tx.reservation.findMany.mockResolvedValueOnce([
+        { confirmationNumber: 'RES-1', status: 'checked_in', checkInDate: at(today, -3), checkOutDate: at(today, -1), guest: { name: 'Ada' } },
+      ]);
+      await expect(service.blockRoom(TENANT_ID, ROOM_ID, { reason: 'maintenance', fromDate: today, toDate: today }, manager.sub)).rejects.toThrow(/is staying in room 101/);
+    });
   });
 
   describe('listActiveBlocks / unblockRoom', () => {
@@ -391,12 +434,26 @@ describe('RoomsService', () => {
       );
     });
 
-    it('ends a block by pulling toDate back to today, not deleting it', async () => {
-      const farFuture = new Date(Date.now() + 30 * 86_400_000).toISOString().slice(0, 10);
-      tx.roomBlock.findFirst.mockResolvedValue({ id: 'block-1', roomId: ROOM_ID, toDate: new Date(`${farFuture}T00:00:00.000Z`), room: room() });
+    it('ends a block that has started by pulling toDate back to last night — the room sells tonight', async () => {
+      const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Africa/Lagos' });
+      const at = (n: number) => new Date(new Date(`${today}T00:00:00.000Z`).getTime() + n * 86_400_000);
+      tx.roomBlock.findFirst.mockResolvedValue({ id: 'block-1', roomId: ROOM_ID, fromDate: at(-3), toDate: at(30), room: room() });
       await service.unblockRoom(TENANT_ID, 'block-1', manager.sub);
-      expect(tx.roomBlock.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'block-1' }, data: { toDate: expect.any(Date) } }));
-      expect(tx.roomBlock.create).not.toHaveBeenCalled(); // never re-creates — the same row, corrected forward
+      expect(tx.roomBlock.update).toHaveBeenCalledWith({ where: { id: 'block-1' }, data: { toDate: at(-1) } });
+      expect(tx.roomBlock.delete).not.toHaveBeenCalled(); // the same row, corrected forward
+      expect(tx.roomBlock.create).not.toHaveBeenCalled();
+    });
+
+    it('cancels a block that has not started yet, keeping what it was in the audit trail', async () => {
+      const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Africa/Lagos' });
+      const at = (n: number) => new Date(new Date(`${today}T00:00:00.000Z`).getTime() + n * 86_400_000);
+      tx.roomBlock.findFirst.mockResolvedValue({ id: 'block-1', roomId: ROOM_ID, reason: 'renovation', fromDate: at(5), toDate: at(7), notes: null, room: room() });
+      await service.unblockRoom(TENANT_ID, 'block-1', manager.sub);
+      expect(tx.roomBlock.delete).toHaveBeenCalledWith({ where: { id: 'block-1' } });
+      expect(tx.roomBlock.update).not.toHaveBeenCalled(); // pulling toDate before fromDate was the server error
+      expect(tx.auditLog.create).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ action: 'room.block_cancelled', after: expect.objectContaining({ reason: 'renovation', fromDate: at(5).toISOString().slice(0, 10) }) }) }),
+      );
     });
 
     it('rejects ending a block that has already ended', async () => {

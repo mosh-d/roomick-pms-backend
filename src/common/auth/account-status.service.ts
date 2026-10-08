@@ -16,6 +16,9 @@ const SWEEP_ABOVE = 5_000;
  */
 export type AccountState = 'open' | 'closed' | 'suspended';
 
+/** The roles a person holds, in the access token's own shape. */
+export type HeldRoles = JwtPayload['roles'];
+
 /**
  * Whether the person behind an access token may still work.
  *
@@ -31,40 +34,56 @@ export type AccountState = 'open' | 'closed' | 'suspended';
  * cancelled organisation's staff are refused the same way API keys and the
  * public booking page already refuse it — it used to be checked nowhere on
  * the staff side, so "suspend" did nothing for the people in the app.
+ *
+ * So are the roles the person holds now. The token carries the roles it was
+ * issued with; a manager taken down to front desk, or a role removed, kept
+ * the old access until the token was renewed — up to fifteen minutes.
+ * `JwtAuthGuard` puts these in its place, so a change counts within the TTL,
+ * and at once in this process (`forget`).
  */
 @Injectable()
 export class AccountStatusService {
   /** Accounts known to be open, by user id → when that answer lapses, and the organisation it belongs to. */
-  private readonly open = new Map<string, { until: number; tenantId: string }>();
+  private readonly open = new Map<string, { until: number; tenantId: string; roles: HeldRoles }>();
 
   constructor(private readonly prisma: PrismaService) {}
 
   async check(user: Pick<JwtPayload, 'sub' | 'tenantId'>, now = Date.now()): Promise<AccountState> {
-    const known = this.open.get(user.sub);
-    if (known !== undefined && known.until > now) return 'open';
+    return (await this.current(user, now)).state;
+  }
 
-    const [row, tenant] = await Promise.all([
-      this.prisma.withTenant(user.tenantId, (tx) => tx.user.findFirst({ where: { id: user.sub, deletedAt: null }, select: { id: true } })),
+  /** The account's state, and — while it's open — the roles it holds right now. */
+  async current(user: Pick<JwtPayload, 'sub' | 'tenantId'>, now = Date.now()): Promise<{ state: AccountState; roles: HeldRoles | null }> {
+    const known = this.open.get(user.sub);
+    if (known !== undefined && known.until > now) return { state: 'open', roles: known.roles };
+
+    const [roles, tenant] = await Promise.all([
+      this.prisma.withTenant(user.tenantId, async (tx) => {
+        const row = await tx.user.findFirst({ where: { id: user.sub, deletedAt: null }, select: { id: true } });
+        if (!row) return null;
+        const assignments = await tx.userBranchRole.findMany({ where: { userId: user.sub }, select: { branchId: true, role: { select: { name: true } } } });
+        return assignments.map((a) => ({ branchId: a.branchId, role: a.role.name }));
+      }),
       this.prisma.tenant.findUnique({ where: { id: user.tenantId }, select: { status: true } }),
     ]);
-    if (!row) {
+    if (!roles) {
       this.open.delete(user.sub);
-      return 'closed';
+      return { state: 'closed', roles: null };
     }
     if (!tenant || !isTenantOpen(tenant.status)) {
       this.open.delete(user.sub);
-      return 'suspended';
+      return { state: 'suspended', roles: null };
     }
     if (this.open.size >= SWEEP_ABOVE) this.sweep(now);
-    this.open.set(user.sub, { until: now + ACCOUNT_STATUS_TTL_MS, tenantId: user.tenantId });
-    return 'open';
+    this.open.set(user.sub, { until: now + ACCOUNT_STATUS_TTL_MS, tenantId: user.tenantId, roles });
+    return { state: 'open', roles };
   }
 
   async isOpen(user: Pick<JwtPayload, 'sub' | 'tenantId'>, now = Date.now()): Promise<boolean> {
     return (await this.check(user, now)) === 'open';
   }
 
-  /** The account was deactivated or deleted — the next request reads the row again instead of trusting a remembered answer. */
+  /** The account was deactivated or deleted, or its roles changed — the next request reads the rows again instead of trusting a remembered answer. */
   forget(userId: string): void {
     this.open.delete(userId);
   }

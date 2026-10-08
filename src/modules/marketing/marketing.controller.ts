@@ -1,4 +1,5 @@
 import { Body, Controller, Delete, Get, Header, HttpCode, HttpStatus, Param, ParseUUIDPipe, Patch, Post, Put, Query, Res } from '@nestjs/common';
+import { BranchOf } from '../../common/decorators/branch-of.decorator';
 import { ApiBearerAuth, ApiExcludeEndpoint, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import type { Response } from 'express';
@@ -152,6 +153,7 @@ export class MarketingController {
 
   @Post('branches/:branchId/marketing/campaigns')
   @Roles(SystemRole.Owner, SystemRole.Manager)
+  @Throttle({ default: { limit: 30, ttl: 3_600_000 } })
   @ApiOperation({ summary: 'Create a campaign — a draft, or scheduled when scheduledAt is given' })
   createCampaign(
     @CurrentTenant() tenantId: string,
@@ -163,6 +165,7 @@ export class MarketingController {
   }
 
   @Get('marketing/campaigns/:campaignId')
+  @BranchOf('marketingCampaign', 'campaignId')
   @Roles(SystemRole.Owner, SystemRole.Manager)
   @ApiOperation({ summary: 'A campaign with its performance: delivery, opens, clicks, unsubscribes, A/B split, bookings after the send' })
   getCampaign(@CurrentTenant() tenantId: string, @CurrentUser() user: JwtPayload, @Param('campaignId', ParseUUIDPipe) campaignId: string): Promise<CampaignView> {
@@ -170,6 +173,7 @@ export class MarketingController {
   }
 
   @Patch('marketing/campaigns/:campaignId')
+  @BranchOf('marketingCampaign', 'campaignId')
   @Roles(SystemRole.Owner, SystemRole.Manager)
   @ApiOperation({ summary: 'Edit a draft, scheduled or failed campaign' })
   updateCampaign(
@@ -182,6 +186,9 @@ export class MarketingController {
   }
 
   @Post('marketing/campaigns/:campaignId/send')
+  @BranchOf('marketingCampaign', 'campaignId')
+  // Sending reaches every opted-in guest: a stolen marketing login used to be able to queue without limit.
+  @Throttle({ default: { limit: 10, ttl: 3_600_000 } })
   @Permission('marketing', 'update')
   @HttpCode(HttpStatus.OK)
   @Roles(SystemRole.Owner, SystemRole.Manager)
@@ -191,6 +198,8 @@ export class MarketingController {
   }
 
   @Post('marketing/campaigns/:campaignId/test')
+  @BranchOf('marketingCampaign', 'campaignId')
+  @Throttle({ default: { limit: 20, ttl: 3_600_000 } })
   @Permission('marketing', 'update')
   @HttpCode(HttpStatus.OK)
   @Roles(SystemRole.Owner, SystemRole.Manager)
@@ -205,6 +214,7 @@ export class MarketingController {
   }
 
   @Post('marketing/campaigns/:campaignId/cancel')
+  @BranchOf('marketingCampaign', 'campaignId')
   @Permission('marketing', 'update')
   @HttpCode(HttpStatus.OK)
   @Roles(SystemRole.Owner, SystemRole.Manager)

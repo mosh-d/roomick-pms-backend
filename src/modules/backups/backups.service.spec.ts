@@ -86,7 +86,8 @@ describe('BackupsService', () => {
     it('queries every tenant-scoped model, gzips the result, and marks the record completed', async () => {
       const result = await service.runTenantBackup(TENANT_ID);
       expect(prisma.backupRecord.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ tenantId: TENANT_ID, status: 'running' }) }));
-      expect(prisma.withTenant).toHaveBeenCalledWith(TENANT_ID, expect.any(Function));
+      // With room to finish: a busy tenant's tables take far longer than the default 5 seconds to read.
+      expect(prisma.withTenant).toHaveBeenCalledWith(TENANT_ID, expect.any(Function), { timeout: 600_000 });
       // A representative sample of real tenant-scoped models must have been queried.
       expect(tx.reservation.findMany).toHaveBeenCalled();
       expect(tx.folio.findMany).toHaveBeenCalled();

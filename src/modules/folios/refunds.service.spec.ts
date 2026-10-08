@@ -28,6 +28,8 @@ function makeTx() {
     refund: {
       create: jest.fn().mockImplementation(({ data }: { data: Record<string, unknown> }) => Promise.resolve({ id: 'refund-1', ...data })),
       update: jest.fn().mockImplementation(({ data }: { data: Record<string, unknown> }) => Promise.resolve({ id: 'refund-1', ...data })),
+      updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      findUniqueOrThrow: jest.fn().mockResolvedValue({ id: 'refund-1' }),
       findFirst: jest.fn(),
       findMany: jest.fn().mockResolvedValue([]),
       aggregate: jest.fn().mockResolvedValue({ _sum: { amount: null } }),
@@ -128,21 +130,35 @@ describe('RefundsService', () => {
       tx.refund.findFirst.mockResolvedValueOnce(refund());
       totals.mockResolvedValueOnce({ balanceDue: d(-5000) });
       await expect(service.approve(TENANT_ID, 'refund-1', manager)).rejects.toThrow(ConflictException);
-      expect(tx.refund.update).not.toHaveBeenCalled();
+      expect(tx.refund.updateMany).not.toHaveBeenCalled();
     });
 
-    it('approves a waiting refund', async () => {
+    it('approves a waiting refund — only while it is still waiting', async () => {
       tx.refund.findFirst.mockResolvedValueOnce(refund());
       await service.approve(TENANT_ID, 'refund-1', manager);
-      expect(tx.refund.update).toHaveBeenCalledWith({ where: { id: 'refund-1' }, data: { status: 'approved', approvedBy: 'mgr-1' } });
+      expect(tx.refund.updateMany).toHaveBeenCalledWith({ where: { id: 'refund-1', status: 'pending' }, data: { status: 'approved', approvedBy: 'mgr-1' } });
+
+      tx.refund.findFirst.mockResolvedValueOnce(refund());
+      tx.refund.updateMany.mockResolvedValueOnce({ count: 0 }); // turned down a moment ago
+      await expect(service.approve(TENANT_ID, 'refund-1', manager)).rejects.toThrow(/just paid out or turned down/);
     });
 
     it('turns one down with the reason, before it is paid out', async () => {
       tx.refund.findFirst.mockResolvedValueOnce(refund({ status: 'approved' }));
       await service.reject(TENANT_ID, 'refund-1', ' Took it as a discount ', manager);
-      expect(tx.refund.update).toHaveBeenCalledWith({ where: { id: 'refund-1' }, data: { status: 'rejected', rejectionReason: 'Took it as a discount' } });
+      expect(tx.refund.updateMany).toHaveBeenCalledWith({
+        where: { id: 'refund-1', status: { in: ['pending', 'approved'] } },
+        data: { status: 'rejected', rejectionReason: 'Took it as a discount' },
+      });
       tx.refund.findFirst.mockResolvedValueOnce(refund({ status: 'processed' }));
       await expect(service.reject(TENANT_ID, 'refund-1', 'x', manager)).rejects.toThrow(/already processed/);
+    });
+
+    it('never turns down a refund that is being paid out at the same moment', async () => {
+      tx.refund.findFirst.mockResolvedValueOnce(refund({ status: 'approved' }));
+      tx.refund.updateMany.mockResolvedValueOnce({ count: 0 });
+      await expect(service.reject(TENANT_ID, 'refund-1', 'x', manager)).rejects.toThrow(/just paid out or turned down/);
+      expect(tx.auditLog.create).not.toHaveBeenCalled();
     });
 
     it('nothing is paid out before a manager approves', async () => {
@@ -157,11 +173,21 @@ describe('RefundsService', () => {
       expect(payment).toMatchObject({ folioId: FOLIO_ID, method: 'cash', currency: 'NGN', shiftId: 'shift-1', recordedBy: 'desk-1' });
       expect(payment.amount.toFixed(2)).toBe('-15000.00');
       expect(tx.shift.findFirst).toHaveBeenCalledWith({ where: { branchId: BRANCH_ID, agentId: 'desk-1', closedAt: null } });
-      expect(tx.refund.update).toHaveBeenCalledWith({
-        where: { id: 'refund-1' },
-        data: { status: 'processed', processedAt: expect.any(Date), processedBy: 'desk-1', refundPaymentId: 'pay-out-1' },
+      // Claimed while still approved, before the payment exists; the payment is linked after.
+      expect(tx.refund.updateMany).toHaveBeenCalledWith({
+        where: { id: 'refund-1', status: 'approved' },
+        data: { status: 'processed', processedAt: expect.any(Date), processedBy: 'desk-1' },
       });
+      expect(tx.refund.updateMany.mock.invocationCallOrder[0]).toBeLessThan(tx.payment.create.mock.invocationCallOrder[0]);
+      expect(tx.refund.update).toHaveBeenCalledWith({ where: { id: 'refund-1' }, data: { refundPaymentId: 'pay-out-1' } });
       expect(webhookEvents.paymentRecorded).toHaveBeenCalledWith(tx, { tenantId: TENANT_ID, branchId: BRANCH_ID, type: 'refund.paid', paymentId: 'pay-out-1', refundId: 'refund-1' });
+    });
+
+    it('a second pay-out of the same refund finds it already claimed — no second payment', async () => {
+      tx.refund.findFirst.mockResolvedValueOnce(refund({ status: 'approved' }));
+      tx.refund.updateMany.mockResolvedValueOnce({ count: 0 });
+      await expect(service.payOut(TENANT_ID, 'refund-1', desk)).rejects.toThrow(/just paid out or turned down/);
+      expect(tx.payment.create).not.toHaveBeenCalled();
     });
 
     it('cash can’t leave a drawer that isn’t open', async () => {
