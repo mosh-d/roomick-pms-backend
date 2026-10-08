@@ -334,6 +334,21 @@ export class ListReservationsQueryDto {
   @IsOptional()
   @MaxLength(200)
   search?: string;
+
+  @ApiPropertyOptional({ example: 100, description: 'How many to return, newest first — 100 unless given, 500 at most. `GET …/reservations/count` says how many there are in all.' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(500)
+  limit?: number;
+
+  @ApiPropertyOptional({ example: 0, description: 'How many to skip — the next page starts at the previous offset + limit' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  offset?: number;
 }
 
 /**

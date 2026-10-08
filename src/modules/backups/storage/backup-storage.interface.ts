@@ -12,6 +12,8 @@ export interface BackupStorageAdapter {
   /** Writes `data` under `key`, returns a URL/path that `read` can resolve back. */
   write(key: string, data: Buffer): Promise<string>;
   read(storageUrl: string): Promise<Buffer>;
+  /** Deletes a stored backup for good — one whose retention has run out. A file already gone is not an error. */
+  remove(storageUrl: string): Promise<void>;
 }
 
 export const BACKUP_STORAGE_ADAPTER = 'BACKUP_STORAGE_ADAPTER';

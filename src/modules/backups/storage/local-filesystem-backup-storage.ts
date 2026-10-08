@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { mkdir, readFile, writeFile } from 'fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'fs/promises';
 import { tmpdir } from 'os';
 import { dirname, join } from 'path';
 import { BackupStorageAdapter } from './backup-storage.interface';
@@ -33,5 +33,9 @@ export class LocalFilesystemBackupStorage implements BackupStorageAdapter {
   async read(storageUrl: string): Promise<Buffer> {
     const filePath = storageUrl.replace(/^file:\/\//, '');
     return readFile(filePath);
+  }
+
+  async remove(storageUrl: string): Promise<void> {
+    await rm(storageUrl.replace(/^file:\/\//, ''), { force: true });
   }
 }

@@ -1,10 +1,24 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma, RatePlan, RateType, RoomType } from '@prisma/client';
 import { ErrorCode } from '../../common/errors/error-codes';
+import { toBranchDate } from '../../common/utils/branch-date';
 import { PrismaService, TenantTx } from '../../prisma/prisma.service';
 import { PropertyService } from '../property/property.service';
 import { TaxesService } from '../taxes/taxes.service';
 import { CalculateRateDto, CreateRatePlanDto, UpdateRatePlanDto } from './dto/rate-resolver.dto';
+
+/** Sunday = 0 … Saturday = 6 (`Date.getUTCDay`). A night is named by the date it starts on, so Friday and Saturday nights are the weekend unless the branch says otherwise. */
+export const DEFAULT_WEEKEND_NIGHTS: readonly number[] = [5, 6];
+
+/** The branch's own weekend nights — `Branch.policies.weekendNights`, an array of weekday numbers 0–6 — or the default. */
+export function weekendNightsFor(policies: Prisma.JsonValue | null | undefined): number[] {
+  const raw = policies && typeof policies === 'object' && !Array.isArray(policies) ? (policies as Record<string, unknown>).weekendNights : undefined;
+  if (Array.isArray(raw)) {
+    const days = raw.filter((day): day is number => Number.isInteger(day) && day >= 0 && day <= 6);
+    if (days.length > 0) return [...new Set(days)];
+  }
+  return [...DEFAULT_WEEKEND_NIGHTS];
+}
 
 /** Matches the schema's own comment on `RatePlan.cascadeTier` — the tier is derived from `type`, never client-supplied. */
 const CASCADE_TIER_BY_TYPE: Partial<Record<RateType, number>> = { base: 1, seasonal: 2, weekend: 3, corporate: 4 };
@@ -133,8 +147,8 @@ export class RateResolverService {
       await this.propertyService.assertBranch(tx, branchId);
       const roomType = await tx.roomType.findFirst({ where: { id: dto.roomTypeId, branchId, deletedAt: null } });
       if (!roomType) throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Room type not found at this branch' });
-      const checkInDate = new Date(dto.checkInDate);
-      const checkOutDate = new Date(dto.checkOutDate);
+      const checkInDate = toBranchDate(dto.checkInDate);
+      const checkOutDate = toBranchDate(dto.checkOutDate);
       if (checkOutDate <= checkInDate) {
         throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: 'checkOutDate must be after checkInDate' });
       }
@@ -210,7 +224,9 @@ export class RateResolverService {
     // company before accounts existed. Now only a stay booked under an active
     // company account gets it.
     const eligible = isCorporate ? plans : plans.filter((plan) => plan.type !== 'corporate');
-    const perNight: NightResolution[] = nights.map((date) => this.resolveNight(roomType, date, eligible, options.promoCode, corporateRatePlanId));
+    const branch = await tx.branch.findFirst({ where: { id: branchId }, select: { policies: true } });
+    const weekendNights = weekendNightsFor(branch?.policies);
+    const perNight: NightResolution[] = nights.map((date) => this.resolveNight(roomType, date, eligible, options.promoCode, corporateRatePlanId, weekendNights));
 
     // `create`, not `createMany` — a booking-create/walk-in call resolves
     // the rate BEFORE the reservation row exists, so `reservationId` is
@@ -301,8 +317,13 @@ export class RateResolverService {
    * generic typed-in promo code, matching how an actual negotiated
    * contract rate should never be undercut by a public promo.
    */
-  private resolveNight(roomType: RoomType, date: Date, plans: RatePlan[], promoCode: string | undefined, corporateRatePlanId: string | null): NightResolution {
-    const applicable = plans.filter((p) => p.validFrom === null || p.validFrom <= date).filter((p) => p.validTo === null || p.validTo >= date);
+  private resolveNight(roomType: RoomType, date: Date, plans: RatePlan[], promoCode: string | undefined, corporateRatePlanId: string | null, weekendNights: number[]): NightResolution {
+    const applicable = plans
+      .filter((p) => p.validFrom === null || p.validFrom <= date)
+      .filter((p) => p.validTo === null || p.validTo >= date)
+      // A weekend plan is for weekend nights. It used to apply to every night
+      // inside its date window — a "+15% weekends" uplift charged Monday too.
+      .filter((p) => p.type !== 'weekend' || weekendNights.includes(date.getUTCDay()));
     const overridePlans = applicable.filter((p) => p.isOverride);
 
     const negotiated = corporateRatePlanId ? overridePlans.find((p) => p.type === 'negotiated' && p.id === corporateRatePlanId) : undefined;

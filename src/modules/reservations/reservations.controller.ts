@@ -89,9 +89,20 @@ export class ReservationsController {
     return this.reservationsService.getOverbookingExposure(tenantId, branchId, query);
   }
 
+  @Get('branches/:branchId/reservations/count')
+  @Roles(...ALL_SYSTEM_ROLES)
+  @ApiOperation({ summary: 'How many reservations match the same filters — the list below returns a page of them' })
+  countReservations(
+    @CurrentTenant() tenantId: string,
+    @Param('branchId', ParseUUIDPipe) branchId: string,
+    @Query() query: ListReservationsQueryDto,
+  ): ReturnType<ReservationsService['countReservations']> {
+    return this.reservationsService.countReservations(tenantId, branchId, query);
+  }
+
   @Get('branches/:branchId/reservations')
   @Roles(...ALL_SYSTEM_ROLES)
-  @ApiOperation({ summary: 'Search/filter reservations at this branch (by status, and/or confirmation number or guest name)' })
+  @ApiOperation({ summary: 'Search/filter reservations at this branch (by status, and/or confirmation number or guest name), newest first, a page at a time' })
   listReservations(
     @CurrentTenant() tenantId: string,
     @Param('branchId', ParseUUIDPipe) branchId: string,

@@ -2,6 +2,7 @@ import { Body, Controller, Delete, Get, HttpCode, Param, ParseUUIDPipe, Patch, P
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import type { Response } from 'express';
 import { CurrentTenant, CurrentUser } from '../../common/decorators';
+import { BranchOf } from '../../common/decorators/branch-of.decorator';
 import { Permission } from '../../common/decorators/permission.decorator';
 import { Roles, SystemRole } from '../../common/decorators/roles.decorator';
 import { JwtPayload } from '../../common/types/request-context';
@@ -48,6 +49,8 @@ export class SalesEventsController {
   }
 
   @Patch('group-blocks/:blockId/release')
+
+  @BranchOf('groupBlock', 'blockId')
   @Permission('sales_events', 'update')
   @Roles(SystemRole.Owner, SystemRole.Manager)
   @ApiOperation({ summary: 'Release a block — it takes no more bookings and its held rooms go back on sale; booked rooms are unaffected' })
@@ -60,6 +63,8 @@ export class SalesEventsController {
   }
 
   @Post('group-blocks/:blockId/reservations')
+
+  @BranchOf('groupBlock', 'blockId')
   @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk)
   @ApiOperation({ summary: "Book a reservation into a group block at the block's own rate — rejects once the allotment is full" })
   bookIntoBlock(
@@ -72,6 +77,8 @@ export class SalesEventsController {
   }
 
   @Post('group-blocks/:blockId/rooming-list')
+
+  @BranchOf('groupBlock', 'blockId')
   @HttpCode(200)
   @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk)
   @ApiOperation({ summary: 'Book a rooming list into the block — every row checked first; reports each booking or refusal' })
@@ -113,6 +120,8 @@ export class SalesEventsController {
   }
 
   @Post('event-spaces/:eventSpaceId/bookings')
+
+  @BranchOf('eventSpace', 'eventSpaceId')
   @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk)
   @ApiOperation({ summary: 'Book an event space for a time range — rejects an overlapping booking on the same space' })
   createBooking(
@@ -125,6 +134,8 @@ export class SalesEventsController {
   }
 
   @Get('event-bookings/:bookingId')
+
+  @BranchOf('eventBooking', 'bookingId')
   @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk)
   @ApiOperation({ summary: 'One event booking, its catering priced' })
   getBooking(
@@ -136,6 +147,8 @@ export class SalesEventsController {
   }
 
   @Patch('event-bookings/:bookingId')
+
+  @BranchOf('eventBooking', 'bookingId')
   @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk)
   @ApiOperation({ summary: "Fill in the event's details — layout, headcount, contact, catering, AV, notes" })
   updateBooking(
@@ -148,6 +161,8 @@ export class SalesEventsController {
   }
 
   @Get('event-bookings/:bookingId/beo')
+
+  @BranchOf('eventBooking', 'bookingId')
   @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk)
   @ApiOperation({ summary: 'The Banquet Event Order as a PDF' })
   async getBeo(
@@ -163,6 +178,8 @@ export class SalesEventsController {
   }
 
   @Delete('event-bookings/:bookingId')
+
+  @BranchOf('eventBooking', 'bookingId')
   @Roles(SystemRole.Owner, SystemRole.Manager)
   @ApiOperation({ summary: 'Cancel an event booking, freeing the slot' })
   async cancelBooking(@CurrentTenant() tenantId: string, @Param('bookingId', ParseUUIDPipe) bookingId: string): Promise<{ ok: true }> {

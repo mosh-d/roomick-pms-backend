@@ -11,12 +11,15 @@
 //   not model policies.
 
 generator client {
-  provider = "prisma-client-js"
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  // pg_trgm: the trigram index that makes "part of a phone number" lookups index-backed.
+  extensions = [pg_trgm]
 }
 
 // ---------------------------------------------------------------------------
@@ -321,6 +324,10 @@ model Tenant {
   // stay ends, in months; NULL keeps them. Set on Security & Roles →
   // Document Retention, applied nightly (RetentionService).
   documentRetentionMonths Int?         @db.SmallInt
+  // The organisation's confirmation-number counter — one sequence for every
+  // branch, since the number is unique per tenant. Bumped atomically by
+  // ReservationsService.generateConfirmationNumber.
+  reservationSeq          Int          @default(0)
   demoExpiresAt           DateTime?    @db.Timestamptz(6)
   createdAt               DateTime     @default(now()) @db.Timestamptz(6)
   updatedAt               DateTime     @updatedAt @db.Timestamptz(6)
@@ -568,6 +575,8 @@ model UserBranchRole {
 
   @@unique([userId, roleId, branchId])
   @@index([userId, branchId])
+  @@index([roleId])
+  @@index([branchId])
   @@map("user_branch_roles")
 }
 
@@ -614,6 +623,7 @@ model InviteToken {
   invitedByUser User?   @relation(fields: [invitedBy], references: [id], onDelete: Cascade)
 
   @@index([tenantId, email])
+  @@index([branchId])
   @@map("invite_tokens")
 }
 
@@ -825,6 +835,7 @@ model Room {
   @@index([branchId, roomTypeId, occupancyStatus])
   @@index([branchId, cleanlinessStatus])
   @@index([floorId, cleanlinessStatus])
+  @@index([roomTypeId])
   @@map("rooms")
 }
 
@@ -857,6 +868,7 @@ model GuestProfile {
   name                    String    @db.VarChar(200)
   email                   String?   @db.VarChar(320)
   phone                   String?   @db.VarChar(20)
+  phoneDigits             String?   @db.VarChar(20) // the digits of `phone` alone — what search and matching compare
   nationality             String?   @db.Char(2) // ISO 3166-1 alpha-2
   idDocType               String?   @db.VarChar(30) // passport | national_id | drivers_license
   idDocNumber             String? // AES-256-GCM encrypted at application layer — never plaintext
@@ -891,6 +903,7 @@ model GuestProfile {
   campaignRecipients  CampaignRecipient[]
 
   @@index([tenantId, email])
+  @@index([phoneDigits(ops: raw("gin_trgm_ops"))], type: Gin)
   @@index([tenantId, name])
   @@map("guest_profiles")
 }
@@ -1229,7 +1242,7 @@ model CompetitorRate {
 
 model Reservation {
   id                    String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  confirmationNumber    String             @db.VarChar(20) // RES-2024-00001, sequence per branch — unique per tenant, see @@unique below
+  confirmationNumber    String             @db.VarChar(20) // RES-2024-00001 from the tenant's own counter (Tenant.reservationSeq) — unique per tenant, see @@unique below
   tenantId              String             @db.Uuid
   branchId              String             @db.Uuid
   guestId               String             @db.Uuid
@@ -1237,6 +1250,7 @@ model Reservation {
   roomId                String?            @db.Uuid // NULL until check-in (or assignment); always NULL while waitlisted
   ratePlanId            String?            @db.Uuid // plan that won at booking time
   confirmedRate         Decimal            @db.Decimal(12, 2) // snapshot at booking — never changes
+  nightlyRates          Json? // [{ date: 'YYYY-MM-DD', rate: '45000.00' }] — each night's own price from the resolver; nights are billed from this (stays booked before it existed are billed as the total split evenly)
   overrideRate          Decimal?           @db.Decimal(12, 2) // manager rate override (absolute nightly rate) — NOT a rate_plans row
   overrideReason        String? // mandatory when overrideRate is set
   groupBlockId          String?            @db.Uuid // NULL = not booked against a group block; the block's own rate is applied via the SAME overrideRate mechanism, not a parallel one
@@ -1355,6 +1369,7 @@ model RatePlan {
   @@index([branchId, roomTypeId, isOverride, cascadeTier])
   @@index([branchId, validFrom, validTo])
   @@index([branchId, isOverride])
+  @@index([roomTypeId])
   @@map("rate_plans")
 }
 
@@ -1485,6 +1500,7 @@ model Folio {
 
   @@index([reservationId])
   @@index([branchId, status])
+  @@index([guestId])
   @@map("folios")
 }
 
@@ -1539,6 +1555,7 @@ model LineItem {
   @@index([folioId, postedAt])
   @@index([folioId, chargeType])
   @@index([outletId])
+  @@index([postedBy])
   @@map("line_items")
 }
 
@@ -1685,6 +1702,7 @@ model HousekeepingTask {
 
   @@index([branchId, taskDate, status])
   @@index([assigneeId, taskDate, status])
+  @@index([roomId])
   @@map("housekeeping_tasks")
 }
 
@@ -1717,6 +1735,7 @@ model Shift {
 
   @@index([branchId, closedAt])
   @@index([branchId, openedAt(sort: Desc)])
+  @@index([agentId])
   @@map("shifts")
 }
 
@@ -1768,6 +1787,9 @@ model MaintenanceOrder {
   assignedToUser User?  @relation("MaintAssignedTo", fields: [assignedTo], references: [id], onDelete: SetNull)
 
   @@index([branchId, status])
+  @@index([roomId])
+  @@index([assetId])
+  @@index([assignedTo])
   @@map("maintenance_orders")
 }
 
@@ -1970,6 +1992,8 @@ model PosOrder {
   @@unique([outletId, orderNo])
   @@index([branchId, createdAt])
   @@index([shiftId])
+  @@index([folioId])
+  @@index([reservationId])
   @@map("pos_orders")
 }
 
@@ -2154,6 +2178,7 @@ model CampaignRecipient {
 
   @@unique([campaignId, guestId]) // one send per guest per campaign - what makes a resumed send idempotent
   @@index([tenantId, campaignId])
+  @@index([guestId])
   @@map("campaign_recipients")
 }
 
@@ -2220,6 +2245,7 @@ model CommunicationLog {
   @@index([guestId, sentAt(sort: Desc)])
   @@index([branchId, deliveryStatus, sentAt])
   @@index([branchId, direction, readAt])
+  @@index([sentBy])
   @@map("communication_log")
 }
 
@@ -2267,6 +2293,7 @@ model GdprRequest {
   guest  GuestProfile @relation(fields: [guestId], references: [id], onDelete: Restrict)
 
   @@index([tenantId, status])
+  @@index([guestId])
   @@map("gdpr_requests")
 }
 

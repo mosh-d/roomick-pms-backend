@@ -1,6 +1,7 @@
 import { Body, Controller, Get, Param, ParseUUIDPipe, Patch, Post } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentTenant, CurrentUser } from '../../common/decorators';
+import { BranchOf } from '../../common/decorators/branch-of.decorator';
 import { Permission } from '../../common/decorators/permission.decorator';
 import { ALL_SYSTEM_ROLES, Roles, SystemRole } from '../../common/decorators/roles.decorator';
 import { JwtPayload } from '../../common/types/request-context';
@@ -37,6 +38,8 @@ export class TaxesController {
   }
 
   @Patch('tax-rules/:taxRuleId')
+
+  @BranchOf('taxRule', 'taxRuleId')
   @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.Accountant)
   @ApiOperation({ summary: 'Retire or reinstate a tax rule (isActive) — rules are never deleted' })
   updateTaxRule(
@@ -49,6 +52,8 @@ export class TaxesController {
   }
 
   @Post('tax-rules/:taxRuleId/replace')
+
+  @BranchOf('taxRule', 'taxRuleId')
   @Permission('taxes', 'update')
   @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.Accountant)
   @ApiOperation({ summary: 'Change a rule’s rate, amount or scope: retires it and creates its replacement in one step, leaving posted bills untouched' })

@@ -51,7 +51,7 @@ const EVERY_STAFF_ROLE = [FD, HK, AC, POS] as const;
 
 export const PAGE_CATALOGUE: readonly PageDefinition[] = [
   // --- Operations -------------------------------------------------------------------------------------------------
-  { key: '/dashboard/alerts', label: 'Alerts', group: 'Operations', feature: 'Alerts', module: 'alerts', roles: EVERY_STAFF_ROLE, uses: ['alerts'] },
+  { key: '/dashboard/alerts', label: 'Alerts', group: 'Operations', feature: 'Alerts', module: 'alerts', roles: [FD, AC], uses: ['alerts'] },
 
   { key: '/dashboard/arrivals', label: 'Arrivals Dashboard', group: 'Operations', feature: 'Front Desk', module: 'reservations', roles: EVERY_STAFF_ROLE, uses: ['reservations', 'property'] },
   { key: '/dashboard/check-in', label: 'Check-In Flow', group: 'Operations', feature: 'Front Desk', module: 'reservations', roles: EVERY_STAFF_ROLE, actRoles: [FD], uses: ['reservations', 'guests', 'property'] },
@@ -69,9 +69,9 @@ export const PAGE_CATALOGUE: readonly PageDefinition[] = [
   { key: '/dashboard/reservations/cancel', label: 'Cancel Reservation', group: 'Operations', feature: 'Reservations', module: 'reservations', roles: [FD], actRoles: [FD], uses: ['reservations'] },
   { key: '/dashboard/reservations/waitlist', label: 'Waitlist Management', group: 'Operations', feature: 'Reservations', module: 'reservations', roles: EVERY_STAFF_ROLE, actRoles: [FD], uses: ['reservations'] },
 
-  { key: '/dashboard/housekeeping/task-board', label: 'Task Board', group: 'Operations', feature: 'Housekeeping', module: 'housekeeping', roles: EVERY_STAFF_ROLE, actRoles: EVERY_STAFF_ROLE, uses: ['housekeeping', 'property'] },
+  { key: '/dashboard/housekeeping/task-board', label: 'Task Board', group: 'Operations', feature: 'Housekeeping', module: 'housekeeping', roles: [FD, HK], actRoles: [FD, HK], uses: ['housekeeping', 'property'] },
   // Assigning rooms and passing inspection are a supervisor's (owner or manager) — staff can watch.
-  { key: '/dashboard/housekeeping/staff-assignment', label: 'Staff Assignment', group: 'Operations', feature: 'Housekeeping', module: 'housekeeping', roles: EVERY_STAFF_ROLE, actRoles: [], uses: ['housekeeping', 'property'] },
+  { key: '/dashboard/housekeeping/staff-assignment', label: 'Staff Assignment', group: 'Operations', feature: 'Housekeeping', module: 'housekeeping', roles: [FD, HK], actRoles: [], uses: ['housekeeping', 'property'] },
   { key: '/dashboard/housekeeping/inspection-workflow', label: 'Inspection Workflow', group: 'Operations', feature: 'Housekeeping', module: 'property', roles: EVERY_STAFF_ROLE, actRoles: [], uses: ['housekeeping', 'property'] },
   { key: '/dashboard/housekeeping/room-blocking', label: 'Room Blocking / OOO', group: 'Operations', feature: 'Housekeeping', module: 'property', roles: EVERY_STAFF_ROLE, actRoles: [], uses: ['housekeeping', 'property'] },
 
@@ -99,7 +99,7 @@ export const PAGE_CATALOGUE: readonly PageDefinition[] = [
   { key: '/dashboard/guests/corporate', label: 'Corporate Accounts', group: 'Management', feature: 'Guest Profiles & CRM', module: 'guests', roles: [FD, AC], actRoles: [], uses: ['guests', 'reservations'] },
   { key: '/dashboard/sales-events', label: 'Sales & Events', group: 'Management', feature: 'Sales & Events', module: 'sales_events', roles: [FD], actRoles: [FD], uses: ['sales_events', 'property'] },
   { key: '/dashboard/maintenance', label: 'Maintenance', group: 'Management', feature: 'Maintenance', module: 'maintenance', roles: EVERY_STAFF_ROLE, actRoles: EVERY_STAFF_ROLE, uses: ['maintenance', 'property'] },
-  { key: '/dashboard/reports/operational', label: 'Operational Reports', group: 'Management', feature: 'Reports & Analytics', module: 'reports', roles: EVERY_STAFF_ROLE, uses: ['reports', 'property'] },
+  { key: '/dashboard/reports/operational', label: 'Operational Reports', group: 'Management', feature: 'Reports & Analytics', module: 'reports', roles: [FD, AC], uses: ['reports', 'property'] },
   { key: '/dashboard/reports/financial', label: 'Financial Reports', group: 'Management', feature: 'Reports & Analytics', module: 'reports', roles: [AC], uses: ['reports'] },
   { key: '/dashboard/reports/custom', label: 'Custom Report Builder', group: 'Management', feature: 'Reports & Analytics', module: 'reports', roles: [AC], actRoles: [AC], uses: ['reports'] },
 

@@ -21,7 +21,15 @@ export type BranchRecord =
   | 'ratePlan'
   | 'availabilityRestriction'
   | 'shift'
-  | 'shiftIssue';
+  | 'shiftIssue'
+  | 'outlet'
+  | 'menuItem'
+  | 'posOrder'
+  | 'eventSpace'
+  | 'eventBooking'
+  | 'competitor'
+  | 'taxRule'
+  | 'reportTemplate';
 
 export interface BranchOfMetadata {
   record: BranchRecord;

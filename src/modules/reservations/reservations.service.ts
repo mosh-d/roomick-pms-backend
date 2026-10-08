@@ -9,7 +9,7 @@ import { GuestsService } from '../guests/guests.service';
 import { CreateGuestDto } from '../guests/dto/guest.dto';
 import { FoliosService } from '../folios/folios.service';
 import { HousekeepingService } from '../housekeeping/housekeeping.service';
-import { RateResolverService } from '../rate-resolver/rate-resolver.service';
+import { RateResolverService, StayResolution } from '../rate-resolver/rate-resolver.service';
 import { RegistrationCardsService } from '../registration-cards/registration-cards.service';
 import { CommsLogService } from '../comms-log/comms-log.service';
 import { RestrictionsService } from '../revenue-management/restrictions.service';
@@ -25,6 +25,7 @@ import {
   resolveCancellationPolicy,
 } from './policies';
 import { manageBookingLine } from './guest-links';
+import { bookingConfirmationBody } from './guest-messages';
 import {
   AvailabilityCalendarQueryDto,
   AvailabilityQueryDto,
@@ -41,6 +42,9 @@ import {
   WalkInReservationDto,
   WalkReservationDto,
 } from './dto/reservation.dto';
+
+/** Each night's own price as resolved — kept on the stay so every night is billed at what it was quoted, not the total split evenly. */
+const nightlyRatesOf = (resolved: StayResolution): Prisma.InputJsonValue => resolved.perNight.map((night) => ({ date: night.date, rate: night.finalRate }));
 
 const RESERVATION_INCLUDE = {
   // VIP level for the badge on Arrivals and the In-House list (ref: "VIP / group badge").
@@ -534,7 +538,7 @@ export class ReservationsService {
         deal,
         { triggeredBy: 'booking_create', userId: actorId ?? undefined },
       );
-      const confirmationNumber = await this.generateConfirmationNumber(tx, tenantId, branchId);
+      const confirmationNumber = await this.generateConfirmationNumber(tx, tenantId);
 
       const reservation = await this.createReservationRow(tx, {
         tenantId,
@@ -546,6 +550,7 @@ export class ReservationsService {
         promoCode: deal.promoCode,
         confirmationNumber,
         confirmedRate: resolved.subtotal,
+        nightlyRates: nightlyRatesOf(resolved),
         status: dto.joinWaitlist ? 'waitlisted' : 'confirmed',
         channel: dto.channel ?? 'direct',
         checkInDate,
@@ -577,7 +582,20 @@ export class ReservationsService {
           guestId: guest.id,
           channel: 'email',
           subject: `Reservation Confirmed — ${confirmationNumber}`,
-          body: `Your reservation ${confirmationNumber} is confirmed — ${roomType.name}, ${dto.checkInDate} to ${dto.checkOutDate}.${manageBookingLine(branch, confirmationNumber)}`,
+          // A group booking is billed at the block's rate, not the resolver's quote.
+          body: bookingConfirmationBody({
+            guestName: guest.name,
+            confirmationNumber,
+            branch,
+            roomTypeName: roomType.name,
+            checkInDate: dto.checkInDate,
+            checkOutDate: dto.checkOutDate,
+            adults: dto.adults,
+            children: dto.children ?? 0,
+            subtotal: block ? new Prisma.Decimal(block.blockRate).mul(this.stayNights(reservation)) : resolved.subtotal,
+            taxTotal: block ? new Prisma.Decimal(0) : resolved.taxTotal,
+            total: block ? new Prisma.Decimal(block.blockRate).mul(this.stayNights(reservation)) : resolved.totalWithTax,
+          }),
           trigger: 'booking_confirmation',
         });
       }
@@ -615,7 +633,7 @@ export class ReservationsService {
         deal,
         { triggeredBy: 'walkin', userId: actorId },
       );
-      const confirmationNumber = await this.generateConfirmationNumber(tx, tenantId, branchId);
+      const confirmationNumber = await this.generateConfirmationNumber(tx, tenantId);
 
       const reservation = await this.createReservationRow(tx, {
         tenantId,
@@ -628,6 +646,7 @@ export class ReservationsService {
         promoCode: deal.promoCode,
         confirmationNumber,
         confirmedRate: resolved.subtotal,
+        nightlyRates: nightlyRatesOf(resolved),
         status: 'checked_in',
         channel: 'walk_in',
         checkInDate,
@@ -687,6 +706,18 @@ export class ReservationsService {
       throw new ConflictException({
         code: ErrorCode.INVALID_STATUS_TRANSITION,
         message: `Cannot check in a reservation with status "${reservation.status}"`,
+      });
+    }
+    // Check-in is for the arrival day. Early, the room went occupied now
+    // while only the booked arrival night was posted — the nights until then
+    // neither billed nor checked against availability. The stay's dates are
+    // moved first (Modify Reservation), which prices and holds them.
+    const branch = await this.propertyService.assertBranch(tx, reservation.branchId);
+    const today = toBranchDate(todayInTimezone(branch.timezone));
+    if (today < reservation.checkInDate) {
+      throw new ConflictException({
+        code: ErrorCode.EARLY_CHECK_IN,
+        message: `This stay arrives on ${reservation.checkInDate.toISOString().slice(0, 10)} — to check the guest in today, move the arrival date first so the nights until then are priced and the room is held`,
       });
     }
     // Invariant: `roomId` is only ever set AT check-in in this reduced
@@ -758,7 +789,6 @@ export class ReservationsService {
     // "Auto-generated when check-in is triggered" (ref) — a legal
     // document, not an afterthought, so it's part of THIS transaction,
     // not a fire-and-forget follow-up call.
-    const branch = await this.propertyService.assertBranch(tx, reservation.branchId);
     await this.registrationCardsService.generateCardInTx(tx, tenantId, { ...updated, branch: { currency: updated.branch.currency, regCardTemplate: branch.regCardTemplate } }, actorId);
 
     await this.audit(tx, tenantId, reservation.branchId, actorId, 'reservation.checked_in', reservationId, {
@@ -1332,7 +1362,7 @@ export class ReservationsService {
 
       const updated = await tx.reservation.update({
         where: { id: reservationId },
-        data: { status: 'confirmed', checkInDate, checkOutDate, ratePlanId: resolved.ratePlanId, confirmedRate: resolved.subtotal },
+        data: { status: 'confirmed', checkInDate, checkOutDate, ratePlanId: resolved.ratePlanId, confirmedRate: resolved.subtotal, nightlyRates: nightlyRatesOf(resolved) },
         include: RESERVATION_INCLUDE,
       });
 
@@ -1422,6 +1452,7 @@ export class ReservationsService {
           roomTypeId,
           ratePlanId: resolved.ratePlanId,
           confirmedRate: resolved.subtotal,
+          nightlyRates: nightlyRatesOf(resolved),
           adults: dto.adults ?? reservation.adults,
           children: dto.children ?? reservation.children,
         },
@@ -1518,7 +1549,7 @@ export class ReservationsService {
       const previousCheckOutDate = reservation.checkOutDate;
       const updated = await tx.reservation.update({
         where: { id: reservationId },
-        data: { checkOutDate: newCheckOutDate, confirmedRate, ratePlanId: resolved.ratePlanId },
+        data: { checkOutDate: newCheckOutDate, confirmedRate, ratePlanId: resolved.ratePlanId, nightlyRates: nightlyRatesOf(resolved) },
         include: RESERVATION_INCLUDE,
       });
 
@@ -1907,29 +1938,43 @@ export class ReservationsService {
    * being a sidebar item with no page behind it was missing since Phase 24.
    * Capped at 100 rows: a real search field, not a full-table browse.
    */
+  /** Newest first, a page at a time (`limit`/`offset`, 100 unless asked); `countReservations` says how many there are in all. */
   async listReservations(tenantId: string, branchId: string, dto: ListReservationsQueryDto) {
     return this.prisma.withTenant(tenantId, async (tx) => {
       await this.propertyService.assertBranch(tx, branchId);
-      const search = dto.search?.trim();
       return tx.reservation.findMany({
-        where: {
-          branchId,
-          deletedAt: null,
-          ...(dto.status ? { status: dto.status } : {}),
-          ...(search
-            ? {
-                OR: [
-                  { confirmationNumber: { contains: search, mode: 'insensitive' } },
-                  { guest: { name: { contains: search, mode: 'insensitive' } } },
-                ],
-              }
-            : {}),
-        },
+        where: this.listWhere(branchId, dto),
         include: RESERVATION_INCLUDE,
         orderBy: { createdAt: 'desc' },
-        take: 100,
+        take: dto.limit ?? 100,
+        skip: dto.offset ?? 0,
       });
     });
+  }
+
+  /** How many `listReservations` would return in all — the list itself stops at its limit, silently before this existed. */
+  async countReservations(tenantId: string, branchId: string, dto: ListReservationsQueryDto): Promise<{ count: number }> {
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      await this.propertyService.assertBranch(tx, branchId);
+      return { count: await tx.reservation.count({ where: this.listWhere(branchId, dto) }) };
+    });
+  }
+
+  private listWhere(branchId: string, dto: ListReservationsQueryDto): Prisma.ReservationWhereInput {
+    const search = dto.search?.trim();
+    return {
+      branchId,
+      deletedAt: null,
+      ...(dto.status ? { status: dto.status } : {}),
+      ...(search
+        ? {
+            OR: [
+              { confirmationNumber: { contains: search, mode: 'insensitive' } },
+              { guest: { name: { contains: search, mode: 'insensitive' } } },
+            ],
+          }
+        : {}),
+    };
   }
 
   async listInHouse(tenantId: string, branchId: string) {
@@ -2029,28 +2074,20 @@ export class ReservationsService {
   }
 
   /**
-   * `confirmationNumber` is unique per TENANT (`@@unique([tenantId,
-   * confirmationNumber])`), not globally — it used to be a bare `@unique`,
-   * which was a real bug: this collision check runs under the caller's own
-   * tenant context, so RLS hides every other tenant's rows from it. On a
-   * shared DB with many tenants, a low-activity branch's first few
-   * candidates (RES-2026-00001, 00002, …) reliably already belonged to some
-   * OTHER tenant — invisible to this `findUnique`, but still hit by the
-   * real global index underneath, so every "verified free" candidate
-   * collided on insert anyway, deterministically, not as a rare race. The
-   * actual `create()` call is ALSO wrapped in a retry loop (see
-   * `createReservationRow`) as defense against the TOCTOU window between
-   * this probe and the real insert — that part was always correct.
+   * `RES-<year>-<n>`, where `n` comes from the organisation's own counter
+   * (`Tenant.reservationSeq`), bumped atomically — one sequence for every
+   * branch, because the number is unique per tenant (`@@unique([tenantId,
+   * confirmationNumber])`). It used to count THIS branch's reservations and
+   * try the next five numbers: the moment one branch had five bookings, a
+   * second branch's first booking found all five taken and failed. The
+   * `tenants` table sits outside row-level security, so the counter is
+   * reachable from inside the tenant transaction.
    */
-  private async generateConfirmationNumber(tx: TenantTx, tenantId: string, branchId: string): Promise<string> {
-    const year = new Date().getFullYear();
-    const count = await tx.reservation.count({ where: { branchId } });
-    for (let attempt = 0; attempt < 5; attempt++) {
-      const candidate = `RES-${year}-${String(count + 1 + attempt).padStart(5, '0')}`;
-      const clash = await tx.reservation.findUnique({ where: { tenantId_confirmationNumber: { tenantId, confirmationNumber: candidate } } });
-      if (!clash) return candidate;
-    }
-    throw new ConflictException({ code: ErrorCode.CONFLICT, message: 'Could not generate a unique confirmation number' });
+  private async generateConfirmationNumber(tx: TenantTx, tenantId: string): Promise<string> {
+    const [row] = await tx.$queryRaw<Array<{ reservationSeq: number }>>`
+      UPDATE tenants SET "reservationSeq" = "reservationSeq" + 1 WHERE id = ${tenantId}::uuid RETURNING "reservationSeq"`;
+    if (!row) throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Organisation not found' });
+    return `RES-${new Date().getFullYear()}-${String(row.reservationSeq).padStart(5, '0')}`;
   }
 
   /**
@@ -2110,7 +2147,7 @@ export class ReservationsService {
         if (attempt === 2) {
           throw new ConflictException({ code: ErrorCode.CONFLICT, message: 'Could not create reservation' });
         }
-        data.confirmationNumber = await this.generateConfirmationNumber(tx, data.tenantId, data.branchId);
+        data.confirmationNumber = await this.generateConfirmationNumber(tx, data.tenantId);
       }
     }
     throw new ConflictException({ code: ErrorCode.CONFLICT, message: 'Could not create reservation' });

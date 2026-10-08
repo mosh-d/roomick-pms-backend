@@ -46,7 +46,7 @@ function makeTx() {
     webhookDelivery: { deleteMany: jest.fn().mockResolvedValue({ count: 2 }) },
     lineItem: { aggregate: jest.fn().mockResolvedValue({ _sum: { amount: new Prisma.Decimal('64500') } }) },
     payment: { aggregate: jest.fn().mockResolvedValue({ _sum: { amount: new Prisma.Decimal('64500') } }) },
-    auditLog: { create: jest.fn().mockResolvedValue({}) },
+    auditLog: { create: jest.fn().mockResolvedValue({}), updateMany: jest.fn().mockResolvedValue({ count: 3 }) },
   };
 }
 
@@ -226,6 +226,16 @@ describe('GdprService', () => {
       const entry = (tx.auditLog.create.mock.calls[0] as [{ data: { action: string; after: Record<string, unknown> } }])[0].data;
       expect(entry.action).toBe('gdpr.guest_erased');
       expect(JSON.stringify(entry.after)).not.toMatch(/Jane|jane@|2348012345678/);
+    });
+
+    it("scrubs what the audit trail recorded of the guest's details — the rows stay, their values go", async () => {
+      await service.eraseGuestData(TENANT_ID, REQUEST_ID, ACTOR_ID);
+      expect(tx.auditLog.updateMany).toHaveBeenCalledWith({
+        where: { entityType: 'guest_profile', entityId: GUEST_ID },
+        data: { before: Prisma.DbNull, after: { erased: true } },
+      });
+      const entry = (tx.auditLog.create.mock.calls[0] as [{ data: { after: Record<string, unknown> } }])[0].data;
+      expect(entry.after.auditRows).toBe(3);
     });
 
     it('refuses while a stay is booked or in progress', async () => {

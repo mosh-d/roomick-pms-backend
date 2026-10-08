@@ -60,8 +60,9 @@ import { PrismaModule } from './prisma/prisma.module';
     }),
     PassportModule,
     ScheduleModule.forRoot(),
-    // Global default: 100 req/min per IP. Generous enough not to trip up
-    // normal browsing/polling; the auth module overrides this per-route
+    // Global default: 600 req/min per IP. A dashboard page load is 5–15
+    // calls and a front office sits behind one router, so 100 tripped three
+    // desks plus the pages' own polling; the auth module overrides this per-route
     // with much tighter limits (see auth.controller.ts) since those routes
     // are @Public() — reachable with no JWT at all — and register()
     // specifically provisions a full tenant + owner + 6 system roles in
@@ -69,7 +70,7 @@ import { PrismaModule } from './prisma/prisma.module';
     // package's default) is fine for this single-instance deployment;
     // running more than one API instance would need a shared store (e.g.
     // the package's Redis storage adapter) so instances share counters.
-    ThrottlerModule.forRoot([{ ttl: 60_000, limit: 100 }]),
+    ThrottlerModule.forRoot([{ ttl: 60_000, limit: 600 }]),
     CommonModule,
     PrismaModule,
     SystemModule,

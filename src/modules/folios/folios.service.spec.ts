@@ -110,6 +110,26 @@ describe('FoliosService', () => {
   });
 
   describe('postRoomChargeForDate — accrual', () => {
+    it("bills a night at its own quoted price when the stay keeps one — a 100 + 150 stay posts 150 for its second night, not 125", async () => {
+      await service.postRoomChargeForDate(
+        tx as never,
+        reservation({
+          confirmedRate: new Prisma.Decimal('250'),
+          checkInDate: new Date('2026-09-01T00:00:00.000Z'),
+          checkOutDate: new Date('2026-09-03T00:00:00.000Z'),
+          nightlyRates: [
+            { date: '2026-09-01', rate: '100.00' },
+            { date: '2026-09-02', rate: '150.00' },
+          ],
+        }) as never,
+        folio() as never,
+        new Date('2026-09-02T00:00:00.000Z'),
+        'Night Audit',
+        ACTOR_ID,
+      );
+      expect(tx.lineItem.create.mock.calls[0][0].data.amount.toFixed(2)).toBe('150.00');
+    });
+
     it('derives one night from the stay total (confirmedRate / nights), not the room type base rate', async () => {
       await service.postRoomChargeForDate(tx as never, reservation() as never, folio() as never, new Date('2026-09-01T00:00:00.000Z'), 'Check-in', ACTOR_ID);
       expect(tx.lineItem.create).toHaveBeenCalledWith(
@@ -278,10 +298,10 @@ describe('FoliosService', () => {
       expect(webhookEvents.paymentRecorded).toHaveBeenCalledWith(tx, { tenantId: TENANT_ID, branchId: BRANCH_ID, type: 'payment.received', paymentId: 'pay-9' });
     });
 
-    it('leaves shiftId undefined for a cash payment when the agent has no open shift', async () => {
+    it('refuses cash when the agent has no open shift — it would never be counted', async () => {
       tx.shift.findFirst.mockResolvedValue(null);
-      await service.recordPayment(TENANT_ID, FOLIO_ID, { amount: 5000, method: 'cash' } as never, ACTOR_ID);
-      expect(tx.payment.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ shiftId: undefined }) }));
+      await expect(service.recordPayment(TENANT_ID, FOLIO_ID, { amount: 5000, method: 'cash' } as never, ACTOR_ID)).rejects.toThrow(/Open a shift/);
+      expect(tx.payment.create).not.toHaveBeenCalled();
     });
 
     it('never looks up a shift for a non-cash payment', async () => {

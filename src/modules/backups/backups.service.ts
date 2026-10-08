@@ -1,8 +1,9 @@
 import { Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
 import { gunzipSync, gzipSync } from 'zlib';
+import { EncryptionService } from '../../common/crypto/encryption.service';
 import { ErrorCode } from '../../common/errors/error-codes';
+import { TenantModelMeta, tenantModelInsertOrder, tenantScopedModels } from '../../common/prisma/tenant-models';
 import { PrismaService } from '../../prisma/prisma.service';
 import { BACKUP_STORAGE_ADAPTER, BackupStorageAdapter } from './storage/backup-storage.interface';
 
@@ -16,14 +17,6 @@ export interface BackupRecordSummary {
   retainUntil: Date | null;
 }
 
-/**
- * Not real tenant business data — `UserEmailIndex` is a global lookup table
- * with no RLS policy applied to it at all (see its own schema.prisma
- * comment), and `BackupRecord` is the ledger backups themselves write to;
- * including it in its own snapshot would be circular.
- */
-const EXCLUDED_MODELS = new Set(['UserEmailIndex', 'BackupRecord']);
-
 const RETENTION_DAYS = 30;
 
 type DynamicDelegate = {
@@ -34,30 +27,7 @@ type DynamicDelegate = {
   count: (args: { where: { tenantId: string } }) => Promise<number>;
 };
 
-
-interface RestoreModelMeta {
-  modelName: string;
-  accessor: string;
-  idFieldName: string;
-  /** `false` = BigInt id (RateAuditLog/NightAuditLog/AuditLog) — nothing in the tenant-scoped schema references these as a foreign key, so the drill lets Postgres autogenerate a fresh one instead of remapping. */
-  idIsUuid: boolean;
-  /**
-   * Columns unique across EVERY tenant, not per tenant (`User.email`,
-   * `InviteToken.token`, `Branch.bookingSlug`, `RefreshToken.tokenHash`) —
-   * restoring into a still-live original tenant collides on the original
-   * value. Rewritten off the row's own fresh id in the drill's copy only.
-   * Read from the schema, not listed by hand: a hand list missed the booking
-   * slug and the session token hash, and every drill failed on them.
-   */
-  globalUniqueFields: string[];
-  relations: Array<{ fieldNames: string[]; targetModel: string }>;
-  /**
-   * Optional FKs that close a cycle (`Reservation.billToFolioId` → Folio,
-   * whose own `reservationId` points back): inserted empty, then filled in
-   * once every row exists. See `buildRestoreInsertOrder`.
-   */
-  deferred: Array<{ fieldNames: string[]; targetModel: string }>;
-}
+type RestoreModelMeta = TenantModelMeta;
 
 export interface RestoreDrillResult {
   ok: boolean;
@@ -83,17 +53,16 @@ export interface RestoreDrillResult {
 export class BackupsService {
   private readonly logger = new Logger(BackupsService.name);
   private readonly tenantScopedModels: Array<{ modelName: string; accessor: string }>;
-  /** Parent-before-child insert order for `runRestoreDrill`, computed once from DMMF relation metadata — see `buildRestoreInsertOrder`'s own comment for why this can't just be `tenantScopedModels` in declaration order. */
+  /** Parent-before-child insert order for `runRestoreDrill`, computed once from DMMF relation metadata — see `tenantModelInsertOrder`'s own comment for why this can't just be `tenantScopedModels` in declaration order. */
   private readonly restoreInsertOrder: RestoreModelMeta[];
 
   constructor(
     private readonly prisma: PrismaService,
+    private readonly encryption: EncryptionService,
     @Inject(BACKUP_STORAGE_ADAPTER) private readonly storage: BackupStorageAdapter,
   ) {
-    this.tenantScopedModels = Prisma.dmmf.datamodel.models
-      .filter((m) => m.fields.some((f) => f.name === 'tenantId') && !EXCLUDED_MODELS.has(m.name))
-      .map((m) => ({ modelName: m.name, accessor: m.name.charAt(0).toLowerCase() + m.name.slice(1) }));
-    this.restoreInsertOrder = this.buildRestoreInsertOrder();
+    this.tenantScopedModels = tenantScopedModels();
+    this.restoreInsertOrder = tenantModelInsertOrder();
   }
 
   /**
@@ -118,8 +87,12 @@ export class BackupsService {
       });
 
       const json = JSON.stringify(snapshot, (_key, value: unknown) => (typeof value === 'bigint' ? value.toString() : value));
-      const gzipped = gzipSync(Buffer.from(json, 'utf-8'));
-      const key = `${tenantId}/${record.id}.json.gz`;
+      // Encrypted at rest with the same key as ID photos and GDPR exports: a
+      // backup holds every guest's details, staff password hashes, MFA
+      // secrets and webhook signing secrets — plain gzip on a disk was a copy
+      // of all of it for anyone who could read the volume.
+      const gzipped = this.encryption.encryptBuffer(gzipSync(Buffer.from(json, 'utf-8')));
+      const key = `${tenantId}/${record.id}.json.gz.enc`;
       const storageUrl = await this.storage.write(key, gzipped);
 
       const updated = await this.prisma.backupRecord.update({
@@ -191,6 +164,36 @@ export class BackupsService {
     return this.runRestoreDrill(backupRecordId);
   }
 
+  /** A stored backup, open: decrypted when it was written encrypted (`.enc`), then decompressed. Backups from before encryption are plain gzip and still read. */
+  private async readSnapshot(storageUrl: string): Promise<Record<string, unknown[]>> {
+    const bytes = await this.storage.read(storageUrl);
+    const compressed = storageUrl.endsWith('.enc') ? this.encryption.decryptBuffer(bytes) : bytes;
+    return JSON.parse(gunzipSync(compressed).toString('utf-8')) as Record<string, unknown[]>;
+  }
+
+  /**
+   * Backups past their retention date are deleted from storage and the
+   * record marked `expired` — the file was the thing to remove; the record
+   * stays as the history of when a backup existed.
+   */
+  async pruneExpiredBackups(): Promise<number> {
+    const expired = await this.prisma.backupRecord.findMany({
+      where: { status: 'completed', storageUrl: { not: null }, retainUntil: { lt: new Date() } },
+      select: { id: true, storageUrl: true },
+    });
+    let pruned = 0;
+    for (const record of expired) {
+      try {
+        await this.storage.remove(record.storageUrl!);
+        await this.prisma.backupRecord.update({ where: { id: record.id }, data: { status: 'expired', storageUrl: null } });
+        pruned += 1;
+      } catch (err) {
+        this.logger.error(`Could not prune expired backup ${record.id}`, err);
+      }
+    }
+    return pruned;
+  }
+
   /** Every tenant actually in use — `suspended`/`cancelled` ones don't need a fresh nightly snapshot of data nobody's adding to. */
   async runBackupForAllTenants(): Promise<void> {
     const tenants = await this.prisma.tenant.findMany({ where: { status: { in: ['trial', 'active'] } }, select: { id: true, subdomain: true } });
@@ -222,9 +225,7 @@ export class BackupsService {
       return { ok: false, error: 'Backup record not found or has no stored file' };
     }
     try {
-      const compressed = await this.storage.read(record.storageUrl);
-      const json = gunzipSync(compressed).toString('utf-8');
-      const snapshot = JSON.parse(json) as Record<string, unknown[]>;
+      const snapshot = await this.readSnapshot(record.storageUrl);
       const expectedModels = new Set(this.tenantScopedModels.map((m) => m.modelName));
       const actualModels = new Set(Object.keys(snapshot));
       if (expectedModels.size !== actualModels.size || [...expectedModels].some((m) => !actualModels.has(m))) {
@@ -267,8 +268,7 @@ export class BackupsService {
 
     let snapshot: Record<string, unknown[]>;
     try {
-      const compressed = await this.storage.read(record.storageUrl);
-      snapshot = JSON.parse(gunzipSync(compressed).toString('utf-8')) as Record<string, unknown[]>;
+      snapshot = await this.readSnapshot(record.storageUrl);
     } catch (err) {
       return { ok: false, error: `Could not read backup: ${err instanceof Error ? err.message : String(err)}` };
     }
@@ -414,95 +414,4 @@ export class BackupsService {
     }
   }
 
-  /**
-   * Parent-before-child order over `tenantScopedModels`, derived from each
-   * model's own `relationFromFields` (confirmed via a direct DMMF probe to
-   * carry exactly the FK columns + target model needed here) rather than
-   * hand-listed — a hand-listed order silently rots the first time a new
-   * tenant-scoped model or relation is added and nobody remembers to update
-   * it. Plain Kahn's algorithm; ties broken alphabetically so the order is
-   * deterministic across runs (matters for tests, not correctness).
-   *
-   * **A cycle is broken on an optional FK** — `Reservation.billToFolioId`
-   * (a group's master bill) points at a Folio whose own `reservationId`
-   * points back. When the order sticks, an optional FK that lies on the
-   * cycle is deferred: its rows go in with it empty and it's filled in once
-   * every row exists. A cycle with no optional FK to break it still throws
-   * — a silent infinite loop would be far worse than a loud failure.
-   */
-  private buildRestoreInsertOrder(): RestoreModelMeta[] {
-    const scopedNames = new Set(this.tenantScopedModels.map((m) => m.modelName));
-    const optionalField = new Map<string, boolean>();
-    const metas: RestoreModelMeta[] = this.tenantScopedModels.map(({ modelName, accessor }) => {
-      const model = Prisma.dmmf.datamodel.models.find((m) => m.name === modelName)!;
-      const idField = model.fields.find((f) => f.isId)!;
-      for (const f of model.fields) optionalField.set(`${modelName}.${f.name}`, !f.isRequired);
-      const relations = model.fields
-        .filter((f) => f.kind === 'object' && f.relationFromFields && f.relationFromFields.length > 0)
-        .map((f) => ({ fieldNames: [...f.relationFromFields!], targetModel: f.type }));
-      // A unique foreign key needs no rewrite — it's remapped to a fresh row's id like any other.
-      const foreignKeys = new Set(relations.flatMap((r) => r.fieldNames));
-      const globalUniqueFields = model.fields
-        .filter((f) => f.kind === 'scalar' && f.isUnique && !f.isId && f.type === 'String' && !foreignKeys.has(f.name))
-        .map((f) => f.name);
-      return { modelName, accessor, idFieldName: idField.name, idIsUuid: idField.type === 'String', globalUniqueFields, relations, deferred: [] };
-    });
-    const byName = new Map(metas.map((m) => [m.modelName, m]));
-    const dependsOn = (m: RestoreModelMeta) => new Set(m.relations.map((r) => r.targetModel).filter((t) => scopedNames.has(t) && t !== m.modelName));
-
-    for (;;) {
-      const dependents = new Map<string, string[]>(metas.map((m) => [m.modelName, []]));
-      const remainingDeps = new Map<string, number>();
-      for (const m of metas) {
-        const deps = dependsOn(m);
-        remainingDeps.set(m.modelName, deps.size);
-        for (const dep of deps) dependents.get(dep)!.push(m.modelName);
-      }
-
-      const ready = metas.filter((m) => remainingDeps.get(m.modelName) === 0).map((m) => m.modelName);
-      const order: string[] = [];
-      while (ready.length > 0) {
-        ready.sort();
-        const name = ready.shift()!;
-        order.push(name);
-        for (const dependent of dependents.get(name)!) {
-          const remaining = remainingDeps.get(dependent)! - 1;
-          remainingDeps.set(dependent, remaining);
-          if (remaining === 0) ready.push(dependent);
-        }
-      }
-      if (order.length === metas.length) return order.map((name) => byName.get(name)!);
-
-      // Stuck: defer one optional FK that lies on a cycle — from A to B where B depends (in turn) on A.
-      const stuck = new Set(metas.map((m) => m.modelName).filter((n) => !order.includes(n)));
-      const reaches = (from: string, to: string): boolean => {
-        const seen = new Set<string>();
-        const queue = [from];
-        while (queue.length > 0) {
-          const name = queue.shift()!;
-          if (name === to) return true;
-          if (seen.has(name) || !stuck.has(name)) continue;
-          seen.add(name);
-          queue.push(...dependsOn(byName.get(name)!));
-        }
-        return false;
-      };
-      const candidates = metas
-        .filter((m) => stuck.has(m.modelName))
-        .flatMap((m) =>
-          m.relations
-            .filter((r) => stuck.has(r.targetModel) && r.targetModel !== m.modelName)
-            .filter((r) => r.fieldNames.every((f) => optionalField.get(`${m.modelName}.${f}`)))
-            .filter((r) => reaches(r.targetModel, m.modelName))
-            .map((r) => ({ meta: m, relation: r, key: `${m.modelName}.${r.fieldNames.join(',')}` })),
-        )
-        .sort((a, b) => a.key.localeCompare(b.key));
-      const breaker = candidates[0];
-      if (!breaker) {
-        throw new Error(`Cannot compute a restore insert order — cyclic tenant-scoped FK dependency among: ${[...stuck].join(', ')}`);
-      }
-      breaker.meta.relations = breaker.meta.relations.filter((r) => r !== breaker.relation);
-      breaker.meta.deferred.push(breaker.relation);
-    }
-  }
 }

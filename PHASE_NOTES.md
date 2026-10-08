@@ -1,5 +1,36 @@
 # Phase Notes
 
+## Audit fixes: confirmation numbers, the night audit, weekend rates, deleting an organisation, encrypted backups, cash and shifts, guest matching, per-night billing (2026-10-08)
+
+A full security, performance and feature audit of both repos (the report sits outside the repos, `docs/roomick-audit-2026-10-07.md`, with a fix-status table at its end) found 2 critical, 7 high, 16 medium and 12 low findings. Everything but four lows is fixed here. Migrations `20261008030000` (confirmation counter), `20261008120000` (indexes), `20261008130000` (phone digits, per-night rates, `pg_trgm`).
+
+### Money and records
+- **Confirmation numbers are one counter per organisation** (`Tenant.reservationSeq`, bumped with `UPDATE … RETURNING`). They were counted per branch while being unique per tenant, so a second branch's first booking collided with the first branch's numbers. Existing numbers backfilled.
+- **The night audit refuses a date after yesterday**, and every stay and no-show posts under its own savepoint, so one bad row no longer aborts the run (a failed statement aborts the whole Postgres transaction otherwise). The preflight returns `pendingDates` (every night still to close, oldest first) and `closedAhead` (nights closed out of order).
+- **Weekend rate plans apply only on weekend nights** — Friday and Saturday unless `branch.policies.weekendNights` says otherwise. They applied every night of the week.
+- **Each night's own price is kept on the stay** (`Reservation.nightlyRates`, from the resolver's per-night trace) and nights post from it; a 30,000 + 45,000 stay billed as two nights of 37,500 before, and the even split could leave the bill a kobo off the quote. Stays from before fall back to the split.
+- **Check-in is for the arrival day** (`EARLY_CHECK_IN`, 409): early, the room went occupied while only the arrival night was posted and the nights until then were neither billed nor availability-checked. The dates are moved first.
+- **Cash needs an open shift** — payments, refunds and POS sales (`SHIFT_REQUIRED`, 409). Cash taken before a shift opened was recorded against no drawer and never reconciled.
+- **A booking reuses the guest on file** with the same email or phone (last nine digits — "0803 123 4567" and "+234 803 123 4567" are one number), filling in what the profile lacks. Every booking made a new profile before. `GuestProfile.phoneDigits` holds the digits, with a trigram index, so phone search no longer reshapes every guest's phone per keystroke.
+- **The confirmation email** says the nights, the rate and total, check-in/out times and the property's address (`guest-messages.ts`).
+
+### Security
+- **Deleting an organisation deletes all of it**, in one transaction, every tenant table children-first in the order the backup restore inserts in (read off the schema — `common/prisma/tenant-models.ts` — so a new table is never forgotten), the sign-in email index, then the tenant; the owner gives their password (`DeleteOrganizationDto`). It used to clear five tables and trust cascades, so any organisation with a guest or a booking failed halfway, leaving the owner unable to sign in or sign up again. `test/delete-organization.e2e-spec.ts` proves it against the real database, group master bill (the schema's one FK cycle) included.
+- **Backups are encrypted at rest** (`EncryptionService`, the ID-photo key; `.json.gz.enc`), older plain backups still open, and expired files are pruned at 02:30 (`pruneExpiredBackups`, `BackupStorageAdapter.remove`).
+- **`trust proxy`** is on, so per-IP limits and audit addresses see the client, not Render's proxy; the global limit is 600/min; a 429 reads "Too many requests — wait a minute and try again". `Idempotency-Key` is no longer advertised by CORS (nothing implemented it).
+- **Access tokens are checked against the account on every request** (`AccountStatusService`, remembered 30 s; deactivation and deletion forget at once) — a deactivated person, or one whose organisation was deleted, gets 401 at the door instead of a 500 deeper in.
+- **Roles on reports, housekeeping tasks and alerts** (`@Roles` on the controllers; Page Access defaults to match), and **`@BranchOf`** on POS outlets/menu items/orders, group blocks, event spaces/bookings, competitors, tax rules and report templates — reachable across branches by id before.
+- **Swagger is off in production** unless `SWAGGER_ENABLED=true`. `guest.updated` audit rows record field names, not values, and erasure scrubs the guest's audit rows (`phoneDigits` goes too). `GET /branches/:id/staff` 404s on a missing branch.
+- `npm audit fix`: the critical `proxy-addr` advisory and every production one are gone; what's left is jest 29→30 and httpyac (dev tooling, major upgrades).
+
+### Lists and performance
+- `GET /branches/:id/reservations` pages (`limit` ≤ 500, `offset`) and `GET …/reservations/count` says how many match — the list stopped at 100 silently.
+- 17 indexes on the foreign keys real queries follow (`housekeeping_tasks.roomId`, `folios.guestId`, `pos_orders.folioId`, `shifts.agentId`, `user_branch_roles.roleId`, …).
+
+### Verified
+- **Checks:** `tsc` and lint clean; **1,241 tests** in 69 suites; `prisma migrate diff` shows no drift from these migrations.
+- **Live, against real Postgres:** all four end-to-end suites (15 tests) — the new one provisions a property, takes a cash payment only once a shift is open, checks a group in on a master bill, refuses the deletion without the password, then deletes everything and finds the owner's token refused and the email free again.
+
 ## Accounts and guest terms: invitations, passwords, email confirmation, privacy notice and booking terms, document retention, and the manage link (2026-10-07)
 
 The owner asked for the work that doesn't need their accounts to be finished: accepting staff invitations end to end, changing and resetting passwords, real email confirmation at sign-up, a place for the privacy notice and booking terms, document retention, and "Manage your booking" links in guest emails. Migration `20261008020000`.

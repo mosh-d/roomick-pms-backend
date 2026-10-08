@@ -1,5 +1,6 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { Branch, UserOutlet } from '@prisma/client';
+import { AccountStatusService } from '../../common/auth/account-status.service';
 import { ErrorCode } from '../../common/errors/error-codes';
 import { AccountMailService } from '../../common/mail/account-mail.service';
 import { JwtPayload } from '../../common/types/request-context';
@@ -74,15 +75,18 @@ export class UsersService {
     private readonly prisma: PrismaService,
     private readonly authService: AuthService,
     private readonly accountMail: AccountMailService,
+    private readonly accountStatus: AccountStatusService,
   ) {}
 
   /**
    * Staff visible at a branch = branch-scoped assignments + all-branch (NULL)
    * assignments. With `actor`, each entry also says what that person may
    * change; without (another module reusing the list), nothing is changeable.
+   * A branch that isn't there is a 404 — not the all-branch staff under any id.
    */
   async listStaff(tenantId: string, branchId: string, actor: JwtPayload | null = null): Promise<StaffListEntry[]> {
     return this.prisma.withTenant(tenantId, async (tx) => {
+      await this.assertBranch(tx, branchId);
       const assignments = await tx.userBranchRole.findMany({
         where: { OR: [{ branchId }, { branchId: null }] },
         include: {
@@ -323,8 +327,12 @@ export class UsersService {
           where: { id: userId },
           data: { deletedAt: dto.active ? null : (user.deletedAt ?? new Date()) },
         });
-        // Deactivated means signed out too — not whenever their session next renews.
-        if (!dto.active) await tx.refreshToken.updateMany({ where: { userId, revokedAt: null }, data: { revokedAt: new Date() } });
+        // Deactivated means signed out too — not whenever their session next
+        // renews, and not when their current access token runs out either.
+        if (!dto.active) {
+          await tx.refreshToken.updateMany({ where: { userId, revokedAt: null }, data: { revokedAt: new Date() } });
+          this.accountStatus.forget(userId);
+        }
       }
 
       if (dto.roleId !== undefined) {

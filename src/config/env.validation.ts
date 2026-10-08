@@ -15,6 +15,9 @@ export const envValidationSchema = Joi.object({
   // 32 bytes hex — AES-256-GCM key for guest ID document encryption
   ENCRYPTION_KEY: Joi.string().hex().length(64).required(),
   CORS_ORIGINS: Joi.string().allow('').default(''),
+  // The interactive API docs at /api/docs are always served in development; in
+  // production only with this set to true (for integrators who need them).
+  SWAGGER_ENABLED: Joi.string().valid('true', 'false').optional(),
   // Optional — error tracking (src/instrument.ts) stays off entirely until this is set.
   SENTRY_DSN: Joi.string().uri().allow('').optional(),
   // Optional — defaults to <os temp dir>/roomick-backups (see LocalFilesystemBackupStorage).

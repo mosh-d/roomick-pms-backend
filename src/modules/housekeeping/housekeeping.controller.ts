@@ -2,6 +2,7 @@ import { Body, Controller, Get, Param, ParseUUIDPipe, Post, Query } from '@nestj
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentTenant, CurrentUser } from '../../common/decorators';
 import { Permission } from '../../common/decorators/permission.decorator';
+import { Roles, SystemRole } from '../../common/decorators/roles.decorator';
 import { JwtPayload } from '../../common/types/request-context';
 import { AssignTaskDto, CreateTaskDto, ListTasksQueryDto, ReportIssueDto } from './dto/housekeeping.dto';
 import { HousekeepingService } from './housekeeping.service';
@@ -10,6 +11,9 @@ import { HousekeepingService } from './housekeeping.service';
 @ApiBearerAuth()
 @Controller()
 @Permission('housekeeping')
+// Who cleans rooms, runs the floor, or sends a guest to a clean one — not an
+// accountant or a cashier marking rooms clean (these routes named no roles).
+@Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk, SystemRole.Housekeeper)
 export class HousekeepingController {
   constructor(private readonly housekeepingService: HousekeepingService) {}
 

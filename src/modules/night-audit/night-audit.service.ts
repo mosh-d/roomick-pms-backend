@@ -1,4 +1,4 @@
-import { ConflictException, Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, Logger } from '@nestjs/common';
 import { PenaltyType, Prisma } from '@prisma/client';
 import { ErrorCode } from '../../common/errors/error-codes';
 import { todayInTimezone, toBranchDate } from '../../common/utils/branch-date';
@@ -62,7 +62,19 @@ export class NightAuditService {
     const auditDate = toBranchDate(auditDateStr);
 
     return this.prisma.withTenant(tenantId, async (tx) => {
-      await this.propertyService.assertBranch(tx, branchId);
+      const branch = await this.propertyService.assertBranch(tx, branchId);
+      // Only a night that has ended can be closed. A date in the future would
+      // bill nights nobody has slept yet and mark today's arrivals as no-shows
+      // before they've had the chance to arrive — and, since a date is audited
+      // once, the real audit for that night could then never run.
+      const requested = auditDate.toISOString().slice(0, 10);
+      const latest = this.yesterdayForBranch(branch.timezone);
+      if (requested > latest) {
+        throw new BadRequestException({
+          code: ErrorCode.VALIDATION_FAILED,
+          message: `${requested} hasn’t ended yet — the latest night that can be closed is ${latest}`,
+        });
+      }
 
       const already = await tx.nightAuditLog.findFirst({ where: { branchId, auditDate } });
       if (already) {
@@ -100,6 +112,10 @@ export class NightAuditService {
       });
 
       for (const reservation of inHouse) {
+        // Each stay in its own savepoint: a failed statement aborts a Postgres
+        // transaction, so without one a single bad folio would have poisoned
+        // every post after it — and the run's own log row with them.
+        await tx.$executeRawUnsafe('SAVEPOINT night_audit_stay');
         try {
           // `triggeredBy` straight through: NULL for the scheduled sweep is
           // `postedBy`'s own "system-posted". It used to fall back to `''` for
@@ -119,7 +135,9 @@ export class NightAuditService {
             chargesPosted++;
             totalAmountPosted = totalAmountPosted.plus(posted.amount).plus(posted.taxAmount);
           }
+          await tx.$executeRawUnsafe('RELEASE SAVEPOINT night_audit_stay');
         } catch (error) {
+          await tx.$executeRawUnsafe('ROLLBACK TO SAVEPOINT night_audit_stay');
           errors.push({ reservationId: reservation.id, reason: error instanceof Error ? error.message : 'Unknown error' });
         }
       }
@@ -186,6 +204,7 @@ export class NightAuditService {
 
     let marked = 0;
     for (const reservation of unarrived) {
+      await tx.$executeRawUnsafe('SAVEPOINT night_audit_no_show');
       try {
         // `triggeredBy` here is whoever triggered THIS AUDIT RUN — `null`
         // for the scheduled sweep, or a real user id for a manually
@@ -195,7 +214,9 @@ export class NightAuditService {
         // no-shows it marks to that human, same as the original code did).
         await this.reservationsService.markNoShowInTx(tx, tenantId, reservation, penaltyType, policy.flatFeeAmount, triggeredBy);
         marked++;
+        await tx.$executeRawUnsafe('RELEASE SAVEPOINT night_audit_no_show');
       } catch (error) {
+        await tx.$executeRawUnsafe('ROLLBACK TO SAVEPOINT night_audit_no_show');
         errors.push({ reservationId: reservation.id, reason: error instanceof Error ? error.message : 'Unknown error' });
       }
     }
@@ -235,10 +256,27 @@ export class NightAuditService {
         tx.shift.findMany({ where: { branchId, closedAt: null }, select: { shiftType: true } }),
       ]);
       const nightShiftOpen = openShifts.some((shift) => shift.shiftType === 'night');
+      // Oldest first, so a night the sweep missed is closed before yesterday's,
+      // and a later night that was somehow closed ahead of these is named.
+      const pendingDates = await this.datesToAuditInTx(tx, branchId, branch.timezone);
+      const closedAhead =
+        pendingDates.length > 0
+          ? (
+              await tx.nightAuditLog.findMany({
+                where: { branchId, auditDate: { gt: toBranchDate(pendingDates[0]) } },
+                select: { auditDate: true },
+                orderBy: { auditDate: 'asc' },
+              })
+            ).map((run) => run.auditDate.toISOString().slice(0, 10))
+          : [];
 
       return {
-        auditDate,
-        alreadyRan: alreadyRan !== null,
+        auditDate: pendingDates[0] ?? auditDate,
+        alreadyRan: pendingDates.length === 0 && alreadyRan !== null,
+        /** Every night still to close, oldest first — what the Trigger Audit button runs through. */
+        pendingDates,
+        /** Nights already closed that come AFTER the oldest pending one — closed out of order, worth a look. */
+        closedAhead,
         checklist: [
           {
             key: 'departures_resolved',
@@ -297,16 +335,16 @@ export class NightAuditService {
    * nights nobody was watching; those can still be run by hand.
    */
   async datesToAudit(tenantId: string, branchId: string, timezone: string): Promise<string[]> {
+    return this.prisma.withTenant(tenantId, (tx) => this.datesToAuditInTx(tx, branchId, timezone));
+  }
+
+  private async datesToAuditInTx(tx: TenantTx, branchId: string, timezone: string): Promise<string[]> {
     const yesterday = toBranchDate(this.yesterdayForBranch(timezone));
     const earliest = new Date(yesterday);
     earliest.setUTCDate(earliest.getUTCDate() - (CATCH_UP_DAYS - 1));
-    const done = await this.prisma.withTenant(tenantId, (tx) =>
-      tx.nightAuditLog.findMany({ where: { branchId, auditDate: { gte: earliest, lte: yesterday } }, select: { auditDate: true } }),
-    );
+    const done = await tx.nightAuditLog.findMany({ where: { branchId, auditDate: { gte: earliest, lte: yesterday } }, select: { auditDate: true } });
     const doneDates = new Set(done.map((run) => run.auditDate.toISOString().slice(0, 10)));
-    const latest = await this.prisma.withTenant(tenantId, (tx) =>
-      tx.nightAuditLog.findFirst({ where: { branchId }, orderBy: { auditDate: 'desc' }, select: { auditDate: true } }),
-    );
+    const latest = await tx.nightAuditLog.findFirst({ where: { branchId }, orderBy: { auditDate: 'desc' }, select: { auditDate: true } });
     // Nothing ever run, or nothing within the week: just yesterday.
     const start = latest && latest.auditDate >= earliest ? new Date(latest.auditDate) : new Date(yesterday);
     const dates: string[] = [];

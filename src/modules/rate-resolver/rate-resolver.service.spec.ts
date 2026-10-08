@@ -37,6 +37,7 @@ function makeTx() {
   return {
     ratePlan: { findMany: jest.fn().mockResolvedValue([]), findFirst: jest.fn(), create: jest.fn().mockImplementation(({ data }: { data: Record<string, unknown> }) => Promise.resolve({ id: 'new-plan', ...data })), update: jest.fn() },
     roomType: { findFirst: jest.fn().mockResolvedValue(ROOM_TYPE) },
+    branch: { findFirst: jest.fn().mockResolvedValue({ policies: null }) },
     corporateAccount: { findFirst: jest.fn().mockResolvedValue(null) },
     rateAuditLog: {
       create: jest.fn().mockImplementation(() => Promise.resolve({ id: BigInt(++auditLogSeq) })),
@@ -166,9 +167,23 @@ describe('RateResolverService', () => {
         plan({ id: 'weekend', type: 'weekend', cascadeTier: 3, adjustmentType: 'fixed', amount: new Prisma.Decimal('20') }),
         plan({ id: 'seasonal', type: 'seasonal', cascadeTier: 2, adjustmentType: 'percentage', amount: new Prisma.Decimal('10') }),
       ]);
-      // base 100 -> seasonal (tier 2, +10%) -> 110 -> weekend (tier 3, +20 fixed) -> 130
-      const result = await service.resolveStay(tx as never, TENANT_ID, BRANCH_ID, ROOM_TYPE as never, new Date('2026-09-01'), new Date('2026-09-02'), {}, { triggeredBy: 'booking_create' });
+      // Friday 4 Sept 2026: base 100 -> seasonal (tier 2, +10%) -> 110 -> weekend (tier 3, +20 fixed) -> 130
+      const result = await service.resolveStay(tx as never, TENANT_ID, BRANCH_ID, ROOM_TYPE as never, new Date('2026-09-04'), new Date('2026-09-05'), {}, { triggeredBy: 'booking_create' });
       expect(result.subtotal.toFixed(2)).toBe('130.00');
+    });
+
+    it('a weekend plan prices Friday and Saturday nights only — never a Tuesday', async () => {
+      tx.ratePlan.findMany.mockResolvedValue([plan({ id: 'weekend', type: 'weekend', cascadeTier: 3, adjustmentType: 'percentage', amount: new Prisma.Decimal('15') })]);
+      // Thu 3 → Sun 6 Sept 2026: Thursday plain, Friday and Saturday +15%.
+      const result = await service.resolveStay(tx as never, TENANT_ID, BRANCH_ID, ROOM_TYPE as never, new Date('2026-09-03'), new Date('2026-09-06'), {}, { triggeredBy: 'booking_create' });
+      expect(result.perNight.map((n) => n.finalRate)).toEqual(['100.00', '115.00', '115.00']);
+    });
+
+    it('a branch can name its own weekend nights (policies.weekendNights)', async () => {
+      tx.branch.findFirst.mockResolvedValue({ policies: { weekendNights: [6, 0] } }); // Saturday and Sunday nights
+      tx.ratePlan.findMany.mockResolvedValue([plan({ id: 'weekend', type: 'weekend', cascadeTier: 3, adjustmentType: 'fixed', amount: new Prisma.Decimal('20') })]);
+      const result = await service.resolveStay(tx as never, TENANT_ID, BRANCH_ID, ROOM_TYPE as never, new Date('2026-09-04'), new Date('2026-09-07'), {}, { triggeredBy: 'booking_create' });
+      expect(result.perNight.map((n) => n.finalRate)).toEqual(['100.00', '120.00', '120.00']); // Fri plain, Sat and Sun +20
     });
 
     it('a plan outside its validFrom/validTo window for this night does not apply', async () => {

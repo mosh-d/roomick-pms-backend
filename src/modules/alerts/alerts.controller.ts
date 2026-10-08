@@ -2,12 +2,15 @@ import { Controller, Get, Param, ParseUUIDPipe } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentTenant } from '../../common/decorators';
 import { Permission } from '../../common/decorators/permission.decorator';
+import { Roles, SystemRole } from '../../common/decorators/roles.decorator';
 import { AlertsService } from './alerts.service';
 
 @ApiTags('alerts')
 @ApiBearerAuth()
 @Controller('branches/:branchId/alerts')
 @Permission('alerts')
+// Alerts name who owes what and who hasn't arrived — the desk's and the books' business.
+@Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk, SystemRole.Accountant)
 export class AlertsController {
   constructor(private readonly alertsService: AlertsService) {}
 

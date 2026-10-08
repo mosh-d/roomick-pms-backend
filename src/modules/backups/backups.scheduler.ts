@@ -18,6 +18,17 @@ export class BackupsScheduler {
     }
   }
 
+  /** Half past two, after the night's backups: files whose retention has run out are deleted. */
+  @Cron('30 2 * * *')
+  async pruneExpired(): Promise<void> {
+    try {
+      const pruned = await this.backupsService.pruneExpiredBackups();
+      if (pruned > 0) this.logger.log(`Pruned ${pruned} expired backup${pruned === 1 ? '' : 's'}`);
+    } catch (error) {
+      this.logger.error('Backup prune failed', error);
+    }
+  }
+
   /** "Restore test procedure (documented + run monthly)" — noon on the 1st, clear of the nightly 2 AM backup and midnight demo-sweep crons. */
   @Cron(CronExpression.EVERY_1ST_DAY_OF_MONTH_AT_NOON)
   async monthlyRestoreDrill(): Promise<void> {

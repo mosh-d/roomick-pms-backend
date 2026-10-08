@@ -11,6 +11,10 @@ import { ReportsService } from './reports.service';
 @ApiBearerAuth()
 @Controller('branches/:branchId/reports')
 @Permission('reports')
+// Occupancy, ADR, RevPAR and revenue are the property's numbers — the people
+// who run it and keep its books, and the desk for the operational ones. These
+// had a module but no roles, so a housekeeper or cashier could read them.
+@Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.Accountant, SystemRole.FrontDesk)
 export class ReportsController {
   constructor(private readonly reportsService: ReportsService) {}
 

@@ -50,7 +50,13 @@ describe('RefundsService', () => {
       providers: [
         RefundsService,
         { provide: PrismaService, useValue: { withTenant: jest.fn((_t: string, fn: (x: unknown) => unknown) => fn(tx)) } },
-        { provide: FoliosService, useValue: { totalsInTx: totals } },
+        {
+          provide: FoliosService,
+          useValue: {
+            totalsInTx: totals,
+            shiftRequired: () => new ConflictException({ code: 'SHIFT_REQUIRED', message: 'Open a shift before taking cash — it has to go into a drawer that gets counted at close' }),
+          },
+        },
         { provide: PropertyService, useValue: { assertBranch: jest.fn().mockResolvedValue({ id: BRANCH_ID, currency: 'NGN' }) } },
         { provide: WebhookEventsService, useValue: webhookEvents },
       ],
@@ -156,6 +162,13 @@ describe('RefundsService', () => {
         data: { status: 'processed', processedAt: expect.any(Date), processedBy: 'desk-1', refundPaymentId: 'pay-out-1' },
       });
       expect(webhookEvents.paymentRecorded).toHaveBeenCalledWith(tx, { tenantId: TENANT_ID, branchId: BRANCH_ID, type: 'refund.paid', paymentId: 'pay-out-1', refundId: 'refund-1' });
+    });
+
+    it('cash can’t leave a drawer that isn’t open', async () => {
+      tx.refund.findFirst.mockResolvedValueOnce(refund({ status: 'approved' }));
+      tx.shift.findFirst.mockResolvedValueOnce(null);
+      await expect(service.payOut(TENANT_ID, 'refund-1', desk)).rejects.toThrow(/Open a shift/);
+      expect(tx.payment.create).not.toHaveBeenCalled();
     });
 
     it('a card refund touches no drawer', async () => {

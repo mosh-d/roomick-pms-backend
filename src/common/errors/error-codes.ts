@@ -12,6 +12,7 @@ export enum ErrorCode {
   CONFLICT = 'CONFLICT',
   INTERNAL = 'INTERNAL',
   NOT_IMPLEMENTED = 'NOT_IMPLEMENTED',
+  TOO_MANY_REQUESTS = 'TOO_MANY_REQUESTS',
 
   // tenancy
   TENANT_HEADER_MISSING = 'TENANT_HEADER_MISSING',
@@ -52,4 +53,8 @@ export enum ErrorCode {
   // shifts
   SHIFT_ALREADY_OPEN = 'SHIFT_ALREADY_OPEN',
   SHIFT_ALREADY_CLOSED = 'SHIFT_ALREADY_CLOSED',
+  /** Cash was offered with no shift open to put it in. */
+  SHIFT_REQUIRED = 'SHIFT_REQUIRED',
+  /** Checking in before the booked arrival day — the stay's dates are moved first. */
+  EARLY_CHECK_IN = 'EARLY_CHECK_IN',
 }

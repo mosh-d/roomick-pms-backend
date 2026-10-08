@@ -366,7 +366,8 @@ export class PosService {
           where: { branchId: outlet.branchId, agentId: actor.sub, closedAt: null },
           select: { id: true },
         });
-        shiftId = shift?.id ?? null;
+        if (!shift) throw this.foliosService.shiftRequired();
+        shiftId = shift.id;
       }
 
       const tableNumber = dto.tableNumber?.trim();

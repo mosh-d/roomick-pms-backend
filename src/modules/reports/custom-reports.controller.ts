@@ -2,6 +2,7 @@ import { Body, Controller, Delete, Get, HttpCode, Param, ParseUUIDPipe, Post, Re
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import type { Response } from 'express';
 import { CurrentTenant, CurrentUser } from '../../common/decorators';
+import { BranchOf } from '../../common/decorators/branch-of.decorator';
 import { Permission } from '../../common/decorators/permission.decorator';
 import { Roles, SystemRole } from '../../common/decorators/roles.decorator';
 import { JwtPayload } from '../../common/types/request-context';
@@ -70,6 +71,8 @@ export class CustomReportsController {
   }
 
   @Delete('report-templates/:templateId')
+
+  @BranchOf('reportTemplate', 'templateId')
   @HttpCode(204)
   @Roles(...REPORT_ROLES)
   @ApiOperation({ summary: 'Delete a saved report' })

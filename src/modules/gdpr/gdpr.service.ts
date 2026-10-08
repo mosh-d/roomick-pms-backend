@@ -167,6 +167,7 @@ export class GdprService {
           name: ERASED_GUEST_NAME,
           email: null,
           phone: null,
+          phoneDigits: null,
           nationality: null,
           idDocType: null,
           idDocNumber: null,
@@ -195,7 +196,7 @@ export class GdprService {
         if (card.documentUrl) filesToDelete.push(card.documentUrl);
       }
 
-      const [notes, messages, stays, webhookDeliveries] = await Promise.all([
+      const [notes, messages, stays, webhookDeliveries, auditRows] = await Promise.all([
         tx.guestNote.updateMany({ where: { guestId: guest.id }, data: { body: ERASED_TEXT } }),
         tx.communicationLog.updateMany({ where: { guestId: guest.id }, data: { body: ERASED_TEXT, bodyHtml: null } }),
         tx.reservation.updateMany({ where: { guestId: guest.id }, data: { specialRequests: null, estimatedArrivalTime: null } }),
@@ -209,6 +210,9 @@ export class GdprService {
             ],
           },
         }),
+        // What the audit trail recorded about the profile — field values from
+        // past edits — goes too. The rows stay, as the record that it changed.
+        tx.auditLog.updateMany({ where: { entityType: 'guest_profile', entityId: guest.id }, data: { before: Prisma.DbNull, after: { erased: true } } }),
       ]);
       // A bill's payer is the guest unless someone else (a company) was named.
       if (folioIds.length > 0) {
@@ -218,7 +222,7 @@ export class GdprService {
         }
       }
 
-      const note = `Erased in Roomick on ${now.toISOString().slice(0, 10)}: identity and contact details, ID document, registration cards, notes, messages and webhook deliveries. Bills, payments and stays kept as the financial record.`;
+      const note = `Erased in Roomick on ${now.toISOString().slice(0, 10)}: identity and contact details, ID document, registration cards, notes, messages, webhook deliveries and what the audit trail recorded of their details. Bills, payments and stays kept as the financial record.`;
       const updated = await tx.gdprRequest.update({
         where: { id: request.id },
         data: { status: 'completed', completedAt: now, notes: request.notes ? `${request.notes}\n${note}` : note },
@@ -239,6 +243,7 @@ export class GdprService {
             messages: messages.count,
             stays: stays.count,
             webhookDeliveries: webhookDeliveries.count,
+            auditRows: auditRows.count,
             documentsDeleted: filesToDelete.length,
           },
         },

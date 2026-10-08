@@ -3,7 +3,12 @@ import { Prisma } from '@prisma/client';
 import { gunzipSync, gzipSync } from 'zlib';
 import { PrismaService } from '../../prisma/prisma.service';
 import { BackupsService } from './backups.service';
+import { EncryptionService } from '../../common/crypto/encryption.service';
 import { BACKUP_STORAGE_ADAPTER } from './storage/backup-storage.interface';
+
+/** A stand-in cipher: four marker bytes in front, so a test can tell sealed from plain and open it again. */
+const SEAL = Buffer.from('ENC:');
+const fakeEncryption = { encryptBuffer: (plain: Buffer) => Buffer.concat([SEAL, plain]), decryptBuffer: (sealed: Buffer) => sealed.subarray(SEAL.length) };
 
 const TENANT_ID = '11111111-1111-4111-8111-111111111111';
 
@@ -41,7 +46,7 @@ function makeTx() {
 describe('BackupsService', () => {
   let service: BackupsService;
   let tx: ReturnType<typeof makeTx>;
-  let storage: { write: jest.Mock; read: jest.Mock };
+  let storage: { write: jest.Mock; read: jest.Mock; remove: jest.Mock };
   let prisma: {
     backupRecord: { create: jest.Mock; update: jest.Mock; findFirst: jest.Mock; findMany: jest.Mock };
     tenant: { findMany: jest.Mock; create: jest.Mock; delete: jest.Mock };
@@ -50,7 +55,7 @@ describe('BackupsService', () => {
 
   beforeEach(async () => {
     tx = makeTx();
-    storage = { write: jest.fn().mockResolvedValue('file:///tmp/roomick-backups/test.json.gz'), read: jest.fn() };
+    storage = { write: jest.fn().mockResolvedValue('file:///tmp/roomick-backups/test.json.gz.enc'), read: jest.fn(), remove: jest.fn().mockResolvedValue(undefined) };
     prisma = {
       backupRecord: {
         create: jest.fn().mockResolvedValue({ id: 'backup-1' }),
@@ -70,6 +75,7 @@ describe('BackupsService', () => {
       providers: [
         BackupsService,
         { provide: PrismaService, useValue: prisma },
+        { provide: EncryptionService, useValue: fakeEncryption },
         { provide: BACKUP_STORAGE_ADAPTER, useValue: storage },
       ],
     }).compile();
@@ -98,12 +104,37 @@ describe('BackupsService', () => {
       expect(Object.prototype.hasOwnProperty.call(tx, 'backupRecord')).toBe(false);
     });
 
-    it('writes gzipped, valid JSON — decompresses back to the queried rows', async () => {
+    it('writes the backup encrypted — sealed gzipped JSON that opens back to the queried rows, under a .enc key', async () => {
       tx.reservation.findMany.mockResolvedValue([{ id: 'res-1' }]);
       await service.runTenantBackup(TENANT_ID);
-      const written = storage.write.mock.calls[0][1] as Buffer;
-      const decompressed = JSON.parse(gunzipSync(written).toString('utf-8')) as Record<string, unknown[]>;
+      const [key, written] = storage.write.mock.calls[0] as [string, Buffer];
+      expect(key).toMatch(/\.json\.gz\.enc$/);
+      expect(written.subarray(0, SEAL.length).equals(SEAL)).toBe(true);
+      expect(() => gunzipSync(written)).toThrow(); // not readable as it sits on disk
+      const decompressed = JSON.parse(gunzipSync(fakeEncryption.decryptBuffer(written)).toString('utf-8')) as Record<string, unknown[]>;
       expect(decompressed.Reservation).toEqual([{ id: 'res-1' }]);
+    });
+
+    it('opens an encrypted backup, and still a plain one written before encryption', async () => {
+      const { gzipSync } = jest.requireActual('zlib');
+      const expectedModels = Prisma.dmmf.datamodel.models
+        .filter((m) => m.fields.some((f) => f.name === 'tenantId') && !['UserEmailIndex', 'BackupRecord'].includes(m.name))
+        .map((m) => m.name);
+      const plain = gzipSync(Buffer.from(JSON.stringify(Object.fromEntries(expectedModels.map((name) => [name, []]))), 'utf-8'));
+      prisma.backupRecord.findFirst.mockResolvedValue({ id: 'backup-1', storageUrl: 'file:///x.json.gz.enc' });
+      storage.read.mockResolvedValue(fakeEncryption.encryptBuffer(plain));
+      expect((await service.verifyBackup('backup-1')).ok).toBe(true);
+      prisma.backupRecord.findFirst.mockResolvedValue({ id: 'backup-0', storageUrl: 'file:///x.json.gz' });
+      storage.read.mockResolvedValue(plain);
+      expect((await service.verifyBackup('backup-0')).ok).toBe(true);
+    });
+
+    it('prunes backups past their retention: the file goes, the record is marked expired', async () => {
+      prisma.backupRecord.findMany.mockResolvedValue([{ id: 'old-1', storageUrl: 'file:///old-1.json.gz.enc' }]);
+      await expect(service.pruneExpiredBackups()).resolves.toBe(1);
+      expect(prisma.backupRecord.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ status: 'completed', retainUntil: { lt: expect.any(Date) } }) }));
+      expect(storage.remove).toHaveBeenCalledWith('file:///old-1.json.gz.enc');
+      expect(prisma.backupRecord.update).toHaveBeenCalledWith({ where: { id: 'old-1' }, data: { status: 'expired', storageUrl: null } });
     });
 
     it('marks the record failed, not thrown, when the export itself errors', async () => {

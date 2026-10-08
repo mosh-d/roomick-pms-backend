@@ -82,7 +82,8 @@ function makeTx() {
       update: jest.fn().mockImplementation(({ data }: { data: Record<string, unknown> }) => Promise.resolve({ id: 'nsr-1', ...data })),
     },
     auditLog: { create: jest.fn().mockResolvedValue({}) },
-    $queryRaw: jest.fn().mockResolvedValue([]),
+    // The room-type lock ignores its result; the tenant's confirmation counter returns the next number.
+    $queryRaw: jest.fn().mockResolvedValue([{ reservationSeq: 42 }]),
     $executeRawUnsafe: jest.fn().mockResolvedValue(0),
   };
 }
@@ -114,9 +115,12 @@ describe('ReservationsService', () => {
     propertyService = {
       assertBranch: jest.fn().mockResolvedValue({
         id: BRANCH_ID,
+        name: 'Lekki Suites',
+        address: { street: '12 Admiralty Way', city: 'Lagos', country: 'NG' },
         timezone: 'Africa/Lagos',
         currency: 'NGN',
         checkInTime: new Date('1970-01-01T14:00:00.000Z'),
+        checkOutTime: new Date('1970-01-01T11:00:00.000Z'),
         noShowPolicy: null,
         cancellationPolicy: null,
         regCardTemplate: null,
@@ -575,30 +579,14 @@ describe('ReservationsService', () => {
       ).rejects.toThrow(BadRequestException);
     });
 
-    it('retries confirmation-number generation on a PREDICTED collision (findUnique), not throw', async () => {
-      tx.reservation.findUnique
-        .mockResolvedValueOnce({ id: 'clash' }) // first candidate taken
-        .mockResolvedValueOnce(null); // second candidate free
+    it('numbers the booking from the organisation’s own counter — one sequence for every branch', async () => {
       await service.createReservation(TENANT_ID, BRANCH_ID, dto, ACTOR_ID);
-      expect(tx.reservation.create).toHaveBeenCalled();
-    });
-
-    /**
-     * confirmationNumber used to be a bare global `@unique`, checked with a
-     * plain `findUnique({ where: { confirmationNumber } })`. Under RLS that
-     * check is blind to every OTHER tenant's rows — on a shared DB it would
-     * report a candidate as free when it was really already claimed by an
-     * unrelated tenant, and the real insert would then collide every time
-     * (found live against Sope Hotel's data). The fix scopes the constraint
-     * itself to `(tenantId, confirmationNumber)`; this asserts the
-     * generator's own collision probe was updated to match — using the
-     * composite key, not the bare column, and keyed to THIS tenant.
-     */
-    it('checks confirmation-number collisions scoped to this tenant, not globally', async () => {
-      await service.createReservation(TENANT_ID, BRANCH_ID, dto, ACTOR_ID);
-      expect(tx.reservation.findUnique).toHaveBeenCalledWith({
-        where: { tenantId_confirmationNumber: { tenantId: TENANT_ID, confirmationNumber: expect.any(String) } },
-      });
+      const data = (tx.reservation.create.mock.calls[0] as [{ data: Record<string, unknown> }])[0].data;
+      expect(data.confirmationNumber).toBe(`RES-${new Date().getFullYear()}-00042`);
+      // The counter is bumped on the tenant row, never predicted from a count of this branch's rows.
+      const sql = tx.$queryRaw.mock.calls.map((call: unknown[]) => String(call[0]));
+      expect(sql.some((text: string) => text.includes('UPDATE tenants SET "reservationSeq"'))).toBe(true);
+      expect(tx.reservation.findUnique).not.toHaveBeenCalled();
     });
 
     /**
@@ -658,6 +646,33 @@ describe('ReservationsService', () => {
       expect(tx.reservation.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ channel: 'direct' }) }));
     });
 
+    it("keeps each night's own price on the booking, so a 30,000 + 45,000 stay never bills as two nights of 37,500", async () => {
+      rateResolverService.resolveStay.mockResolvedValueOnce({
+        subtotal: new Prisma.Decimal('75000'),
+        nightlyRate: new Prisma.Decimal('37500'),
+        taxTotal: new Prisma.Decimal(0),
+        totalWithTax: new Prisma.Decimal('75000'),
+        ratePlanId: null,
+        ruleApplied: { type: 'cascade', planName: 'Weekend', adjustmentApplied: null },
+        perNight: [
+          { date: '2026-09-01', finalRate: '30000.00', isOverride: false, ratePlanId: null },
+          { date: '2026-09-02', finalRate: '45000.00', isOverride: false, ratePlanId: 'plan-weekend' },
+        ],
+        auditLogIds: [],
+      });
+      await service.createReservation(TENANT_ID, BRANCH_ID, dto, ACTOR_ID);
+      expect(tx.reservation.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            nightlyRates: [
+              { date: '2026-09-01', rate: '30000.00' },
+              { date: '2026-09-02', rate: '45000.00' },
+            ],
+          }),
+        }),
+      );
+    });
+
     it('writes down the cancellation terms in force at booking — the resolved default when the branch has none', async () => {
       await service.createReservation(TENANT_ID, BRANCH_ID, dto, ACTOR_ID);
       expect(tx.reservation.create).toHaveBeenCalledWith(
@@ -686,9 +701,14 @@ describe('ReservationsService', () => {
       await expect(service.createReservation(TENANT_ID, BRANCH_ID, dto, ACTOR_ID)).rejects.toThrow(ConflictException);
     });
 
-    it('logs a booking_confirmation comms row for a real booking', async () => {
+    it('logs a booking_confirmation comms row for a real booking — with the nights, the price, the times and the address', async () => {
       await service.createReservation(TENANT_ID, BRANCH_ID, dto, ACTOR_ID);
       expect(commsLogService.logAutomatedInTx).toHaveBeenCalledWith(tx, TENANT_ID, BRANCH_ID, expect.objectContaining({ guestId: GUEST_ID, trigger: 'booking_confirmation' }));
+      const { body } = commsLogService.logAutomatedInTx.mock.calls[0][3] as { body: string };
+      expect(body).toContain('at Lekki Suites is confirmed');
+      expect(body).toContain('Rate: NGN 300.00 for the stay');
+      expect(body).toContain('Check-in from 14:00 · Check-out by 11:00');
+      expect(body).toContain('12 Admiralty Way, Lagos, NG');
     });
 
     it('does NOT log a booking_confirmation for a waitlist join — nothing is confirmed yet', async () => {
@@ -768,6 +788,14 @@ describe('ReservationsService', () => {
       tx.room.findFirst.mockResolvedValue({ id: ROOM_ID, branchId: BRANCH_ID, roomTypeId: TYPE_ID, occupancyStatus: 'vacant', heldStatus: null, deletedAt: null });
       tx.roomBlock.findFirst.mockResolvedValue({ id: 'block-1' });
       await expect(service.checkIn(TENANT_ID, RESERVATION_ID, { roomId: ROOM_ID }, ACTOR_ID)).rejects.toThrow(ConflictException);
+    });
+
+    it('refuses to check in before the arrival day — the dates are moved first, so the nights until then are priced', async () => {
+      tx.reservation.findFirst.mockResolvedValue(
+        reservation({ status: 'confirmed', roomId: null, checkInDate: new Date('2030-06-01T00:00:00.000Z'), checkOutDate: new Date('2030-06-03T00:00:00.000Z') }),
+      );
+      await expect(service.checkIn(TENANT_ID, RESERVATION_ID, { roomId: ROOM_ID }, ACTOR_ID)).rejects.toThrow(/arrives on 2030-06-01/);
+      expect(tx.reservation.update).not.toHaveBeenCalled();
     });
 
     it('happy path sets roomId + actualCheckIn and marks the room occupied', async () => {
@@ -1771,9 +1799,19 @@ describe('ReservationsService', () => {
       );
     });
 
-    it('caps results at 100', async () => {
+    it('returns a page: 100 unless asked, from the offset given', async () => {
       await service.listReservations(TENANT_ID, BRANCH_ID, {});
-      expect(tx.reservation.findMany).toHaveBeenCalledWith(expect.objectContaining({ take: 100 }));
+      expect(tx.reservation.findMany).toHaveBeenCalledWith(expect.objectContaining({ take: 100, skip: 0 }));
+      await service.listReservations(TENANT_ID, BRANCH_ID, { limit: 50, offset: 100 });
+      expect(tx.reservation.findMany).toHaveBeenLastCalledWith(expect.objectContaining({ take: 50, skip: 100 }));
+    });
+
+    it('counts everything the same filters match — what the page is a page of', async () => {
+      tx.reservation.count.mockResolvedValueOnce(342);
+      await expect(service.countReservations(TENANT_ID, BRANCH_ID, { status: 'confirmed', search: 'John' })).resolves.toEqual({ count: 342 });
+      expect(tx.reservation.count).toHaveBeenCalledWith({
+        where: expect.objectContaining({ branchId: BRANCH_ID, deletedAt: null, status: 'confirmed', OR: expect.any(Array) }),
+      });
     });
   });
 

@@ -151,11 +151,11 @@ describe('PageAccessService', () => {
       const { service, tx } = setup();
       const hk = person([{ branchId: BRANCH_A, role: 'housekeeper' }]);
       await service.pagesForUser(TENANT_ID, hk, BRANCH_A); // warms the cache
-      const line = await service.setPages(TENANT_ID, BRANCH_A, 'role-hk', ['/dashboard/room-status-board', '/dashboard/alerts'], 'manager-1');
+      const line = await service.setPages(TENANT_ID, BRANCH_A, 'role-hk', ['/dashboard/housekeeping/task-board', '/dashboard/room-status-board'], 'manager-1');
 
-      expect(line).toMatchObject({ customised: true, pages: ['/dashboard/alerts', '/dashboard/room-status-board'] });
-      expect(tx.auditLog.create.mock.calls[0][0].data).toMatchObject({ action: 'page_access.updated', before: { role: 'housekeeper', pages: 'default' }, after: { pages: ['/dashboard/alerts', '/dashboard/room-status-board'] } });
-      await expect(service.pagesForUser(TENANT_ID, hk, BRANCH_A)).resolves.toEqual(['/dashboard/alerts', '/dashboard/room-status-board']);
+      expect(line).toMatchObject({ customised: true, pages: ['/dashboard/room-status-board', '/dashboard/housekeeping/task-board'] });
+      expect(tx.auditLog.create.mock.calls[0][0].data).toMatchObject({ action: 'page_access.updated', before: { role: 'housekeeper', pages: 'default' }, after: { pages: ['/dashboard/room-status-board', '/dashboard/housekeeping/task-board'] } });
+      await expect(service.pagesForUser(TENANT_ID, hk, BRANCH_A)).resolves.toEqual(['/dashboard/room-status-board', '/dashboard/housekeeping/task-board']);
     });
 
     it('refuses a page its role can’t open, a page that isn’t one, and owners or managers', async () => {

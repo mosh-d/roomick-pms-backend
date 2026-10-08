@@ -58,6 +58,21 @@ export interface FolioTotals {
  */
 export type FolioGuestStatus = 'in_house' | 'city_ledger' | null;
 
+/**
+ * The night's own price, as the resolver quoted it when the stay was booked
+ * or last re-priced (`Reservation.nightlyRates`). Null for a stay from
+ * before nights were kept — billed as the stay total split evenly, as before.
+ */
+function nightlyRateFor(reservation: Pick<Reservation, 'nightlyRates'>, serviceDate: Date): Prisma.Decimal | null {
+  const nights = reservation.nightlyRates;
+  if (!Array.isArray(nights)) return null;
+  const day = serviceDate.toISOString().slice(0, 10);
+  const night = nights.find((n): n is { date: string; rate: string | number } => typeof n === 'object' && n !== null && (n as { date?: unknown }).date === day);
+  if (!night || (typeof night.rate !== 'string' && typeof night.rate !== 'number')) return null;
+  const rate = new Prisma.Decimal(night.rate);
+  return rate.isFinite() ? rate : null;
+}
+
 @Injectable()
 export class FoliosService {
   constructor(
@@ -148,9 +163,13 @@ export class FoliosService {
       1,
       Math.round((reservation.checkOutDate.getTime() - reservation.checkInDate.getTime()) / 86_400_000),
     );
+    // A pinned nightly rate (a manager's override, a room move) first; then
+    // the night's own quoted price; the stay total split evenly only for a
+    // stay booked before nights were kept — that split could leave the bill
+    // a kobo off the quote and billed a 30,000 + 45,000 stay as 37,500 twice.
     const perNight = reservation.overrideRate
       ? new Prisma.Decimal(reservation.overrideRate)
-      : new Prisma.Decimal(reservation.confirmedRate).div(nights).toDecimalPlaces(2);
+      : (nightlyRateFor(reservation, serviceDate) ?? new Prisma.Decimal(reservation.confirmedRate).div(nights).toDecimalPlaces(2));
 
     if (perNight.lessThanOrEqualTo(0)) return null; // nothing to charge; CHECK (amount <> 0) would reject it anyway
 
@@ -352,6 +371,10 @@ export class FoliosService {
         dto.method === 'cash'
           ? await tx.shift.findFirst({ where: { branchId: folio.branchId, agentId: actorId, closedAt: null } })
           : null;
+      // Cash has to land in a drawer that's counted at close. Without an open
+      // shift it was recorded against nothing and never reconciled — a cash
+      // payment taken before the shift opened simply vanished from the count.
+      if (dto.method === 'cash' && !openShift) throw this.shiftRequired();
 
       const payment = await tx.payment.create({
         data: {
@@ -373,6 +396,10 @@ export class FoliosService {
       });
       return payment;
     });
+  }
+
+  shiftRequired(): ConflictException {
+    return new ConflictException({ code: ErrorCode.SHIFT_REQUIRED, message: 'Open a shift before taking cash — it has to go into a drawer that gets counted at close' });
   }
 
   /**

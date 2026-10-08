@@ -43,6 +43,7 @@ function makeTx() {
     folio: { findMany: jest.fn().mockResolvedValue([]) },
     maintenanceOrder: { count: jest.fn().mockResolvedValue(0) },
     shift: { findMany: jest.fn().mockResolvedValue([]) },
+    $executeRawUnsafe: jest.fn().mockResolvedValue(0),
   };
 }
 
@@ -78,6 +79,26 @@ describe('NightAuditService', () => {
   });
 
   describe('runAudit', () => {
+    it('refuses a night that hasn’t ended — today, or any date in the future', async () => {
+      const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Africa/Lagos' });
+      await expect(service.runAudit(TENANT_ID, BRANCH_ID, today, ACTOR_ID)).rejects.toThrow(/hasn’t ended yet/);
+      const tomorrow = new Date(Date.now() + 86_400_000).toLocaleDateString('en-CA', { timeZone: 'Africa/Lagos' });
+      await expect(service.runAudit(TENANT_ID, BRANCH_ID, tomorrow, ACTOR_ID)).rejects.toThrow(/hasn’t ended yet/);
+      expect(tx.nightAuditLog.create).not.toHaveBeenCalled();
+      expect(foliosService.postRoomChargeForDate).not.toHaveBeenCalled();
+      expect(reservationsService.markNoShowInTx).not.toHaveBeenCalled();
+    });
+
+    it('closes each stay inside its own savepoint, rolling back only the one that failed', async () => {
+      tx.reservation.findMany.mockResolvedValueOnce([reservation({ id: 'bad' }), reservation({ id: 'good' })]).mockResolvedValueOnce([]);
+      foliosService.postRoomChargeForDate
+        .mockRejectedValueOnce(new Error('folio is settled'))
+        .mockResolvedValueOnce({ amount: new Prisma.Decimal('100'), taxAmount: new Prisma.Decimal('0') });
+      await service.runAudit(TENANT_ID, BRANCH_ID, AUDIT_DATE, ACTOR_ID);
+      const calls = tx.$executeRawUnsafe.mock.calls.map((call: unknown[]) => call[0]);
+      expect(calls).toEqual(['SAVEPOINT night_audit_stay', 'ROLLBACK TO SAVEPOINT night_audit_stay', 'SAVEPOINT night_audit_stay', 'RELEASE SAVEPOINT night_audit_stay']);
+    });
+
     it('refuses a second run for the same branch and date', async () => {
       tx.nightAuditLog.findFirst.mockResolvedValue({ id: BigInt(1) });
       await expect(service.runAudit(TENANT_ID, BRANCH_ID, AUDIT_DATE, ACTOR_ID)).rejects.toThrow(ConflictException);

@@ -1,6 +1,7 @@
 import { Body, Controller, Delete, Get, HttpCode, Param, ParseUUIDPipe, Patch, Post, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentTenant, CurrentUser } from '../../common/decorators';
+import { BranchOf } from '../../common/decorators/branch-of.decorator';
 import { Permission } from '../../common/decorators/permission.decorator';
 import { Roles, SystemRole } from '../../common/decorators/roles.decorator';
 import { JwtPayload } from '../../common/types/request-context';
@@ -51,6 +52,8 @@ export class PosController {
   }
 
   @Patch('pos/outlets/:outletId')
+
+  @BranchOf('outlet', 'outletId')
   @Roles(SystemRole.Owner, SystemRole.Manager)
   @ApiOperation({ summary: 'Rename, reorder, or deactivate an outlet' })
   updateOutlet(
@@ -65,6 +68,8 @@ export class PosController {
   // --- Menu --------------------------------------------------------------------
 
   @Get('pos/outlets/:outletId/menu')
+
+  @BranchOf('outlet', 'outletId')
   @Roles(...POS_TERMINAL_ROLES)
   @ApiOperation({ summary: "The outlet's menu, 86'd items included (the terminal greys them out)" })
   listMenu(
@@ -76,6 +81,8 @@ export class PosController {
   }
 
   @Post('pos/outlets/:outletId/menu-items')
+
+  @BranchOf('outlet', 'outletId')
   @Roles(SystemRole.Owner, SystemRole.Manager)
   @ApiOperation({ summary: 'Add a menu item, with its modifier groups' })
   createMenuItem(
@@ -88,6 +95,8 @@ export class PosController {
   }
 
   @Patch('pos/menu-items/:itemId')
+
+  @BranchOf('menuItem', 'itemId')
   @Roles(SystemRole.Owner, SystemRole.Manager)
   @ApiOperation({ summary: 'Edit a menu item — past orders keep the price they were sold at' })
   updateMenuItem(
@@ -100,6 +109,8 @@ export class PosController {
   }
 
   @Patch('pos/menu-items/:itemId/availability')
+
+  @BranchOf('menuItem', 'itemId')
   @Roles(...POS_TERMINAL_ROLES)
   @ApiOperation({ summary: "86 an item, or bring it back — anyone working the outlet's till" })
   setAvailability(
@@ -112,6 +123,8 @@ export class PosController {
   }
 
   @Delete('pos/menu-items/:itemId')
+
+  @BranchOf('menuItem', 'itemId')
   @Roles(SystemRole.Owner, SystemRole.Manager)
   @ApiOperation({ summary: 'Take an item off the menu for good (soft delete)' })
   deleteMenuItem(
@@ -125,6 +138,8 @@ export class PosController {
   // --- Selling -----------------------------------------------------------------
 
   @Post('pos/outlets/:outletId/quote')
+
+  @BranchOf('outlet', 'outletId')
   @Permission('pos', 'read')
   @HttpCode(200)
   @Roles(...POS_TERMINAL_ROLES)
@@ -161,6 +176,8 @@ export class PosController {
   }
 
   @Get('pos/outlets/:outletId/orders')
+
+  @BranchOf('outlet', 'outletId')
   @Roles(...POS_TERMINAL_ROLES)
   @ApiOperation({ summary: "One business day of an outlet's sales, with the day's takings" })
   listOrders(
@@ -173,6 +190,8 @@ export class PosController {
   }
 
   @Get('pos/orders/:orderId')
+
+  @BranchOf('posOrder', 'orderId')
   @Roles(...POS_TERMINAL_ROLES)
   @ApiOperation({ summary: 'One order — the receipt' })
   getOrder(
@@ -184,6 +203,8 @@ export class PosController {
   }
 
   @Post('pos/orders/:orderId/void')
+
+  @BranchOf('posOrder', 'orderId')
   @Permission('pos', 'update')
   @HttpCode(200)
   @Roles(SystemRole.Owner, SystemRole.Manager)

@@ -179,6 +179,7 @@ export class RefundsService {
       // Cash leaves the drawer of whoever hands it over — their open shift, as with any cash payment.
       const openShift =
         refund.method === 'cash' ? await tx.shift.findFirst({ where: { branchId: refund.folio.branchId, agentId: actor.sub, closedAt: null } }) : null;
+      if (refund.method === 'cash' && !openShift) throw this.foliosService.shiftRequired();
       const payment = await tx.payment.create({
         data: {
           tenantId,

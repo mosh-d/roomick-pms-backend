@@ -1,5 +1,6 @@
 import { BadRequestException, ConflictException, ForbiddenException, NotFoundException } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
+import { AccountStatusService } from '../../common/auth/account-status.service';
 import { AccountMailService } from '../../common/mail/account-mail.service';
 import { JwtPayload } from '../../common/types/request-context';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -65,10 +66,12 @@ describe('UsersService', () => {
   let service: UsersService;
   let tx: ReturnType<typeof makeTx>;
   let mail: { staffInvite: jest.Mock };
+  let accountStatus: { forget: jest.Mock };
 
   beforeEach(async () => {
     tx = makeTx();
     mail = { staffInvite: jest.fn().mockResolvedValue(false) };
+    accountStatus = { forget: jest.fn() };
     const moduleRef = await Test.createTestingModule({
       providers: [
         UsersService,
@@ -85,6 +88,7 @@ describe('UsersService', () => {
           },
         },
         { provide: AccountMailService, useValue: mail },
+        { provide: AccountStatusService, useValue: accountStatus },
       ],
     }).compile();
     service = moduleRef.get(UsersService);
@@ -208,6 +212,7 @@ describe('UsersService', () => {
         data: { deletedAt: expect.any(Date) },
       });
       expect(tx.refreshToken.updateMany).toHaveBeenCalledWith({ where: { userId: USER_ID, revokedAt: null }, data: { revokedAt: expect.any(Date) } });
+      expect(accountStatus.forget).toHaveBeenCalledWith(USER_ID); // their current access token is refused from now
     });
 
     it('replaces the role assignment at the given branch scope', async () => {
@@ -301,6 +306,12 @@ describe('UsersService', () => {
   });
 
   describe('listStaff', () => {
+    it('a branch that isn’t there is a 404 — not the all-branch staff under any id', async () => {
+      tx.branch.findFirst.mockResolvedValueOnce(null);
+      await expect(service.listStaff(TENANT_ID, OTHER_BRANCH, MANAGER)).rejects.toThrow(NotFoundException);
+      expect(tx.userBranchRole.findMany).not.toHaveBeenCalled();
+    });
+
     it('says, for each person, what the one asking may change', async () => {
       tx.userBranchRole.findMany
         .mockResolvedValueOnce([

@@ -113,6 +113,8 @@ export class RevenueManagementController {
   }
 
   @Patch('competitors/:competitorId')
+
+  @BranchOf('competitor', 'competitorId')
   @ApiOperation({ summary: 'Rename a competitor, or take it out of the comp set' })
   updateCompetitor(
     @CurrentTenant() tenantId: string,

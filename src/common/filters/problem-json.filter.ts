@@ -26,6 +26,7 @@ const STATUS_TO_CODE: Record<number, ErrorCode> = {
   [HttpStatus.NOT_FOUND]: ErrorCode.NOT_FOUND,
   [HttpStatus.CONFLICT]: ErrorCode.CONFLICT,
   [HttpStatus.NOT_IMPLEMENTED]: ErrorCode.NOT_IMPLEMENTED,
+  [HttpStatus.TOO_MANY_REQUESTS]: ErrorCode.TOO_MANY_REQUESTS,
 };
 
 /**
@@ -64,6 +65,10 @@ export class ProblemJsonExceptionFilter implements ExceptionFilter {
           detail = 'Request validation failed';
           errors = rec.message;
         }
+      }
+      // The throttler's own text is a class name; say it in words.
+      if (status === HttpStatus.TOO_MANY_REQUESTS && (!detail || detail.startsWith('ThrottlerException'))) {
+        detail = 'Too many requests — wait a minute and try again';
       }
     } else {
       // Unknown error: log the full detail server-side, leak nothing to the client.

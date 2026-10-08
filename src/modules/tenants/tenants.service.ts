@@ -1,7 +1,10 @@
-import { ConflictException, Injectable, Logger } from '@nestjs/common';
+import { ConflictException, Injectable, Logger, UnauthorizedException } from '@nestjs/common';
+import * as bcrypt from 'bcrypt';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { Brand, Tenant } from '@prisma/client';
+import { AccountStatusService } from '../../common/auth/account-status.service';
 import { ErrorCode } from '../../common/errors/error-codes';
+import { tenantModelInsertOrder } from '../../common/prisma/tenant-models';
 import { PrismaService } from '../../prisma/prisma.service';
 import { ConfigureModeDto } from './dto/configure-mode.dto';
 
@@ -16,7 +19,10 @@ export function demoExpiryFromNow(): Date {
 export class TenantsService {
   private readonly logger = new Logger(TenantsService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly accountStatus: AccountStatusService,
+  ) {}
 
   /**
    * Signup step 2 (spec §5): fixes single/multi-brand mode.
@@ -149,52 +155,61 @@ export class TenantsService {
   }
 
   /**
-   * Deletes an organization entirely — the manual counterpart to the
-   * scheduled demo-expiry sweep (see the cron in this same class). Real
-   * ("full account deletion") support is future work; this pass only wires
-   * up what a demo tenant can actually have accumulated through the
-   * currently-built endpoints (auth + tenants + property/P1) — everything
-   * else in the schema cascades automatically once those are gone (see the
-   * reasoning below).
+   * The owner deleting their own organisation — their password first. This
+   * is the one action in the app with no way back, so a stolen session or a
+   * mis-click on the wrong account mustn't be enough.
+   */
+  async deleteOrganizationAsOwner(tenantId: string, actorId: string, password: string): Promise<void> {
+    const owner = await this.prisma.withTenant(tenantId, (tx) => tx.user.findFirst({ where: { id: actorId, deletedAt: null } }));
+    if (!owner?.passwordHash || !(await bcrypt.compare(password, owner.passwordHash))) {
+      throw new UnauthorizedException({ code: ErrorCode.INVALID_CREDENTIALS, message: 'That isn’t your password' });
+    }
+    await this.deleteOrganization(tenantId);
+  }
+
+  /**
+   * Removes an organisation and everything in it, in ONE transaction: every
+   * tenant table children-first (the order the backup restore inserts in,
+   * reversed — read off the schema, so a new table is never forgotten), the
+   * sign-in email index, then the tenant row itself. Nothing is deleted
+   * unless all of it is.
    *
-   * Deletion order matters and is NOT arbitrary: the schema deliberately
-   * `onDelete: Restrict`s a tenant's real financial/operational data
-   * (reservations, folios, payments, audit logs, etc. — see the backend
-   * README's "Money" invariant) so a tenant can't be silently cascade-wiped
-   * if it has any of that. Nothing populates those tables yet (P2+), so for
-   * a tenant created via the current signup/onboarding surface, only five
-   * tables are `Restrict`-configured AND actually reachable today: Room,
-   * RoomType, Branch, User, and — easy to miss, caught by actually running
-   * this against a populated tenant rather than trusting the schema read —
-   * AuditLog, which every service writes a row to for each change it makes,
-   * so any tenant that's done anything at all has rows there. Clear all five explicitly, in dependency order
-   * (Room references RoomType/Branch; RoomType references Branch; Branch
-   * references Brand; AuditLog and User only reference Tenant directly).
-   * Everything else (Role, UserBranchRole, InviteToken, Brand, Building,
-   * Floor, RoomBlock, Outlet, UserOutlet, OverbookingConfig, TaxRule, ...)
-   * is `Cascade`-configured relative to Tenant/Branch/User and cleans up
-   * automatically once the final `tenant.delete()` runs.
+   * It used to delete five tables and then the tenant, trusting cascades.
+   * Most tables refuse deletion while they have rows, so any organisation
+   * with a guest or a booking failed halfway: its users and branches gone,
+   * the tenant and guests left behind, and the owner's email still in the
+   * index — unable to sign in and unable to sign up again, for good.
    *
-   * If a tenant somehow does have real transactional data (shouldn't be
-   * possible yet), the final delete fails with a DB constraint error
-   * instead of silently destroying it — a deliberate fail-safe, not a bug
-   * to fix in this pass.
+   * `tenants` sits outside row-level security; the tenant tables don't, so
+   * the tenant is set for the transaction before anything is touched.
    */
   async deleteOrganization(tenantId: string): Promise<void> {
-    await this.prisma.withTenant(tenantId, async (tx) => {
-      await tx.auditLog.deleteMany({ where: { tenantId } });
-      await tx.room.deleteMany({ where: { tenantId } });
-      await tx.roomType.deleteMany({ where: { tenantId } });
-      await tx.branch.deleteMany({ where: { tenantId } });
-      await tx.user.deleteMany({ where: { tenantId } });
-    });
-
-    // tenants is the RLS root (no RLS policy of its own — confirmed
-    // directly readable/writable without a tenant context set), so this
-    // runs outside withTenant(). Cascades Role/UserBranchRole/InviteToken/
-    // Brand/Building/Floor/RoomBlock/Outlet/UserOutlet/OverbookingConfig/
-    // TaxRule automatically.
-    await this.prisma.tenant.delete({ where: { id: tenantId } });
+    const childrenFirst = [...tenantModelInsertOrder()].reverse();
+    const people = await this.prisma.withTenant(tenantId, (tx) => tx.user.findMany({ select: { id: true } }));
+    await this.prisma.$transaction(
+      async (tx) => {
+        await tx.$executeRaw`SELECT set_config('app.tenant_id', ${tenantId}, true)`;
+        const tables = tx as unknown as Record<string, { updateMany: (args: object) => Promise<unknown>; deleteMany: (args: object) => Promise<unknown> }>;
+        // A link that closes a cycle — a stay's master bill, whose own stay
+        // points back at it — is cut first, so either table can go first.
+        for (const meta of childrenFirst) {
+          for (const relation of meta.deferred) {
+            await tables[meta.accessor].updateMany({ where: { tenantId }, data: Object.fromEntries(relation.fieldNames.map((field) => [field, null])) });
+          }
+        }
+        for (const meta of childrenFirst) {
+          await tables[meta.accessor].deleteMany({ where: { tenantId } });
+        }
+        await tx.userEmailIndex.deleteMany({ where: { tenantId } });
+        // Backup files stay until their retention runs out (BackupsService
+        // prunes them); their records just stop belonging to anyone.
+        await tx.backupRecord.updateMany({ where: { tenantId }, data: { tenantId: null } });
+        await tx.tenant.delete({ where: { id: tenantId } });
+      },
+      { timeout: 120_000 },
+    );
+    // Their access tokens are refused from now, not when they run out.
+    for (const person of people) this.accountStatus.forget(person.id);
     this.logger.log(`Tenant ${tenantId} deleted`);
   }
 

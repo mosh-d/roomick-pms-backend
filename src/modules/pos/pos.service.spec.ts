@@ -84,6 +84,7 @@ function makeFolios() {
     postOutletCharge: jest.fn().mockResolvedValue({ id: LINE_ITEM_ID, amount: new Prisma.Decimal('5000'), taxAmount: new Prisma.Decimal('375') }),
     previewCharge: jest.fn((_tx: unknown, _branchId: string, _type: string, price: Prisma.Decimal) => Promise.resolve(preview(price))),
     correctLineItemInTx: jest.fn().mockResolvedValue({ id: 'correction-1' }),
+    shiftRequired: () => new ConflictException({ code: 'SHIFT_REQUIRED', message: 'Open a shift before taking cash — it has to go into a drawer that gets counted at close' }),
   };
 }
 
@@ -154,6 +155,12 @@ describe('PosService', () => {
       expect(createdOrder()).toMatchObject({ settlement: 'cash', shiftId: SHIFT_ID, reservationId: undefined, lineItemId: undefined });
       expect((createdOrder().total as Prisma.Decimal).toFixed(2)).toBe('5375.00'); // the quote's own tax preview
       expect(folios.postOutletCharge).not.toHaveBeenCalled();
+    });
+
+    it('refuses a cash sale when the cashier has no shift open', async () => {
+      tx.shift.findFirst.mockResolvedValueOnce(null);
+      await expect(order({ settlement: 'cash' })).rejects.toThrow(/Open a shift/);
+      expect(tx.posOrder.create).not.toHaveBeenCalled();
     });
 
     it('records what the outlet keeps when the menu prices already include the tax', async () => {

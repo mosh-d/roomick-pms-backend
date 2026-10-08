@@ -28,4 +28,15 @@ export const RECORD_BRANCH: Record<BranchRecord, Lookup> = {
   availabilityRestriction: async (tx, id) => (await tx.availabilityRestriction.findFirst({ where: { id }, select: { branchId: true } }))?.branchId,
   shift: async (tx, id) => (await tx.shift.findFirst({ where: { id }, select: { branchId: true } }))?.branchId,
   shiftIssue: async (tx, id) => (await tx.shiftIssue.findFirst({ where: { id }, select: { shift: { select: { branchId: true } } } }))?.shift.branchId,
+  // Outlets, menus and orders, events, comp-set competitors, tax rules and
+  // saved reports were reachable across branches by id — a manager at one
+  // property could act on another's by guessing a UUID.
+  outlet: async (tx, id) => (await tx.outlet.findFirst({ where: { id }, select: { branchId: true } }))?.branchId,
+  menuItem: async (tx, id) => (await tx.menuItem.findFirst({ where: { id }, select: { branchId: true } }))?.branchId,
+  posOrder: async (tx, id) => (await tx.posOrder.findFirst({ where: { id }, select: { branchId: true } }))?.branchId,
+  eventSpace: async (tx, id) => (await tx.eventSpace.findFirst({ where: { id }, select: { branchId: true } }))?.branchId,
+  eventBooking: async (tx, id) => (await tx.eventBooking.findFirst({ where: { id }, select: { eventSpace: { select: { branchId: true } } } }))?.eventSpace.branchId,
+  competitor: async (tx, id) => (await tx.competitor.findFirst({ where: { id }, select: { branchId: true } }))?.branchId,
+  taxRule: async (tx, id) => (await tx.taxRule.findFirst({ where: { id }, select: { branchId: true } }))?.branchId,
+  reportTemplate: async (tx, id) => (await tx.reportTemplate.findFirst({ where: { id }, select: { branchId: true } }))?.branchId,
 };

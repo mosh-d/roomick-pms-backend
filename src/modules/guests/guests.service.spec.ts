@@ -61,7 +61,7 @@ describe('GuestsService', () => {
     it('creates with only the allowed fields', async () => {
       const guest = await service.createGuest(TENANT_ID, { name: 'John Doe', email: 'john@doe.com', phone: '090', notes: 'VIP' });
       expect(tx.guestProfile.create).toHaveBeenCalledWith(
-        expect.objectContaining({ data: { tenantId: TENANT_ID, name: 'John Doe', email: 'john@doe.com', phone: '090', notes: 'VIP' } }),
+        expect.objectContaining({ data: { tenantId: TENANT_ID, name: 'John Doe', email: 'john@doe.com', phone: '090', phoneDigits: '090', notes: 'VIP' } }),
       );
       expect(guest.id).toBe(GUEST_ID);
     });
@@ -193,19 +193,16 @@ describe('GuestsService', () => {
     });
 
     it('also finds a guest by phone, however it was typed — digits to digits, the local leading 0 dropped', async () => {
-      (tx as unknown as { $queryRaw: jest.Mock }).$queryRaw = jest.fn().mockResolvedValue([{ id: GUEST_ID }]);
       await service.searchGuests(TENANT_ID, '0803 123');
-      const query = (tx as unknown as { $queryRaw: jest.Mock }).$queryRaw.mock.calls[0] as unknown[];
-      expect(query.slice(1)).toEqual(['%803123%']);
       expect(tx.guestProfile.findMany).toHaveBeenCalledWith(
-        expect.objectContaining({ where: expect.objectContaining({ OR: expect.arrayContaining([{ id: { in: [GUEST_ID] } }]) }) }),
+        expect.objectContaining({ where: expect.objectContaining({ OR: expect.arrayContaining([{ phoneDigits: { contains: '803123' } }]) }) }),
       );
     });
 
     it('doesn’t search phones on fewer than four digits', async () => {
-      (tx as unknown as { $queryRaw: jest.Mock }).$queryRaw = jest.fn();
       await service.searchGuests(TENANT_ID, 'Flat 12');
-      expect((tx as unknown as { $queryRaw: jest.Mock }).$queryRaw).not.toHaveBeenCalled();
+      const { where } = tx.guestProfile.findMany.mock.calls[0][0] as { where: { OR: unknown[] } };
+      expect(where.OR).toHaveLength(2);
     });
   });
 
@@ -226,6 +223,33 @@ describe('GuestsService', () => {
       const guest = await service.findOrCreateGuestInTx(tx as never, TENANT_ID, { guest: { name: 'Jane Doe' } });
       expect(tx.guestProfile.create).toHaveBeenCalled();
       expect(guest.id).toBe(GUEST_ID);
+    });
+
+    it('reuses the guest already on file with that email instead of making a second profile', async () => {
+      tx.guestProfile.findFirst.mockResolvedValue({ id: GUEST_ID, name: 'Jane Doe', email: 'jane@doe.com', phone: '+2348031234567' });
+      const guest = await service.findOrCreateGuestInTx(tx as never, TENANT_ID, { guest: { name: 'J. Doe', email: 'jane@doe.com' } });
+      expect(guest.id).toBe(GUEST_ID);
+      expect(tx.guestProfile.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { deletedAt: null, OR: [{ email: { equals: 'jane@doe.com', mode: 'insensitive' } }] } }),
+      );
+      expect(tx.guestProfile.create).not.toHaveBeenCalled();
+      expect(tx.guestProfile.update).not.toHaveBeenCalled();
+    });
+
+    it('matches a phone by its last nine digits — "0803 123 4567" is "+234 803 123 4567" — and fills in what the profile lacks', async () => {
+      tx.guestProfile.findFirst.mockResolvedValue({ id: GUEST_ID, name: 'Jane Doe', email: null, phone: '+2348031234567' });
+      await service.findOrCreateGuestInTx(tx as never, TENANT_ID, { guest: { name: 'Jane Doe', email: 'jane@doe.com', phone: '0803 123 4567' } });
+      expect(tx.guestProfile.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({ where: expect.objectContaining({ OR: expect.arrayContaining([{ phoneDigits: { endsWith: '031234567' } }]) }) }),
+      );
+      expect(tx.guestProfile.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: GUEST_ID }, data: { email: 'jane@doe.com' } }));
+      expect(tx.guestProfile.create).not.toHaveBeenCalled();
+    });
+
+    it('a short number never matches — eight digits could be anyone', async () => {
+      await service.findOrCreateGuestInTx(tx as never, TENANT_ID, { guest: { name: 'Jane Doe', phone: '0803 1234' } });
+      expect(tx.guestProfile.findFirst).not.toHaveBeenCalled();
+      expect(tx.guestProfile.create).toHaveBeenCalled();
     });
   });
 

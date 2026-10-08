@@ -97,6 +97,15 @@ export type GuestDetail = GuestSummary & {
   idCheckState: IdCheckState;
 };
 
+/** The digits of a phone number as typed — "+234 803-123 4567" → "2348031234567" — or null for none. What search and matching compare. */
+export function phoneDigitsOf(phone: string | null | undefined): string | null {
+  const digits = (phone ?? '').replace(/[^0-9]/g, '');
+  return digits.length > 0 ? digits : null;
+}
+
+/** Two phones are one number when their last nine digits agree — "0803 123 4567" and "+234 803 123 4567" — so a shorter number never matches. */
+const PHONE_MATCH_DIGITS = 9;
+
 @Injectable()
 export class GuestsService {
   constructor(
@@ -153,12 +162,18 @@ export class GuestsService {
           name: dto.name,
           email: dto.email,
           phone: dto.phone,
+          phoneDigits: dto.phone === undefined ? undefined : phoneDigitsOf(dto.phone),
           preferences: dto.preferences as unknown as Prisma.InputJsonValue | undefined,
           vipLevel: dto.vipLevel,
           tags: dto.tags,
         },
       });
-      await tx.auditLog.create({ data: { tenantId, userId: actorId, action: 'guest.updated', entityType: 'guest_profile', entityId: guestId, after: dto as unknown as Prisma.InputJsonValue } });
+      // Which fields changed, not what they changed to: the audit trail
+      // outlives a guest's erasure, so it mustn't keep their details.
+      const fields = Object.entries(dto)
+        .filter(([, value]) => value !== undefined)
+        .map(([field]) => field);
+      await tx.auditLog.create({ data: { tenantId, userId: actorId, action: 'guest.updated', entityType: 'guest_profile', entityId: guestId, after: { fields } } });
     });
     return this.getGuestById(tenantId, guestId);
   }
@@ -276,27 +291,22 @@ export class GuestsService {
 
   /**
    * Name, email or phone. Phones are stored as typed ("+234 803 …",
-   * "0803-…"), so they're compared digits to digits with a leading local 0
-   * dropped — "0803 123" finds "+2348031234567". Four digits at least, so a
-   * house number in a name search doesn't drag in every phone that contains it.
+   * "0803-…") beside their digits (`phoneDigits`), so they're compared
+   * digits to digits with a leading local 0 dropped — "0803 123" finds
+   * "+2348031234567" — from the trigram index, not by reshaping every
+   * guest's phone on every keystroke. Four digits at least, so a house
+   * number in a name search doesn't drag in every phone that contains it.
    */
   async searchGuests(tenantId: string, q: string): Promise<Array<GuestSummary & { vipLevel: number | null }>> {
     const digits = q.replace(/[^0-9]/g, '').replace(/^0+/, '');
     return this.prisma.withTenant(tenantId, async (tx) => {
-      const byPhone =
-        digits.length >= 4
-          ? await tx.$queryRaw<Array<{ id: string }>>`
-              SELECT id FROM guest_profiles
-              WHERE "deletedAt" IS NULL AND regexp_replace(coalesce(phone, ''), '[^0-9]', '', 'g') LIKE ${`%${digits}%`}
-              LIMIT 20`
-          : [];
       return tx.guestProfile.findMany({
         where: {
           deletedAt: null,
           OR: [
             { name: { contains: q, mode: 'insensitive' } },
             { email: { contains: q, mode: 'insensitive' } },
-            ...(byPhone.length > 0 ? [{ id: { in: byPhone.map((row) => row.id) } }] : []),
+            ...(digits.length >= 4 ? [{ phoneDigits: { contains: digits } }] : []),
           ],
         },
         select: { ...GUEST_SUMMARY_SELECT, vipLevel: true },
@@ -327,12 +337,46 @@ export class GuestsService {
       }
       return guest;
     }
-    return this.createGuestInTx(tx, tenantId, input.guest);
+    return (await this.knownGuest(tx, input.guest)) ?? this.createGuestInTx(tx, tenantId, input.guest);
+  }
+
+  /**
+   * The guest a booking names, if they're already on file: the same email,
+   * or the same phone (its last nine digits — "0803 123 4567" and
+   * "+234 803 123 4567" are one number). Every booking used to make a new
+   * profile, so a repeat guest had one per stay, with their history, points,
+   * VIP tag and marketing consent split across them. Whatever the booking
+   * gives that the profile lacks — an email, a phone — is filled in.
+   */
+  private async knownGuest(tx: TenantTx, dto: CreateGuestDto): Promise<GuestSummary | null> {
+    const email = dto.email?.trim().toLowerCase();
+    const digits = phoneDigitsOf(dto.phone);
+    const phoneEnd = digits && digits.length >= PHONE_MATCH_DIGITS ? digits.slice(-PHONE_MATCH_DIGITS) : null;
+    if (!email && !phoneEnd) return null;
+
+    const found = await tx.guestProfile.findFirst({
+      where: {
+        deletedAt: null,
+        OR: [...(email ? [{ email: { equals: email, mode: 'insensitive' as const } }] : []), ...(phoneEnd ? [{ phoneDigits: { endsWith: phoneEnd } }] : [])],
+      },
+      orderBy: { updatedAt: 'desc' },
+      select: GUEST_SUMMARY_SELECT,
+    });
+    if (!found) return null;
+
+    const fill: Prisma.GuestProfileUncheckedUpdateInput = {};
+    if (!found.email && email) fill.email = email;
+    if (!found.phone && dto.phone) {
+      fill.phone = dto.phone;
+      fill.phoneDigits = digits;
+    }
+    if (Object.keys(fill).length === 0) return found;
+    return tx.guestProfile.update({ where: { id: found.id }, data: fill, select: GUEST_SUMMARY_SELECT });
   }
 
   private async createGuestInTx(tx: TenantTx, tenantId: string, dto: CreateGuestDto): Promise<GuestSummary> {
     return tx.guestProfile.create({
-      data: { tenantId, name: dto.name, email: dto.email, phone: dto.phone, notes: dto.notes },
+      data: { tenantId, name: dto.name, email: dto.email, phone: dto.phone, phoneDigits: phoneDigitsOf(dto.phone), notes: dto.notes },
       select: GUEST_SUMMARY_SELECT,
     });
   }
