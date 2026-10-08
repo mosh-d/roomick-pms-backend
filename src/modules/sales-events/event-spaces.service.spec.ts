@@ -87,7 +87,7 @@ describe('EventSpacesService', () => {
       const result = await service.createBooking(TENANT_ID, 'space-1', { title: 'Product Launch', startsAt, endsAt }, ACTOR);
       expect(result.title).toBe('Product Launch');
       expect(tx.eventBooking.findFirst).toHaveBeenCalledWith({
-        where: { eventSpaceId: 'space-1', startsAt: { lt: new Date(endsAt) }, endsAt: { gt: new Date(startsAt) } },
+        where: { eventSpaceId: 'space-1', status: 'confirmed', startsAt: { lt: new Date(endsAt) }, endsAt: { gt: new Date(startsAt) } },
       });
     });
 
@@ -143,7 +143,7 @@ describe('EventSpacesService', () => {
     it('moving the event re-checks the space, leaving the booking itself out', async () => {
       await service.updateBooking(TENANT_ID, 'booking-1', { startsAt: '2026-10-06T18:00:00.000Z', endsAt: '2026-10-06T23:00:00.000Z' }, actor());
       expect(tx.eventBooking.findFirst).toHaveBeenCalledWith({
-        where: { eventSpaceId: 'space-1', startsAt: { lt: new Date('2026-10-06T23:00:00.000Z') }, endsAt: { gt: new Date('2026-10-06T18:00:00.000Z') }, id: { not: 'booking-1' } },
+        where: { eventSpaceId: 'space-1', status: 'confirmed', startsAt: { lt: new Date('2026-10-06T23:00:00.000Z') }, endsAt: { gt: new Date('2026-10-06T18:00:00.000Z') }, id: { not: 'booking-1' } },
       });
     });
 
@@ -198,13 +198,27 @@ describe('EventSpacesService', () => {
   describe('cancelBooking', () => {
     it('throws NOT_FOUND for an unknown booking', async () => {
       tx.eventBooking.findFirst.mockResolvedValue(null);
-      await expect(service.cancelBooking(TENANT_ID, 'nonexistent')).rejects.toMatchObject({ status: 404 });
+      await expect(service.cancelBooking(TENANT_ID, 'nonexistent', ACTOR)).rejects.toMatchObject({ status: 404 });
     });
 
-    it('deletes a real booking, freeing the slot', async () => {
-      tx.eventBooking.findFirst.mockResolvedValue({ id: 'booking-1' });
-      await service.cancelBooking(TENANT_ID, 'booking-1');
-      expect(tx.eventBooking.delete).toHaveBeenCalledWith({ where: { id: 'booking-1' } });
+    it('marks a real booking cancelled — kept on record, off the calendar — and writes an audit row', async () => {
+      tx.eventBooking.findFirst.mockResolvedValue({
+        id: 'booking-1',
+        status: 'confirmed',
+        title: 'Product launch',
+        startsAt: new Date('2026-10-10T09:00:00.000Z'),
+        eventSpace: { branchId: BRANCH_ID, name: 'Grand Ballroom' },
+      });
+      await service.cancelBooking(TENANT_ID, 'booking-1', ACTOR);
+      expect(tx.eventBooking.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'booking-1' }, data: expect.objectContaining({ status: 'cancelled' }) }));
+      expect(tx.eventBooking.delete).not.toHaveBeenCalled();
+      expect(tx.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: 'event_booking.cancelled' }) }));
+    });
+
+    it('cancelling twice is a no-op', async () => {
+      tx.eventBooking.findFirst.mockResolvedValue({ id: 'booking-1', status: 'cancelled', title: 'x', startsAt: new Date(), eventSpace: { branchId: BRANCH_ID, name: 'Grand Ballroom' } });
+      await service.cancelBooking(TENANT_ID, 'booking-1', ACTOR);
+      expect(tx.eventBooking.update).not.toHaveBeenCalled();
     });
   });
 
@@ -213,7 +227,7 @@ describe('EventSpacesService', () => {
       const from = new Date('2026-10-01');
       const to = new Date('2026-10-31');
       await service.listBookings(TENANT_ID, BRANCH_ID, from, to);
-      expect(tx.eventBooking.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { eventSpace: { branchId: BRANCH_ID }, startsAt: { lt: to }, endsAt: { gt: from } } }));
+      expect(tx.eventBooking.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { eventSpace: { branchId: BRANCH_ID }, status: 'confirmed', startsAt: { lt: to }, endsAt: { gt: from } } }));
     });
   });
 });

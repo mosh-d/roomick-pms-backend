@@ -43,6 +43,7 @@ function makeTx() {
     communicationLog: { findMany: jest.fn().mockResolvedValue([]), updateMany: jest.fn().mockResolvedValue({ count: 3 }) },
     registrationCard: { findMany: jest.fn().mockResolvedValue([]), update: jest.fn().mockResolvedValue({}) },
     guestNote: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
+    loyaltyTransaction: { updateMany: jest.fn().mockResolvedValue({ count: 0 }) },
     webhookDelivery: { deleteMany: jest.fn().mockResolvedValue({ count: 2 }) },
     lineItem: { aggregate: jest.fn().mockResolvedValue({ _sum: { amount: new Prisma.Decimal('64500') } }) },
     payment: { aggregate: jest.fn().mockResolvedValue({ _sum: { amount: new Prisma.Decimal('64500') } }) },
@@ -53,13 +54,13 @@ function makeTx() {
 describe('GdprService', () => {
   let service: GdprService;
   let tx: ReturnType<typeof makeTx>;
-  let guestsService: { getGuestDetail: jest.Mock };
+  let guestsService: { getGuestDetailInTx: jest.Mock };
   let encryption: { encryptBuffer: jest.Mock; decryptBuffer: jest.Mock };
   let documentStorage: { write: jest.Mock; read: jest.Mock; remove: jest.Mock };
 
   beforeEach(async () => {
     tx = makeTx();
-    guestsService = { getGuestDetail: jest.fn().mockResolvedValue({ id: GUEST_ID, name: 'Jane Doe' }) };
+    guestsService = { getGuestDetailInTx: jest.fn().mockResolvedValue({ id: GUEST_ID, name: 'Jane Doe' }) };
     encryption = {
       encryptBuffer: jest.fn().mockImplementation((b: Buffer) => Buffer.concat([Buffer.from('enc:'), b])),
       decryptBuffer: jest.fn().mockImplementation((b: Buffer) => b.subarray(4)),
@@ -160,7 +161,7 @@ describe('GdprService', () => {
 
     it('generates the export on first call — writes storage, marks completed, audits', async () => {
       const result = await service.downloadExport(TENANT_ID, REQUEST_ID, ACTOR_ID);
-      expect(guestsService.getGuestDetail).toHaveBeenCalledWith(TENANT_ID, GUEST_ID, true);
+      expect(guestsService.getGuestDetailInTx).toHaveBeenCalledWith(expect.anything(), GUEST_ID, true);
       expect(documentStorage.write).toHaveBeenCalledWith(`${TENANT_ID}/gdpr-exports/${REQUEST_ID}.enc`, expect.any(Buffer));
       expect(tx.gdprRequest.update).toHaveBeenCalledWith(
         expect.objectContaining({ data: expect.objectContaining({ status: 'completed', exportUrl: 'storage://export.enc' }) }),
@@ -201,7 +202,8 @@ describe('GdprService', () => {
       expect(card.fields).toEqual({ guestName: 'Erased guest', guestEmail: null, guestPhone: null, roomNumber: '101' });
       expect(card).toMatchObject({ signatureData: null, documentUrl: null });
 
-      expect(tx.communicationLog.updateMany).toHaveBeenCalledWith({ where: { guestId: GUEST_ID }, data: { body: '[erased]', bodyHtml: null } });
+      expect(tx.communicationLog.updateMany).toHaveBeenCalledWith({ where: { guestId: GUEST_ID }, data: { subject: null, body: '[erased]', bodyHtml: null } });
+      expect(tx.loyaltyTransaction.updateMany).toHaveBeenCalledWith({ where: { guestId: GUEST_ID }, data: { description: '[erased]' } });
       expect(tx.guestNote.updateMany).toHaveBeenCalledWith({ where: { guestId: GUEST_ID }, data: { body: '[erased]' } });
       // webhook deliveries that carried the guest are gone too
       expect(tx.webhookDelivery.deleteMany).toHaveBeenCalledWith({

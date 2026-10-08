@@ -11,6 +11,6 @@ import { RefundsService } from './refunds.service';
   imports: [PropertyModule, TaxesModule, IntegrationsModule],
   controllers: [FoliosController, RefundsController],
   providers: [FoliosService, RefundsService],
-  exports: [FoliosService],
+  exports: [FoliosService, RefundsService],
 })
 export class FoliosModule {}

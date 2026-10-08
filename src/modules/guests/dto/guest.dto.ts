@@ -1,6 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Transform, Type } from 'class-transformer';
-import { IsArray, IsEmail, IsIn, IsISO8601, IsInt, IsOptional, IsString, Length, Max, MaxLength, Min, MinLength, ValidateNested } from 'class-validator';
+import { ArrayMaxSize, IsArray, IsEmail, IsIn, IsInt, IsOptional, IsString, Length, Max, MaxLength, Min, MinLength, ValidateNested } from 'class-validator';
+import { IsDateOnly } from '../../../common/validation/is-date-only.decorator';
 import { toTrimmedLowerCase } from '../../../common/transforms/string.transforms';
 
 /**
@@ -66,7 +67,7 @@ export class RecordIdDocumentDto {
 
   @ApiPropertyOptional({ example: '2030-01-01' })
   @IsOptional()
-  @IsISO8601({ strict: true })
+  @IsDateOnly()
   idDocExpiryDate?: string;
 
   @ApiPropertyOptional({ example: 'NG', description: 'ISO 3166-1 alpha-2' })
@@ -142,13 +143,13 @@ export class UpdateGuestDto {
   @Transform(toTrimmedLowerCase)
   @IsEmail()
   @MaxLength(320)
-  email?: string;
+  email?: string | null;
 
   @ApiPropertyOptional({ example: '090 345 6794' })
   @IsOptional()
   @IsString()
   @MaxLength(20)
-  phone?: string;
+  phone?: string | null;
 
   @ApiPropertyOptional({ type: GuestPreferencesDto })
   @IsOptional()
@@ -167,7 +168,9 @@ export class UpdateGuestDto {
   @ApiPropertyOptional({ type: [String], example: ['corporate', 'repeat guest'] })
   @IsOptional()
   @IsArray()
+  @ArrayMaxSize(20)
   @IsString({ each: true })
+  @MaxLength(40, { each: true })
   tags?: string[];
 
   // No loyalty fields: points move only through the loyalty ledger (earned
@@ -181,4 +184,36 @@ export class AddGuestNoteDto {
   @MinLength(1)
   @MaxLength(2000)
   body!: string;
+}
+
+export class ListGuestsQueryDto {
+  @ApiPropertyOptional({ description: 'Matches the name or email' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  q?: string;
+
+  @ApiPropertyOptional({ example: 1 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(100_000)
+  page?: number;
+
+  @ApiPropertyOptional({ example: 50, description: 'At most 200 — the list used to accept any number, so one request could dump every guest' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(200)
+  limit?: number;
+}
+
+export class SearchGuestsQueryDto {
+  @ApiProperty({ description: 'Part of a name, email or phone number' })
+  @IsString()
+  @MinLength(1)
+  @MaxLength(100)
+  q!: string;
 }

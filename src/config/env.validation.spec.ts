@@ -30,10 +30,18 @@ describe('envValidationSchema — email settings', () => {
   });
 });
 
-describe('envValidationSchema — the web app’s address', () => {
-  it('is needed in production, where links in emails would otherwise point at localhost', () => {
-    expect(validate({ NODE_ENV: 'production' }).error?.message).toMatch(/PUBLIC_WEB_BASE_URL/);
-    expect(validate({ NODE_ENV: 'production', PUBLIC_WEB_BASE_URL: 'https://app.roomick.example' }).error).toBeUndefined();
+describe('envValidationSchema — the public addresses', () => {
+  const PRODUCTION = { NODE_ENV: 'production', PUBLIC_WEB_BASE_URL: 'https://app.roomick.example', PUBLIC_API_BASE_URL: 'https://api.roomick.example' };
+
+  it('both are needed in production, where links in emails would otherwise point at localhost', () => {
+    expect(validate({ NODE_ENV: 'production' }).error?.message).toMatch(/PUBLIC_(WEB|API)_BASE_URL/);
+    expect(validate({ ...PRODUCTION, PUBLIC_WEB_BASE_URL: '' }).error?.message).toMatch(/PUBLIC_WEB_BASE_URL/);
+    expect(validate({ ...PRODUCTION, PUBLIC_API_BASE_URL: '' }).error?.message).toMatch(/PUBLIC_API_BASE_URL/);
+    expect(validate(PRODUCTION).error).toBeUndefined();
+  });
+
+  it('the API address is the one a marketing email’s open pixel, tracked links and unsubscribe link are built from', () => {
+    expect(validate({ ...PRODUCTION, PUBLIC_API_BASE_URL: 'not a url' }).error?.message).toMatch(/PUBLIC_API_BASE_URL/);
   });
 
   it('is optional in development, and must be a web address when given', () => {

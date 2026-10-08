@@ -196,9 +196,11 @@ export class GdprService {
         if (card.documentUrl) filesToDelete.push(card.documentUrl);
       }
 
+      // Points entries describe the stay they came from ("Stay RES-… at …") — the wording goes, the points stay.
+      await tx.loyaltyTransaction.updateMany({ where: { guestId: guest.id }, data: { description: ERASED_TEXT } });
       const [notes, messages, stays, webhookDeliveries, auditRows] = await Promise.all([
         tx.guestNote.updateMany({ where: { guestId: guest.id }, data: { body: ERASED_TEXT } }),
-        tx.communicationLog.updateMany({ where: { guestId: guest.id }, data: { body: ERASED_TEXT, bodyHtml: null } }),
+        tx.communicationLog.updateMany({ where: { guestId: guest.id }, data: { subject: null, body: ERASED_TEXT, bodyHtml: null } }),
         tx.reservation.updateMany({ where: { guestId: guest.id }, data: { specialRequests: null, estimatedArrivalTime: null } }),
         // A webhook delivery carries the guest as they stood when it was
         // queued; the log of them goes too, sent or not.
@@ -280,7 +282,7 @@ export class GdprService {
       let exportUrl = request.exportUrl;
       if (!exportUrl) {
         const [guest, reservations, folios, communications] = await Promise.all([
-          this.guestsService.getGuestDetail(tenantId, request.guestId, true),
+          this.guestsService.getGuestDetailInTx(tx, request.guestId, true),
           tx.reservation.findMany({
             where: { guestId: request.guestId },
             select: { id: true, confirmationNumber: true, status: true, checkInDate: true, checkOutDate: true, adults: true, children: true, confirmedRate: true, createdAt: true },

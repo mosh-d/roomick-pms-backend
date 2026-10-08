@@ -6,6 +6,8 @@ import { ReportsService } from '../reports/reports.service';
 import { FoliosService } from '../folios/folios.service';
 import { CrossPropertyReportType } from './dto/hq.dto';
 
+const HQ_REPORT_MAX_DAYS = 92;
+
 const ZERO = new Prisma.Decimal(0);
 
 export interface PortfolioBranchSummary {
@@ -118,6 +120,8 @@ export class HqService {
    * a 200-room one.
    */
   async getCrossPropertyReport(tenantId: string, type: CrossPropertyReportType, dto: ReportQueryDto, branchIds?: string[]): Promise<CrossPropertyReport> {
+    // One request runs the report once per branch — a quarter is the most it may span.
+    this.reportsService.range(dto, HQ_REPORT_MAX_DAYS);
     const branches = await this.prisma.withTenant(tenantId, (tx) =>
       tx.branch.findMany({
         where: { deletedAt: null, ...(branchIds && branchIds.length > 0 ? { id: { in: branchIds } } : {}) },

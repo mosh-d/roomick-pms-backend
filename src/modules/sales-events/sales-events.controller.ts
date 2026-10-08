@@ -11,6 +11,7 @@ import {
   CreateEventBookingDto,
   CreateEventSpaceDto,
   CreateGroupBlockDto,
+  EventBookingsQueryDto,
   RoomingListDto,
   UpdateEventBookingDto,
 } from './dto/sales-events.dto';
@@ -113,10 +114,9 @@ export class SalesEventsController {
   listBookings(
     @CurrentTenant() tenantId: string,
     @Param('branchId', ParseUUIDPipe) branchId: string,
-    @Query('from') from: string,
-    @Query('to') to: string,
+    @Query() query: EventBookingsQueryDto,
   ): Promise<EventBookingSummary[]> {
-    return this.eventSpacesService.listBookings(tenantId, branchId, new Date(from), new Date(to));
+    return this.eventSpacesService.listBookings(tenantId, branchId, new Date(query.from), new Date(query.to));
   }
 
   @Post('event-spaces/:eventSpaceId/bookings')
@@ -182,8 +182,8 @@ export class SalesEventsController {
   @BranchOf('eventBooking', 'bookingId')
   @Roles(SystemRole.Owner, SystemRole.Manager)
   @ApiOperation({ summary: 'Cancel an event booking, freeing the slot' })
-  async cancelBooking(@CurrentTenant() tenantId: string, @Param('bookingId', ParseUUIDPipe) bookingId: string): Promise<{ ok: true }> {
-    await this.eventSpacesService.cancelBooking(tenantId, bookingId);
+  async cancelBooking(@CurrentTenant() tenantId: string, @CurrentUser() user: JwtPayload, @Param('bookingId', ParseUUIDPipe) bookingId: string): Promise<{ ok: true }> {
+    await this.eventSpacesService.cancelBooking(tenantId, bookingId, user.sub);
     return { ok: true };
   }
 }

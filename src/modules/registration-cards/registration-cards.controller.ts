@@ -3,7 +3,7 @@ import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import type { Response } from 'express';
 import { CurrentTenant, CurrentUser } from '../../common/decorators';
 import { Permission } from '../../common/decorators/permission.decorator';
-import { ALL_SYSTEM_ROLES, Roles, SystemRole } from '../../common/decorators/roles.decorator';
+import { Roles, SystemRole } from '../../common/decorators/roles.decorator';
 import { JwtPayload } from '../../common/types/request-context';
 import { SignRegistrationCardDto } from './dto/registration-card.dto';
 import { RegistrationCardsService } from './registration-cards.service';
@@ -30,7 +30,7 @@ export class RegistrationCardsController {
 
   @Get('reservations/:reservationId/registration-card')
   @BranchOf('reservation', 'reservationId')
-  @Roles(...ALL_SYSTEM_ROLES)
+  @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk)
   @ApiOperation({ summary: "A reservation's own registration card, if one has been generated yet" })
   getCardForReservation(
     @CurrentTenant() tenantId: string,
@@ -41,7 +41,7 @@ export class RegistrationCardsController {
 
   @Get('registration-cards/:cardId')
   @BranchOf('registrationCard', 'cardId')
-  @Roles(...ALL_SYSTEM_ROLES)
+  @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk)
   @ApiOperation({ summary: 'Get a registration card' })
   getCard(@CurrentTenant() tenantId: string, @Param('cardId', ParseUUIDPipe) cardId: string): ReturnType<RegistrationCardsService['getCard']> {
     return this.registrationCardsService.getCard(tenantId, cardId);
@@ -49,7 +49,7 @@ export class RegistrationCardsController {
 
   @Get('registration-cards/:cardId/download')
   @BranchOf('registrationCard', 'cardId')
-  @Roles(...ALL_SYSTEM_ROLES)
+  @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk)
   @ApiOperation({ summary: 'Download the registration card as a PDF — the persisted signed document if signed, a live-rendered preview otherwise' })
   async downloadCard(
     @CurrentTenant() tenantId: string,

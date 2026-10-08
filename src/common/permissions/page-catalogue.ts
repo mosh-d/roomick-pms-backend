@@ -90,12 +90,12 @@ export const PAGE_CATALOGUE: readonly PageDefinition[] = [
 
   { key: '/dashboard/shifts', label: 'Shift Management', group: 'Operations', feature: 'Shift Management', module: 'shifts', roles: EVERY_STAFF_ROLE, actRoles: [FD, POS], uses: ['shifts'] },
   { key: '/dashboard/no-shows', label: 'No-Show Handling', group: 'Operations', feature: 'No-Show Handling', module: 'reservations', roles: EVERY_STAFF_ROLE, actRoles: [FD], uses: ['reservations'] },
-  { key: '/dashboard/registration-cards', label: 'Guest Reg. Card', group: 'Operations', feature: 'Guest Reg. Card', module: 'guests', roles: EVERY_STAFF_ROLE, actRoles: [FD], uses: ['guests', 'property', 'reservations'] },
+  { key: '/dashboard/registration-cards', label: 'Guest Reg. Card', group: 'Operations', feature: 'Guest Reg. Card', module: 'guests', roles: [FD], actRoles: [FD], uses: ['guests', 'property', 'reservations'] },
   { key: '/dashboard/comms-log', label: 'Comms Log', group: 'Operations', feature: 'Comms Log', module: 'comms', roles: [FD], actRoles: [FD], uses: ['comms', 'reservations'] },
 
   // --- Management -------------------------------------------------------------------------------------------------
   { key: '/dashboard/reservations/rate-plans', label: 'Rate Resolver', group: 'Management', feature: 'Rate Resolver', module: 'reservations', roles: EVERY_STAFF_ROLE, actRoles: [], uses: ['reservations', 'property'] },
-  { key: '/dashboard/guests/profiles', label: 'Guest Profiles', group: 'Management', feature: 'Guest Profiles & CRM', module: 'guests', roles: EVERY_STAFF_ROLE, actRoles: [FD], uses: ['guests', 'loyalty'] },
+  { key: '/dashboard/guests/profiles', label: 'Guest Profiles', group: 'Management', feature: 'Guest Profiles & CRM', module: 'guests', roles: [FD], actRoles: [FD], uses: ['guests', 'loyalty'] },
   { key: '/dashboard/guests/corporate', label: 'Corporate Accounts', group: 'Management', feature: 'Guest Profiles & CRM', module: 'guests', roles: [FD, AC], actRoles: [], uses: ['guests', 'reservations'] },
   { key: '/dashboard/sales-events', label: 'Sales & Events', group: 'Management', feature: 'Sales & Events', module: 'sales_events', roles: [FD], actRoles: [FD], uses: ['sales_events', 'property'] },
   { key: '/dashboard/maintenance', label: 'Maintenance', group: 'Management', feature: 'Maintenance', module: 'maintenance', roles: EVERY_STAFF_ROLE, actRoles: EVERY_STAFF_ROLE, uses: ['maintenance', 'property'] },

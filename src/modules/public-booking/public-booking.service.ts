@@ -474,12 +474,12 @@ export class PublicBookingService {
    */
   async createReservation(slug: string, dto: PublicCreateReservationDto): Promise<PublicBookingConfirmation> {
     const { tenantId, branchId } = await this.resolveBookableBranch(slug);
-    this.assertNotInThePast(dto.checkInDate);
     // A property that has published terms or a privacy notice books only a
     // guest who agreed to them — checked before anything is held.
     const terms = await this.prisma.withTenant(tenantId, (tx) =>
-      tx.branch.findFirstOrThrow({ where: { id: branchId }, select: { privacyNotice: true, bookingTerms: true } }),
+      tx.branch.findFirstOrThrow({ where: { id: branchId }, select: { privacyNotice: true, bookingTerms: true, timezone: true } }),
     );
+    this.assertNotInThePast(dto.checkInDate, terms.timezone);
     const termsRequired = Boolean(terms.privacyNotice || terms.bookingTerms);
     if (termsRequired && dto.acceptTerms !== true) {
       throw new BadRequestException({
@@ -542,8 +542,10 @@ export class PublicBookingService {
    * belongs here, on the public surface, rather than being pushed down into
    * the shared method where it would break that legitimate staff case.
    */
-  private assertNotInThePast(checkInDate: string): void {
-    const today = new Date().toISOString().slice(0, 10);
+  private assertNotInThePast(checkInDate: string, timezone: string): void {
+    // "Today" at the property, not UTC — for an hour either side of midnight a
+    // Lagos guest was refused today's date, or offered yesterday's.
+    const today = todayInTimezone(timezone);
     if (checkInDate < today) {
       throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: 'Check-in date cannot be in the past' });
     }

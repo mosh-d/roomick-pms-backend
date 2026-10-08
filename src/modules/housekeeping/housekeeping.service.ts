@@ -1,4 +1,4 @@
-import { ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { HousekeepingTask, Prisma } from '@prisma/client';
 import { ErrorCode } from '../../common/errors/error-codes';
 import { todayInTimezone, toBranchDate } from '../../common/utils/branch-date';
@@ -38,6 +38,14 @@ export class HousekeepingService {
       const room = await tx.room.findFirst({ where: { id: dto.roomId, branchId, deletedAt: null } });
       if (!room) {
         throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Room not found at this branch' });
+      }
+      // One open task per room: a second "clean 204" while the first waits only doubles the board.
+      const waiting = await tx.housekeepingTask.findFirst({ where: { roomId: room.id, status: { in: ['pending', 'in_progress'] } }, select: { status: true } });
+      if (waiting) {
+        throw new ConflictException({
+          code: ErrorCode.CONFLICT,
+          message: `Room ${room.number} already has a task ${waiting.status === 'in_progress' ? 'in progress' : 'waiting'} — finish or skip it first`,
+        });
       }
       return this.createTaskInTx(tx, tenantId, branchId, {
         roomId: dto.roomId,
@@ -87,22 +95,41 @@ export class HousekeepingService {
       },
       include: TASK_INCLUDE,
     });
-    await this.audit(tx, tenantId, opts.actorId, 'housekeeping.task_created', task.id, { roomId: opts.roomId, triggerEvent: opts.triggerEvent });
+    await this.audit(tx, tenantId, opts.actorId, 'housekeeping.task_created', task.id, { roomId: opts.roomId, triggerEvent: opts.triggerEvent }, branchId);
     return task;
+  }
+
+  /**
+   * The daily service of an occupied room — raised by the night audit for
+   * every stay still in house, unless the room already has a task waiting.
+   * Nothing used to raise one: the board only ever showed check-outs and
+   * manual requests, so a three-night guest's room was never on it between.
+   */
+  async ensureStayoverTaskInTx(tx: TenantTx, tenantId: string, branchId: string, roomId: string, reservationId: string, taskDate: Date): Promise<boolean> {
+    const waiting = await tx.housekeepingTask.findFirst({ where: { roomId, status: { in: ['pending', 'in_progress'] } }, select: { id: true } });
+    if (waiting) return false;
+    await this.createTaskInTx(tx, tenantId, branchId, { roomId, priority: 3, triggerEvent: 'stayover', triggeredByReservationId: reservationId, taskDate, actorId: null });
+    return true;
   }
 
   /** Task Board (all tasks, optionally by status) and "my assigned rooms" (assigneeId = the caller). */
   async listTasks(tenantId: string, branchId: string, query: ListTasksQueryDto) {
     return this.prisma.withTenant(tenantId, async (tx) => {
       await this.propertyService.assertBranch(tx, branchId);
+      const take = Math.min(Math.max(query.limit ?? 500, 1), 1000);
       return tx.housekeepingTask.findMany({
         where: {
           branchId,
           ...(query.status ? { status: query.status } : {}),
           ...(query.assigneeId ? { assigneeId: query.assigneeId } : {}),
+          ...(query.from || query.to
+            ? { taskDate: { ...(query.from ? { gte: toBranchDate(query.from) } : {}), ...(query.to ? { lte: toBranchDate(query.to) } : {}) } }
+            : {}),
         },
         include: TASK_INCLUDE,
-        orderBy: [{ priority: 'asc' }, { createdAt: 'asc' }],
+        // Newest day first within the cap, urgent before normal on each day.
+        orderBy: [{ taskDate: 'desc' }, { priority: 'asc' }, { createdAt: 'asc' }],
+        take,
       });
     });
   }
@@ -121,8 +148,19 @@ export class HousekeepingService {
       if (!isSupervisor) {
         throw new ForbiddenException({ code: ErrorCode.FORBIDDEN, message: 'Only a supervisor may assign a task to a housekeeper' });
       }
+      if (task.status === 'done' || task.status === 'skipped') {
+        throw new ConflictException({ code: ErrorCode.INVALID_STATUS_TRANSITION, message: 'This task is finished — there is nothing left to assign' });
+      }
+      // A real member of staff at this branch — any id used to be accepted.
+      const assignee = await tx.userBranchRole.findFirst({
+        where: { userId: dto.assigneeId, OR: [{ branchId: null }, { branchId: task.branchId }], user: { deletedAt: null } },
+        select: { id: true },
+      });
+      if (!assignee) {
+        throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: 'That person isn’t on the staff at this branch' });
+      }
       const updated = await tx.housekeepingTask.update({ where: { id: taskId }, data: { assigneeId: dto.assigneeId }, include: TASK_INCLUDE });
-      await this.audit(tx, tenantId, actor.sub, 'housekeeping.task_assigned', taskId, { assigneeId: dto.assigneeId });
+      await this.audit(tx, tenantId, actor.sub, 'housekeeping.task_assigned', taskId, { assigneeId: dto.assigneeId }, task.branchId);
       return updated;
     });
   }
@@ -153,7 +191,7 @@ export class HousekeepingService {
         data: { status: 'in_progress', assigneeId: task.assigneeId ?? actorId },
         include: TASK_INCLUDE,
       });
-      await this.audit(tx, tenantId, actorId, 'housekeeping.task_started', taskId, {});
+      await this.audit(tx, tenantId, actorId, 'housekeeping.task_started', taskId, {}, task.branchId);
       return updated;
     });
   }
@@ -174,7 +212,7 @@ export class HousekeepingService {
         data: { status: 'done', completedAt: new Date(), completedBy: actorId },
         include: TASK_INCLUDE,
       });
-      await this.audit(tx, tenantId, actorId, 'housekeeping.task_completed', taskId, {});
+      await this.audit(tx, tenantId, actorId, 'housekeeping.task_completed', taskId, {}, task.branchId);
       return updated;
     });
   }
@@ -193,13 +231,16 @@ export class HousekeepingService {
   async reportIssue(tenantId: string, taskId: string, dto: ReportIssueDto, actorId: string): Promise<HousekeepingTask> {
     return this.prisma.withTenant(tenantId, async (tx) => {
       const task = await this.findTaskOrThrow(tx, taskId);
+      if (task.status === 'done') {
+        throw new ConflictException({ code: ErrorCode.INVALID_STATUS_TRANSITION, message: 'This task is already done — raise the issue on a new task for the room' });
+      }
       const note = `[${dto.areaOfIssue}] ${dto.description}`;
       const updated = await tx.housekeepingTask.update({
         where: { id: taskId },
         data: { status: 'skipped', notes: task.notes ? `${task.notes}\n${note}` : note },
         include: TASK_INCLUDE,
       });
-      await this.audit(tx, tenantId, actorId, 'housekeeping.issue_reported', taskId, { areaOfIssue: dto.areaOfIssue });
+      await this.audit(tx, tenantId, actorId, 'housekeeping.issue_reported', taskId, { areaOfIssue: dto.areaOfIssue }, task.branchId);
       return updated;
     });
   }
@@ -235,7 +276,7 @@ export class HousekeepingService {
     return task;
   }
 
-  private async audit(tx: TenantTx, tenantId: string, userId: string | null, action: string, entityId: string, after: Prisma.InputJsonValue): Promise<void> {
-    await tx.auditLog.create({ data: { tenantId, userId, action, entityType: 'housekeeping_task', entityId, after } });
+  private async audit(tx: TenantTx, tenantId: string, userId: string | null, action: string, entityId: string, after: Prisma.InputJsonValue, branchId?: string): Promise<void> {
+    await tx.auditLog.create({ data: { tenantId, branchId: branchId ?? null, userId, action, entityType: 'housekeeping_task', entityId, after } });
   }
 }

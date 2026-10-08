@@ -1,10 +1,14 @@
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import { ErrorCode } from '../../common/errors/error-codes';
 import { branchDayStart, localDateOf, toBranchDate } from '../../common/utils/branch-date';
 import { PrismaService, TenantTx } from '../../prisma/prisma.service';
 import { PropertyService } from '../property/property.service';
 import { ReportGroupBy, ReportQueryDto } from './dto/report-query.dto';
 import { renderReportPdf } from './report-pdf.util';
+
+/** The widest range one report request may cover. */
+export const MAX_REPORT_DAYS = 366;
 
 const ZERO = new Prisma.Decimal(0);
 
@@ -38,6 +42,26 @@ export class ReportsService {
 
   private isoDate(d: Date): string {
     return d.toISOString().slice(0, 10);
+  }
+
+  /**
+   * Every report expands its range night by night in memory, so a year is
+   * the most one request may ask for — "2020 to today" on a 200-room
+   * property was a multi-second request anyone with the page could repeat.
+   */
+  range(dto: Pick<ReportQueryDto, 'from' | 'to'>, maxDays = MAX_REPORT_DAYS): { from: Date; to: Date } {
+    const from = toBranchDate(dto.from);
+    const to = toBranchDate(dto.to);
+    // `to` is exclusive, so an equal pair is an empty range: it reports nothing, which is what a
+    // branch created today has to say about its history (the demand forecast relies on that).
+    if (to < from) {
+      throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: "The end of the range can't be before its start" });
+    }
+    const days = Math.round((to.getTime() - from.getTime()) / 86_400_000);
+    if (days > maxDays) {
+      throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: `A report covers at most ${maxDays} days at a time — narrow the dates` });
+    }
+    return { from, to };
   }
 
   private enumerateDays(from: Date, to: Date): Date[] {
@@ -120,6 +144,35 @@ export class ReportsService {
         }
       }
     }
+    // A room blocked out of service isn't available to sell, so its nights
+    // come off the denominator — occupancy used to count them as empty rooms.
+    // Dated blocks cover the past; a room held out of order right now, with
+    // no end date, counts from today forward.
+    const blocks = await tx.roomBlock.findMany({
+      where: { room: { branchId, deletedAt: null, ...(roomTypeId ? { roomTypeId } : {}) }, fromDate: { lt: to }, toDate: { gte: from } },
+      select: { fromDate: true, toDate: true, room: { select: { roomTypeId: true } } },
+    });
+    for (const block of blocks) {
+      for (const day of days) {
+        if (day >= block.fromDate && day <= block.toDate) {
+          const bucket = buckets.get(`${this.isoDate(day)}|${block.room.roomTypeId}`);
+          if (bucket && bucket.available > 0) bucket.available -= 1;
+        }
+      }
+    }
+    const todayUtc = new Date(new Date().toISOString().slice(0, 10));
+    const heldNow = await tx.room.findMany({
+      where: { branchId, deletedAt: null, heldStatus: 'out_of_order', ...(roomTypeId ? { roomTypeId } : {}) },
+      select: { roomTypeId: true },
+    });
+    for (const room of heldNow) {
+      for (const day of days) {
+        if (day >= todayUtc) {
+          const bucket = buckets.get(`${this.isoDate(day)}|${room.roomTypeId}`);
+          if (bucket && bucket.available > 0) bucket.available -= 1;
+        }
+      }
+    }
     for (const row of roomRevenueRows) {
       const rtId = row.folio.reservation?.roomTypeId;
       if (!rtId || !row.serviceDate) continue;
@@ -148,8 +201,7 @@ export class ReportsService {
   }
 
   async getOccupancy(tenantId: string, branchId: string, dto: ReportQueryDto) {
-    const from = toBranchDate(dto.from);
-    const to = toBranchDate(dto.to);
+    const { from, to } = this.range(dto);
     const groupBy = dto.groupBy ?? 'day';
     return this.prisma.withTenant(tenantId, async (tx) => {
       await this.propertyService.assertBranch(tx, branchId);
@@ -195,8 +247,7 @@ export class ReportsService {
   }
 
   async getAdr(tenantId: string, branchId: string, dto: ReportQueryDto) {
-    const from = toBranchDate(dto.from);
-    const to = toBranchDate(dto.to);
+    const { from, to } = this.range(dto);
     return this.prisma.withTenant(tenantId, async (tx) => {
       const branch = await this.propertyService.assertBranch(tx, branchId);
       const { roomTypes, days, buckets } = await this.roomNightMetrics(tx, branchId, from, to, dto.roomTypeId);
@@ -233,8 +284,7 @@ export class ReportsService {
   }
 
   async getRevpar(tenantId: string, branchId: string, dto: ReportQueryDto) {
-    const from = toBranchDate(dto.from);
-    const to = toBranchDate(dto.to);
+    const { from, to } = this.range(dto);
     return this.prisma.withTenant(tenantId, async (tx) => {
       const branch = await this.propertyService.assertBranch(tx, branchId);
       const { roomTypes, days, buckets } = await this.roomNightMetrics(tx, branchId, from, to, dto.roomTypeId);
@@ -285,8 +335,7 @@ export class ReportsService {
    * naming which breakdown the UI leads with — this always returns both.
    */
   async getRevenue(tenantId: string, branchId: string, dto: ReportQueryDto) {
-    const from = toBranchDate(dto.from);
-    const to = toBranchDate(dto.to);
+    const { from, to } = this.range(dto);
     return this.prisma.withTenant(tenantId, async (tx) => {
       const branch = await this.propertyService.assertBranch(tx, branchId);
 
@@ -364,8 +413,7 @@ export class ReportsService {
    *   Loyalty points aren't money and are left out.
    */
   async getFinancial(tenantId: string, branchId: string, dto: ReportQueryDto) {
-    const from = toBranchDate(dto.from);
-    const to = toBranchDate(dto.to);
+    const { from, to } = this.range(dto);
     const groupBy: ReportGroupBy = dto.groupBy ?? 'day';
     return this.prisma.withTenant(tenantId, async (tx) => {
       const branch = await this.propertyService.assertBranch(tx, branchId);

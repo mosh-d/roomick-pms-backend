@@ -1,6 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
-import { IsBoolean, IsISO8601, IsInt, IsNumber, IsOptional, IsString, IsUUID, Max, MaxLength, Min, MinLength } from 'class-validator';
+import { IsBoolean, IsInt, IsNumber, IsOptional, IsString, IsUUID, Max, MaxLength, Min, MinLength } from 'class-validator';
+import { IsDateOnly } from '../../../common/validation/is-date-only.decorator';
 
 export class CreateAvailabilityRestrictionDto {
   @ApiPropertyOptional({ description: 'Omit to apply to every room type at the branch' })
@@ -9,11 +10,11 @@ export class CreateAvailabilityRestrictionDto {
   roomTypeId?: string;
 
   @ApiProperty({ example: '2026-12-24' })
-  @IsISO8601({ strict: true })
+  @IsDateOnly()
   startDate!: string;
 
   @ApiProperty({ example: '2027-01-02', description: 'Exclusive' })
-  @IsISO8601({ strict: true })
+  @IsDateOnly()
   endDate!: string;
 
   @ApiPropertyOptional({ example: 3 })
@@ -49,7 +50,7 @@ export class ApproveRateRecommendationDto {
   roomTypeId!: string;
 
   @ApiProperty({ example: '2026-10-15' })
-  @IsISO8601({ strict: true })
+  @IsDateOnly()
   date!: string;
 
   @ApiProperty({ example: 15, description: 'Signed percentage — positive raises the rate, negative discounts it' })
@@ -95,11 +96,11 @@ export class SetCompetitorRatesDto {
   roomTypeId!: string;
 
   @ApiProperty({ example: '2026-10-01' })
-  @IsISO8601({ strict: true })
+  @IsDateOnly()
   fromDate!: string;
 
   @ApiProperty({ example: '2026-10-07', description: 'Inclusive — the last night the rate applies to' })
-  @IsISO8601({ strict: true })
+  @IsDateOnly()
   throughDate!: string;
 
   @ApiPropertyOptional({ example: 52000, description: 'Their nightly rate. Required unless clearing.' })
@@ -123,7 +124,7 @@ export class CompSetQueryDto {
 
   @ApiPropertyOptional({ example: '2026-10-01', description: 'First night shown; defaults to today at the branch' })
   @IsOptional()
-  @IsISO8601({ strict: true })
+  @IsDateOnly()
   from?: string;
 
   @ApiPropertyOptional({ example: 14 })

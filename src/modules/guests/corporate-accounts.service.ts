@@ -55,6 +55,8 @@ export class CorporateAccountsService {
           branch: { select: { name: true, currency: true } },
         },
         orderBy: { checkInDate: 'desc' },
+        // The latest five hundred stays are plenty to list the travellers; the twenty newest are shown.
+        take: 500,
       });
       const travelers = new Map<string, { guest: (typeof stays)[number]['guest']; stays: number; lastStay: Date }>();
       for (const stay of stays) {

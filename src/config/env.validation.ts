@@ -26,8 +26,15 @@ export const envValidationSchema = Joi.object({
   DOCUMENT_STORAGE_DIR: Joi.string().allow('').optional(),
   // Where a guest's mail client reaches this API: the open pixel, click redirect and
   // unsubscribe link in a marketing email are absolute URLs, and they are baked into a
-  // message that outlives any request. Defaults to http://localhost:<PORT> for local dev.
-  PUBLIC_API_BASE_URL: Joi.string().uri().allow('').optional(),
+  // message that outlives any request. Required in production — a campaign sent before it
+  // was set carried `http://localhost` tracking and unsubscribe links, and an unsubscribe
+  // link that goes nowhere is a compliance problem, not just a broken statistic. Local
+  // development defaults to http://localhost:<PORT>.
+  PUBLIC_API_BASE_URL: Joi.when('NODE_ENV', {
+    is: 'production',
+    then: Joi.string().uri({ scheme: ['https', 'http'] }).required(),
+    otherwise: Joi.string().uri().allow('').optional(),
+  }),
   // Where people reach the web app — the links in invitation, password reset and
   // verification emails, and a guest's "Manage your booking", point here. Required in
   // production, where defaulting to localhost would send people nowhere; local

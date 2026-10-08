@@ -100,11 +100,17 @@ export class LoyaltyService {
 
   async getSummary(tenantId: string): Promise<LoyaltySummary> {
     return this.prisma.withTenant(tenantId, async (tx) => {
-      const guests = await tx.guestProfile.findMany({
-        where: { deletedAt: null, OR: [{ loyaltyEnrolledAt: { not: null } }, { loyaltyTier: { not: null } }, { loyaltyPoints: { gt: 0 } }] },
-        select: { id: true, name: true, email: true, loyaltyTier: true, loyaltyPoints: true },
-        orderBy: { loyaltyPoints: 'desc' },
-      });
+      const memberWhere = { deletedAt: null, OR: [{ loyaltyEnrolledAt: { not: null } }, { loyaltyTier: { not: null } }, { loyaltyPoints: { gt: 0 } }] };
+      // The five hundred biggest balances; the count is the real membership.
+      const [guests, totalMembers] = await Promise.all([
+        tx.guestProfile.findMany({
+          where: memberWhere,
+          select: { id: true, name: true, email: true, loyaltyTier: true, loyaltyPoints: true },
+          orderBy: { loyaltyPoints: 'desc' },
+          take: 500,
+        }),
+        tx.guestProfile.count({ where: memberWhere }),
+      ]);
 
       const members: LoyaltyMember[] = guests.map((g) => ({
         id: g.id,
@@ -123,7 +129,7 @@ export class LoyaltyService {
       }
       const byTier: LoyaltyTierSummary[] = [...byTierMap.entries()].map(([tier, v]) => ({ tier, ...v })).sort((a, b) => b.totalPoints - a.totalPoints);
 
-      return { members, byTier, totalMembers: members.length, totalPointsIssued: members.reduce((sum, m) => sum + m.loyaltyPoints, 0) };
+      return { members, byTier, totalMembers, totalPointsIssued: members.reduce((sum, m) => sum + m.loyaltyPoints, 0) };
     });
   }
 

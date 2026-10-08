@@ -18,6 +18,7 @@ import {
   MinLength,
   ValidateNested,
 } from 'class-validator';
+import { IsDateOnly } from '../../../common/validation/is-date-only.decorator';
 import { toTrimmedLowerCase } from '../../../common/transforms/string.transforms';
 import { CreateGuestDto } from '../../guests/dto/guest.dto';
 
@@ -46,23 +47,23 @@ export class CreateGroupBlockDto {
 
   @ApiProperty({ example: 45000, description: 'Absolute nightly rate applied to every reservation booked into this block' })
   @Type(() => Number)
-  @IsNumber()
-  @Min(0)
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0.01)
   blockRate!: number;
 
   @ApiProperty({ example: '2026-10-05', description: "The group's first night" })
-  @IsISO8601({ strict: true })
+  @IsDateOnly()
   arrivalDate!: string;
 
   @ApiProperty({ example: '2026-10-08', description: 'Exclusive — the morning the group leaves' })
-  @IsISO8601({ strict: true })
+  @IsDateOnly()
   departureDate!: string;
 
   @ApiProperty({
     example: '2026-09-21',
     description: 'Rooms stay held for the group through the end of this day (branch time); after it, unbooked rooms go back on sale. On or before arrival.',
   })
-  @IsISO8601({ strict: true })
+  @IsDateOnly()
   cutoffDate!: string;
 
   @ApiPropertyOptional({ example: 'Jane Smith' })
@@ -100,12 +101,12 @@ export class BookIntoGroupBlockDto {
 
   @ApiPropertyOptional({ example: '2026-10-05', description: "Defaults to the block's arrival" })
   @IsOptional()
-  @IsISO8601({ strict: true })
+  @IsDateOnly()
   checkInDate?: string;
 
   @ApiPropertyOptional({ example: '2026-10-08', description: "Exclusive. Defaults to the block's departure" })
   @IsOptional()
-  @IsISO8601({ strict: true })
+  @IsDateOnly()
   checkOutDate?: string;
 
   @ApiProperty({ example: 2 })
@@ -153,12 +154,12 @@ export class RoomingListRowDto {
 
   @ApiPropertyOptional({ description: "Defaults to the block's arrival" })
   @IsOptional()
-  @IsISO8601({ strict: true })
+  @IsDateOnly()
   checkInDate?: string;
 
   @ApiPropertyOptional({ description: "Defaults to the block's departure" })
   @IsOptional()
-  @IsISO8601({ strict: true })
+  @IsDateOnly()
   checkOutDate?: string;
 
   @ApiPropertyOptional({ example: 1, description: 'Defaults to 1' })
@@ -347,3 +348,14 @@ export class CreateEventBookingDto {
 }
 
 export class UpdateEventBookingDto extends PartialType(CreateEventBookingDto) {}
+
+/** The calendar window — both ends are instants, since events have times of day. */
+export class EventBookingsQueryDto {
+  @ApiProperty({ example: '2026-10-01T00:00:00.000Z' })
+  @IsISO8601()
+  from!: string;
+
+  @ApiProperty({ example: '2026-11-01T00:00:00.000Z', description: 'Exclusive' })
+  @IsISO8601()
+  to!: string;
+}

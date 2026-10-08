@@ -5,6 +5,7 @@ import { tenantModelInsertOrder } from '../../common/prisma/tenant-models';
 import { Test } from '@nestjs/testing';
 import { PrismaService } from '../../prisma/prisma.service';
 import { BrandModeInput } from './dto/configure-mode.dto';
+import { MfaService } from '../auth/mfa.service';
 import { TenantsService } from './tenants.service';
 
 const TENANT_ID = '11111111-1111-4111-8111-111111111111';
@@ -79,6 +80,7 @@ describe('TenantsService', () => {
           useValue: { withTenant: jest.fn((_t: string, fn: (x: unknown) => unknown) => fn(tx)), $transaction: transaction },
         },
         { provide: AccountStatusService, useValue: accountStatus },
+        { provide: MfaService, useValue: { checkSecondFactor: jest.fn().mockResolvedValue({ ok: true, method: 'totp', recoveryCodesLeft: null }), failureFor: jest.fn() } },
       ],
     }).compile();
 

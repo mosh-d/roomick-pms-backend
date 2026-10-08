@@ -66,7 +66,19 @@ export class RefundsService {
     return this.prisma.withTenant(tenantId, async (tx) => {
       const folio = await tx.folio.findFirst({ where: { id: folioId, deletedAt: null } });
       if (!folio) throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Folio not found' });
+      return this.requestInTx(tx, tenantId, folio, dto, actor);
+    });
+  }
 
+  /**
+   * The request itself, inside a caller's transaction — walking a guest
+   * raises the refund of what they paid in the same transaction that walks
+   * them, through this workflow (approval, and the cash-shift rule at
+   * pay-out) rather than as reversal rows written straight into the ledger.
+   */
+  async requestInTx(tx: TenantTx, tenantId: string, folio: { id: string; branchId: string }, dto: RequestRefundDto, actor: JwtPayload): Promise<Refund> {
+    const folioId = folio.id;
+    {
       const payment = dto.paymentId ? await tx.payment.findFirst({ where: { id: dto.paymentId, folioId, isVoid: false, deletedAt: null } }) : null;
       if (dto.paymentId && (!payment || !payment.amount.greaterThan(0))) {
         throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: 'That payment is not one made to this bill' });
@@ -124,7 +136,7 @@ export class RefundsService {
         ...(selfApproved ? { approvedOnRequest: true } : {}),
       });
       return refund;
-    });
+    }
   }
 
   async approve(tenantId: string, refundId: string, actor: JwtPayload): Promise<Refund> {
@@ -221,7 +233,8 @@ export class RefundsService {
   }
 
   /** A bill's credit, and what of it can be refunded now: less refunds already asked for or approved (other than `exceptId`). */
-  private async refundable(tx: TenantTx, folioId: string, exceptId?: string): Promise<{ credit: Prisma.Decimal; available: Prisma.Decimal }> {
+  /** What a bill holds for the guest: its credit, and how much of that no refund is already on its way for. */
+  async refundable(tx: TenantTx, folioId: string, exceptId?: string): Promise<{ credit: Prisma.Decimal; available: Prisma.Decimal }> {
     const credit = (await this.foliosService.totalsInTx(tx, folioId)).balanceDue.negated();
     const outstanding = await tx.refund.aggregate({
       _sum: { amount: true },

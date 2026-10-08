@@ -6,6 +6,7 @@ import { ALL_SYSTEM_ROLES, Roles, SystemRole } from '../../common/decorators/rol
 import { MAIL_TRANSPORT, MailTransport } from '../../common/mail/mail-transport.interface';
 import { JwtPayload } from '../../common/types/request-context';
 import { InboxQueryDto, InboxReplyDto, SendCommunicationDto } from './dto/comms-log.dto';
+import { GuestCommsQueryDto } from './dto/guest-comms-query.dto';
 import { CommsLogService } from './comms-log.service';
 import { BranchOf } from '../../common/decorators/branch-of.decorator';
 
@@ -56,10 +57,9 @@ export class CommsLogController {
   listForGuest(
     @CurrentTenant() tenantId: string,
     @Param('guestId', ParseUUIDPipe) guestId: string,
-    @Query('from') from?: string,
-    @Query('to') to?: string,
+    @Query() query: GuestCommsQueryDto,
   ): ReturnType<CommsLogService['listForGuest']> {
-    return this.commsLogService.listForGuest(tenantId, guestId, from, to);
+    return this.commsLogService.listForGuest(tenantId, guestId, query.from, query.to);
   }
 
   // --- Unified inbox (growth plan Month 9) -----------------------------------

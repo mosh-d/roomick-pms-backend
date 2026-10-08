@@ -1,6 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
-import { ArrayMaxSize, ArrayMinSize, IsArray, IsIn, IsISO8601, IsOptional, IsString, MaxLength, MinLength, ValidateNested } from 'class-validator';
+import { ArrayMaxSize, ArrayMinSize, IsArray, IsIn, IsOptional, IsString, MaxLength, MinLength, ValidateNested } from 'class-validator';
+import { IsDateOnly } from '../../../common/validation/is-date-only.decorator';
 
 export class CustomReportFilterDto {
   @ApiProperty({ example: 'status' })
@@ -60,11 +61,11 @@ export class CustomReportDefinitionDto {
 
 export class RunCustomReportDto extends CustomReportDefinitionDto {
   @ApiProperty({ example: '2026-10-01' })
-  @IsISO8601({ strict: true })
+  @IsDateOnly()
   from!: string;
 
   @ApiProperty({ example: '2026-11-01', description: 'Exclusive' })
-  @IsISO8601({ strict: true })
+  @IsDateOnly()
   to!: string;
 }
 

@@ -1,11 +1,10 @@
 import { Body, Controller, Get, Param, ParseUUIDPipe, Patch, Post, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
-import { MaintenanceStatus } from '@prisma/client';
 import { CurrentTenant, CurrentUser } from '../../common/decorators';
 import { Permission } from '../../common/decorators/permission.decorator';
 import { ALL_SYSTEM_ROLES, Roles, SystemRole } from '../../common/decorators/roles.decorator';
 import { JwtPayload } from '../../common/types/request-context';
-import { CreateAssetDto, CreateWorkOrderDto, UpdateWorkOrderDto } from './dto/maintenance.dto';
+import { CreateAssetDto, CreateWorkOrderDto, ListWorkOrdersQueryDto, UpdateWorkOrderDto } from './dto/maintenance.dto';
 import { MaintenanceService } from './maintenance.service';
 import { BranchOf } from '../../common/decorators/branch-of.decorator';
 
@@ -25,7 +24,7 @@ export class MaintenanceController {
     @Param('branchId', ParseUUIDPipe) branchId: string,
     @Body() dto: CreateWorkOrderDto,
   ): ReturnType<MaintenanceService['createWorkOrder']> {
-    return this.maintenanceService.createWorkOrder(tenantId, branchId, dto, user.sub);
+    return this.maintenanceService.createWorkOrder(tenantId, branchId, dto, user);
   }
 
   @Get('branches/:branchId/maintenance/work-orders')
@@ -34,9 +33,9 @@ export class MaintenanceController {
   listWorkOrders(
     @CurrentTenant() tenantId: string,
     @Param('branchId', ParseUUIDPipe) branchId: string,
-    @Query('status') status?: MaintenanceStatus,
+    @Query() query: ListWorkOrdersQueryDto,
   ): ReturnType<MaintenanceService['listWorkOrders']> {
-    return this.maintenanceService.listWorkOrders(tenantId, branchId, status);
+    return this.maintenanceService.listWorkOrders(tenantId, branchId, query.status);
   }
 
   @Patch('maintenance/work-orders/:orderId')

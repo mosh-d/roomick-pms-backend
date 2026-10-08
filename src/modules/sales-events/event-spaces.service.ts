@@ -45,6 +45,9 @@ export interface EventBookingSummary {
   catering: CateringLine[];
   avRequirements: string | null;
   notes: string | null;
+  /** `confirmed`, or `cancelled` — kept on record rather than deleted. */
+  status: string;
+  cancelledAt: Date | null;
   createdAt: Date;
 }
 
@@ -103,6 +106,8 @@ function toBookingSummary(booking: EventBooking): EventBookingSummary {
     catering: parseCatering(booking.catering),
     avRequirements: booking.avRequirements ?? null,
     notes: booking.notes ?? null,
+    status: booking.status,
+    cancelledAt: booking.cancelledAt ?? null,
     createdAt: booking.createdAt,
   };
 }
@@ -130,15 +135,17 @@ export class EventSpacesService {
     private readonly taxesService: TaxesService,
   ) {}
 
-  async createSpace(tenantId: string, branchId: string, dto: CreateEventSpaceDto): Promise<EventSpaceSummary> {
+  async createSpace(tenantId: string, branchId: string, dto: CreateEventSpaceDto, actorId?: string): Promise<EventSpaceSummary> {
     const capacities = parseCapacities(dto.setupCapacities ? { ...dto.setupCapacities } : null);
-    return this.prisma.withTenant(tenantId, async (tx) =>
-      toSpaceSummary(
-        await tx.eventSpace.create({
-          data: { tenantId, branchId, name: dto.name, category: dto.category, capacity: dto.capacity, setupCapacities: capacities ?? undefined },
-        }),
-      ),
-    );
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const space = await tx.eventSpace.create({
+        data: { tenantId, branchId, name: dto.name, category: dto.category, capacity: dto.capacity, setupCapacities: capacities ?? undefined },
+      });
+      await tx.auditLog.create({
+        data: { tenantId, branchId, userId: actorId ?? null, action: 'event_space.created', entityType: 'event_space', entityId: space.id, after: { name: dto.name, category: dto.category, capacity: dto.capacity } },
+      });
+      return toSpaceSummary(space);
+    });
   }
 
   async listSpaces(tenantId: string, branchId: string): Promise<EventSpaceSummary[]> {
@@ -147,10 +154,17 @@ export class EventSpacesService {
 
   /** Every booking across every space under the branch, in a date range — the calendar's own read. */
   async listBookings(tenantId: string, branchId: string, from: Date, to: Date): Promise<EventBookingSummary[]> {
+    if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime()) || !(to > from)) {
+      throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: 'Give a calendar window whose end is after its start' });
+    }
+    if (to.getTime() - from.getTime() > 366 * 86_400_000) {
+      throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: 'The calendar shows at most a year at a time' });
+    }
     return this.prisma.withTenant(tenantId, async (tx) =>
       (
         await tx.eventBooking.findMany({
-          where: { eventSpace: { branchId }, startsAt: { lt: to }, endsAt: { gt: from } },
+          // Cancelled events stay on record (their BEO, their notes) but leave the calendar.
+          where: { eventSpace: { branchId }, status: 'confirmed', startsAt: { lt: to }, endsAt: { gt: from } },
           orderBy: { startsAt: 'asc' },
         })
       ).map(toBookingSummary),
@@ -195,6 +209,17 @@ export class EventSpacesService {
           createdBy: actorId,
         },
       });
+      await tx.auditLog.create({
+        data: {
+          tenantId,
+          branchId: space.branchId,
+          userId: actorId,
+          action: 'event_booking.created',
+          entityType: 'event_booking',
+          entityId: booking.id,
+          after: { title: dto.title, space: space.name, startsAt: startsAt.toISOString(), endsAt: endsAt.toISOString(), headcount: dto.headcount ?? null },
+        },
+      });
       return toBookingSummary(booking);
     });
   }
@@ -204,6 +229,9 @@ export class EventSpacesService {
     return this.prisma.withTenant(tenantId, async (tx) => {
       const { booking, space } = await this.loadBooking(tx, bookingId);
       assertRoleAtBranch(actor, space.branchId, EVENT_STAFF_ROLES);
+      if (booking.status === 'cancelled') {
+        throw new ConflictException({ code: ErrorCode.CONFLICT, message: 'This event was cancelled — book it again rather than editing the cancelled one' });
+      }
 
       const startsAt = dto.startsAt ? new Date(dto.startsAt) : booking.startsAt;
       const endsAt = dto.endsAt ? new Date(dto.endsAt) : booking.endsAt;
@@ -308,11 +336,28 @@ export class EventSpacesService {
     return { filename: `beo-${slug || 'event'}.pdf`, pdf: await renderBeoPdf(spec) };
   }
 
-  async cancelBooking(tenantId: string, bookingId: string): Promise<void> {
+  /**
+   * A cancelled event is marked, not deleted: its catering, AV notes and BEO
+   * stay on record, and the calendar can show that the room was once sold.
+   * One click used to hard-delete all of it.
+   */
+  async cancelBooking(tenantId: string, bookingId: string, actorId: string): Promise<void> {
     await this.prisma.withTenant(tenantId, async (tx) => {
-      const booking = await tx.eventBooking.findFirst({ where: { id: bookingId } });
+      const booking = await tx.eventBooking.findFirst({ where: { id: bookingId }, include: { eventSpace: { select: { branchId: true, name: true } } } });
       if (!booking) throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Event booking not found' });
-      await tx.eventBooking.delete({ where: { id: bookingId } });
+      if (booking.status === 'cancelled') return;
+      await tx.eventBooking.update({ where: { id: bookingId }, data: { status: 'cancelled', cancelledAt: new Date() } });
+      await tx.auditLog.create({
+        data: {
+          tenantId,
+          branchId: booking.eventSpace.branchId,
+          userId: actorId,
+          action: 'event_booking.cancelled',
+          entityType: 'event_booking',
+          entityId: bookingId,
+          after: { title: booking.title, space: booking.eventSpace.name, startsAt: booking.startsAt.toISOString() },
+        },
+      });
     });
   }
 
@@ -329,6 +374,7 @@ export class EventSpacesService {
     const overlapping = await tx.eventBooking.findFirst({
       where: {
         eventSpaceId: space.id,
+        status: 'confirmed',
         startsAt: { lt: endsAt },
         endsAt: { gt: startsAt },
         ...(exceptBookingId ? { id: { not: exceptBookingId } } : {}),

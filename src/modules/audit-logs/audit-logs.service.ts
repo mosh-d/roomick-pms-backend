@@ -37,6 +37,8 @@ export class AuditLogsService {
         ...(query.branchId ? { branchId: query.branchId } : {}),
         ...(query.userId ? { userId: query.userId } : {}),
         ...(query.action ? { action: { contains: query.action, mode: 'insensitive' } } : {}),
+        ...(query.entityType ? { entityType: query.entityType } : {}),
+        ...(query.entityId ? { entityId: query.entityId } : {}),
         ...(query.from || query.to
           ? {
               timestamp: {

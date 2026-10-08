@@ -1,6 +1,8 @@
-import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma, Shift, ShiftIssue } from '@prisma/client';
 import { ErrorCode } from '../../common/errors/error-codes';
+import { JwtPayload } from '../../common/types/request-context';
+import { isSupervisorAt } from '../../common/utils/branch-roles';
 import { PrismaService, TenantTx } from '../../prisma/prisma.service';
 import { PropertyService } from '../property/property.service';
 import { AddShiftIssueDto, CloseShiftDto, OpenShiftDto, UpdateShiftIssueDto } from './dto/shift.dto';
@@ -54,7 +56,8 @@ export class ShiftsService {
    * Point of Sale outlet land in the same drawer (`PosOrder.shiftId`, stamped
    * the same way), so they count too — voided ones don't.
    */
-  async closeShift(tenantId: string, shiftId: string, dto: CloseShiftDto, actorId: string): Promise<Shift> {
+  async closeShift(tenantId: string, shiftId: string, dto: CloseShiftDto, actor: JwtPayload): Promise<Shift> {
+    const actorId = actor.sub;
     return this.prisma.withTenant(tenantId, async (tx) => {
       const shift = await tx.shift.findFirst({ where: { id: shiftId } });
       if (!shift) {
@@ -62,6 +65,11 @@ export class ShiftsService {
       }
       if (shift.closedAt) {
         throw new ConflictException({ code: ErrorCode.SHIFT_ALREADY_CLOSED, message: 'This shift is already closed.' });
+      }
+      // A cash drawer is counted by the person who ran it, or by a supervisor
+      // — not by any colleague at the branch, which is who could close it before.
+      if (shift.agentId !== actorId && !isSupervisorAt(actor, shift.branchId)) {
+        throw new ForbiddenException({ code: ErrorCode.FORBIDDEN, message: 'Only the agent who opened this shift, or a manager, can close it' });
       }
       const branch = await this.propertyService.assertBranch(tx, shift.branchId);
 
@@ -131,6 +139,7 @@ export class ShiftsService {
         where: { id: shiftId },
         include: {
           agent: { select: { id: true, name: true } },
+          branch: { select: { currency: true } },
           issues: { orderBy: { createdAt: 'asc' } },
           payments: { where: { isVoid: false }, orderBy: { recordedAt: 'asc' } },
           posOrders: {
@@ -153,6 +162,8 @@ export class ShiftsService {
         where: { branchId },
         orderBy: { openedAt: 'desc' },
         include: { agent: { select: { id: true, name: true } }, issues: true },
+        // The newest two hundred: the handover page reads the open and recent ones, not every shift since opening day.
+        take: 200,
       }),
     );
   }
@@ -162,7 +173,8 @@ export class ShiftsService {
     return this.prisma.withTenant(tenantId, (tx) =>
       tx.shift.findFirst({
         where: { branchId, agentId: actorId, closedAt: null },
-        include: { issues: { where: { status: { not: 'resolved' } }, orderBy: { createdAt: 'asc' } } },
+        // The branch's currency rides along so the shift page can show amounts with their symbol.
+        include: { issues: { where: { status: { not: 'resolved' } }, orderBy: { createdAt: 'asc' } }, branch: { select: { currency: true } } },
       }),
     );
   }
@@ -194,6 +206,9 @@ export class ShiftsService {
       const shift = await tx.shift.findFirst({ where: { id: shiftId } });
       if (!shift) {
         throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Shift not found' });
+      }
+      if (shift.closedAt) {
+        throw new ConflictException({ code: ErrorCode.SHIFT_ALREADY_CLOSED, message: 'This shift is closed — add the issue to the open one' });
       }
       const issue = await tx.shiftIssue.create({
         data: { tenantId, shiftId, description: dto.description, priority: dto.priority ?? 'medium' },

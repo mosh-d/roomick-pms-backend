@@ -26,7 +26,6 @@ export class HqController {
   @Get('reports')
   @ApiOperation({ summary: 'Enterprise / HQ — one report type, broken down per branch plus a blended total where currencies allow it' })
   crossPropertyReport(@CurrentTenant() tenantId: string, @Query() query: CrossPropertyReportQueryDto): Promise<CrossPropertyReport> {
-    const branchIds = query.branchIds ? query.branchIds.split(',').map((s) => s.trim()).filter(Boolean) : undefined;
-    return this.hqService.getCrossPropertyReport(tenantId, query.type, { from: query.from, to: query.to }, branchIds);
+    return this.hqService.getCrossPropertyReport(tenantId, query.type, { from: query.from, to: query.to }, query.branchIds);
   }
 }

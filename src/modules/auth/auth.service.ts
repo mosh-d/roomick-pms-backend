@@ -13,6 +13,7 @@ import { Prisma, Role, User } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { ErrorCode } from '../../common/errors/error-codes';
+import { isTenantOpen, TENANT_SUSPENDED_MESSAGE } from '../../common/auth/tenant-status';
 import { AccountMailService } from '../../common/mail/account-mail.service';
 import { webUrl } from '../../common/utils/web-url';
 import { PERMISSION_ACTIONS, PERMISSION_MODULES, PermissionModule, parsePermissions } from '../../common/permissions/permission-catalogue';
@@ -164,21 +165,28 @@ export class AuthService {
     const passwordHash = await bcrypt.hash(dto.password, BCRYPT_COST);
     const subdomain = await this.generateUniqueSubdomain(dto.groupName);
 
-    // brandMode is finalised by POST /tenants/configure-mode (signup step 2);
-    // 'single' is the placeholder until then — immutability is enforced there.
-    const tenant = await this.prisma.tenant.create({
-      data: {
-        subdomain,
-        groupName: dto.groupName,
-        brandMode: 'single',
-        status: 'trial',
-        country: dto.country,
-        isDemo: dto.isDemo ?? false,
-        demoExpiresAt: dto.isDemo ? demoExpiryFromNow() : null,
-      },
-    });
+    // The organisation and its owner are created in ONE transaction. The
+    // tenant used to be inserted first and the owner in a later transaction,
+    // so a failure between the two left an organisation with no one in it
+    // that still owned the subdomain and the email. `tenants` sits outside
+    // row-level security; the tenant setting is applied once the row exists
+    // so the tenant-scoped inserts that follow see it.
+    const { tenant, owner } = await this.prisma.$transaction(async (tx) => {
+      // brandMode is finalised by POST /tenants/configure-mode (signup step 2);
+      // 'single' is the placeholder until then — immutability is enforced there.
+      const tenant = await tx.tenant.create({
+        data: {
+          subdomain,
+          groupName: dto.groupName,
+          brandMode: 'single',
+          status: 'trial',
+          country: dto.country,
+          isDemo: dto.isDemo ?? false,
+          demoExpiresAt: dto.isDemo ? demoExpiryFromNow() : null,
+        },
+      });
+      await tx.$executeRaw`SELECT set_config('app.tenant_id', ${tenant.id}, true)`;
 
-    const owner = await this.prisma.withTenant(tenant.id, async (tx) => {
       // Seed system roles per tenant on signup (DB doc: seeded per tenant, not via migration).
       await tx.role.createMany({
         data: SYSTEM_ROLE_NAMES.map((name) => ({ tenantId: tenant.id, name, isSystem: true })),
@@ -218,7 +226,7 @@ export class AuthService {
       await this.audit(tx, tenant.id, user.id, 'auth.register', 'tenant', tenant.id, {
         subdomain,
       });
-      return user;
+      return { tenant, owner: user };
     });
 
     // The confirmation link goes by email. Until an email provider is set up
@@ -363,6 +371,7 @@ export class AuthService {
           message: 'Verify your email before logging in',
         });
       }
+      await this.assertTenantOpen(tx, indexRow.tenantId);
 
       if (user.mfaEnabledAt) {
         // The password was right, but that's only half of it: no tokens until
@@ -409,6 +418,7 @@ export class AuthService {
       if (!user || !user.mfaEnabledAt) {
         throw new UnauthorizedException({ code: ErrorCode.TOKEN_INVALID, message: 'That sign-in took too long. Enter your password again.' });
       }
+      await this.assertTenantOpen(tx, payload.tenantId);
       const roles = await this.loadRolesClaim(tx, user.id);
       await tx.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });
       await this.audit(tx, payload.tenantId, user.id, 'auth.login', 'user', user.id, { secondFactor: result.method });
@@ -452,9 +462,23 @@ export class AuthService {
         where: { id: payload.sub, deletedAt: null, emailVerified: true },
       });
       if (!user) throw new UnauthorizedException(SESSION_ENDED);
+      await this.assertTenantOpen(tx, payload.tenantId);
       const roles = await this.loadRolesClaim(tx, user.id);
       return this.buildLoginResult(tx, user, roles);
     });
+  }
+
+  /**
+   * A suspended or cancelled organisation is shut for everyone in it — at
+   * sign-in, at the second step, and when a session renews. API keys and the
+   * public booking page already honoured the status; staff sign-in didn't,
+   * so "suspend" changed nothing for the people using the app.
+   */
+  private async assertTenantOpen(tx: TenantTx, tenantId: string): Promise<void> {
+    const tenant = await tx.tenant.findUnique({ where: { id: tenantId }, select: { status: true } });
+    if (!tenant || !isTenantOpen(tenant.status)) {
+      throw new ForbiddenException({ code: ErrorCode.TENANT_SUSPENDED, message: TENANT_SUSPENDED_MESSAGE });
+    }
   }
 
   /**
@@ -682,9 +706,11 @@ export class AuthService {
     const cleanName = this.assertRoleName(name);
     const permissions = parsePermissions(rawPermissions);
     const role = await this.prisma.withTenant(tenantId, async (tx) => {
-      const clash = await tx.role.findFirst({ where: { name: cleanName } });
+      // Case-insensitive: "Night Manager" and "night manager" are one role to
+      // everyone who reads the staff list.
+      const clash = await tx.role.findFirst({ where: { name: { equals: cleanName, mode: 'insensitive' } } });
       if (clash) {
-        throw new ConflictException({ code: ErrorCode.CONFLICT, message: `A role called “${cleanName}” already exists` });
+        throw new ConflictException({ code: ErrorCode.CONFLICT, message: `A role called “${clash.name}” already exists` });
       }
       const created = await tx.role.create({ data: { tenantId, name: cleanName, isSystem: false, permissions } });
       await this.audit(tx, tenantId, actorUserId, 'role.created', 'role', created.id, { name: cleanName, permissions: permissions as Prisma.InputJsonValue });
@@ -700,9 +726,9 @@ export class AuthService {
     const role = await this.prisma.withTenant(tenantId, async (tx) => {
       const existing = await this.assertCustomRole(tx, roleId);
       if (cleanName && cleanName !== existing.name) {
-        const clash = await tx.role.findFirst({ where: { name: cleanName } });
+        const clash = await tx.role.findFirst({ where: { name: { equals: cleanName, mode: 'insensitive' }, id: { not: roleId } } });
         if (clash) {
-          throw new ConflictException({ code: ErrorCode.CONFLICT, message: `A role called “${cleanName}” already exists` });
+          throw new ConflictException({ code: ErrorCode.CONFLICT, message: `A role called “${clash.name}” already exists` });
         }
       }
       const updated = await tx.role.update({

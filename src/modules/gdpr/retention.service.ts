@@ -87,6 +87,27 @@ export class RetentionService {
   }
 
   /** Every tenant with a period set — the nightly run. */
+  /**
+   * Rate quotes that never became a booking: every price preview writes a
+   * `rate_audit_log` row and nothing ever removed them. Rows linked to a
+   * reservation are billing evidence and stay; unlinked ones go after 90 days.
+   */
+  async pruneRateQuotes(now = new Date()): Promise<number> {
+    const RATE_QUOTE_RETENTION_DAYS = 90;
+    const cutoff = new Date(now.getTime() - RATE_QUOTE_RETENTION_DAYS * 86_400_000);
+    const tenants = await this.prisma.tenant.findMany({ select: { id: true } });
+    let removed = 0;
+    for (const tenant of tenants) {
+      try {
+        const result = await this.prisma.withTenant(tenant.id, (tx) => tx.rateAuditLog.deleteMany({ where: { reservationId: null, resolvedAt: { lt: cutoff } } }));
+        removed += result.count;
+      } catch (error) {
+        this.logger.error(`Rate-quote pruning failed for tenant ${tenant.id}`, error);
+      }
+    }
+    return removed;
+  }
+
   async purgeAll(): Promise<RetentionRun> {
     const tenants = await this.prisma.tenant.findMany({ where: { documentRetentionMonths: { not: null } }, select: { id: true } });
     const total: RetentionRun = { registrationCards: 0, idDocuments: 0, filesDeleted: 0 };

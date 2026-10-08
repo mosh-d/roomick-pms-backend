@@ -1,6 +1,7 @@
 import { BadRequestException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { ErrorCode } from '../../../common/errors/error-codes';
+import { csvCell as sharedCsvCell } from '../../../common/utils/csv';
 
 /**
  * Daily takings as double-entry journals, for QuickBooks Online and Xero.
@@ -289,9 +290,7 @@ export function formatDate(isoDate: string, format: DateFormat): string {
   return isoDate;
 }
 
-function csvCell(value: string): string {
-  return /[",\r\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
-}
+const csvCell = sharedCsvCell;
 
 function csvRow(cells: string[]): string {
   return cells.map(csvCell).join(',');

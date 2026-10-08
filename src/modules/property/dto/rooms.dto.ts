@@ -5,7 +5,6 @@ import {
   IsArray,
   IsIn,
   IsInt,
-  IsISO8601,
   IsOptional,
   IsString,
   IsUUID,
@@ -16,6 +15,7 @@ import {
   ValidateIf,
   ValidateNested,
 } from 'class-validator';
+import { IsDateOnly } from '../../../common/validation/is-date-only.decorator';
 import { BlockReason, CleanlinessStatus, HeldStatus, OccupancyStatus } from '@prisma/client';
 
 export class RoomRangeDto {
@@ -140,11 +140,11 @@ export class CreateRoomBlockDto {
   reason!: BlockReason;
 
   @ApiProperty({ example: '2026-08-01' })
-  @IsISO8601({ strict: true })
+  @IsDateOnly()
   fromDate!: string;
 
   @ApiProperty({ example: '2026-08-05' })
-  @IsISO8601({ strict: true })
+  @IsDateOnly()
   toDate!: string;
 
   @ApiPropertyOptional()

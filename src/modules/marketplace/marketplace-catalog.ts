@@ -95,7 +95,7 @@ export const CATALOG: readonly CatalogEntry[] = [
     summary: 'Booking, check-in, check-out and payment events sent to other apps as they happen.',
     howItWorks: 'Webhook subscriptions can already be created under Integrations & APIs.',
     availability: 'coming_later',
-    waitingOn: 'Event delivery: subscriptions are saved, but no events are sent to them yet.',
+    waitingOn: 'Set up on the Integrations & APIs page — a webhook there is signed and delivered the moment a booking, check-in or payment happens.',
   },
   {
     key: 'smart_locks',

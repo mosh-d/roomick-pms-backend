@@ -1,6 +1,7 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { Branch, NoShowRecord, PenaltyType, Prisma, Reservation, Room, RoomType } from '@prisma/client';
 import { ErrorCode } from '../../common/errors/error-codes';
+import { JwtPayload } from '../../common/types/request-context';
 import { hasPassedBranchCutoff, timeOfDay, todayInTimezone, toBranchDate } from '../../common/utils/branch-date';
 import { PrismaService, TenantTx } from '../../prisma/prisma.service';
 import { PropertyService } from '../property/property.service';
@@ -8,6 +9,8 @@ import { RoomsService } from '../property/rooms.service';
 import { GuestsService } from '../guests/guests.service';
 import { CreateGuestDto } from '../guests/dto/guest.dto';
 import { FoliosService } from '../folios/folios.service';
+import { RefundsService } from '../folios/refunds.service';
+import { TaxesService } from '../taxes/taxes.service';
 import { HousekeepingService } from '../housekeeping/housekeeping.service';
 import { RateResolverService, StayResolution } from '../rate-resolver/rate-resolver.service';
 import { RegistrationCardsService } from '../registration-cards/registration-cards.service';
@@ -97,6 +100,8 @@ export class ReservationsService {
     private readonly restrictionsService: RestrictionsService,
     private readonly loyaltyService: LoyaltyService,
     private readonly webhookEvents: WebhookEventsService,
+    private readonly taxesService: TaxesService,
+    private readonly refundsService: RefundsService,
   ) {}
 
   // -------------------------------------------------------------------------
@@ -462,6 +467,38 @@ export class ReservationsService {
     return block;
   }
 
+  /**
+   * Serialises every availability check for one room type: two bookings,
+   * moves, extensions or walk-ins racing for the last room queue here
+   * instead of both passing. Only new bookings took this lock before.
+   */
+  private async lockRoomType(tx: TenantTx, roomTypeId: string): Promise<void> {
+    await tx.$queryRaw`SELECT id FROM room_types WHERE id = ${roomTypeId}::uuid FOR UPDATE`;
+  }
+
+  /** The same for one physical room — two desks walking guests into, or moving guests to, the same room. */
+  private async lockRoom(tx: TenantTx, roomId: string): Promise<void> {
+    await tx.$queryRaw`SELECT id FROM rooms WHERE id = ${roomId}::uuid FOR UPDATE`;
+  }
+
+  /**
+   * A group block's own nightly rate for every night of the stay, with the
+   * branch's room tax on top — the same arithmetic the folio applies when
+   * the nights post (`priceCharge` taxes the stay's total; `units` only
+   * scales a fixed per-night tax).
+   */
+  private async blockPricing(tx: TenantTx, branchId: string, blockRate: Prisma.Decimal, checkInDate: Date, checkOutDate: Date) {
+    const nights = this.enumerateNights(checkInDate, checkOutDate);
+    const nightly = new Prisma.Decimal(blockRate);
+    const priced = await this.taxesService.priceCharge(tx, branchId, 'room', nightly.mul(nights.length), nights.length);
+    return {
+      subtotal: priced.price,
+      taxTotal: priced.addedTax,
+      totalWithTax: priced.total,
+      nightlyRates: nights.map((night) => ({ date: night.toISOString().slice(0, 10), rate: nightly.toFixed(2) })),
+    };
+  }
+
   private assertValidRange(from: Date, to: Date): void {
     if (to <= from) {
       throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: 'checkOutDate must be after checkInDate' });
@@ -518,7 +555,7 @@ export class ReservationsService {
       // Serializes concurrent creates for the SAME room type only — closes
       // the common "double-book the last room" race without needing a
       // specific room to lock (none is assigned until check-in).
-      await tx.$queryRaw`SELECT id FROM room_types WHERE id = ${dto.roomTypeId}::uuid FOR UPDATE`;
+      await this.lockRoomType(tx, dto.roomTypeId);
       // `joinWaitlist` is an explicit request to skip the availability
       // check, not an automatic fallback — a plain booking that finds no
       // rooms still throws `RESERVATION_NOT_AVAILABLE`, same as before.
@@ -538,6 +575,15 @@ export class ReservationsService {
         deal,
         { triggeredBy: 'booking_create', userId: actorId ?? undefined },
       );
+      // A group booking is priced at its block's rate for every night — that is
+      // what the folio posts (`overrideRate`), so it is also what the record
+      // says. `confirmedRate` and `nightlyRates` used to keep the public quote,
+      // and stay history, custom reports and the registration card showed a
+      // price the guest was never charged. Tax follows the branch's rules
+      // either way; the confirmation used to say "tax 0" for a group booking.
+      const pricing = block
+        ? await this.blockPricing(tx, branchId, block.blockRate, checkInDate, checkOutDate)
+        : { subtotal: resolved.subtotal, taxTotal: resolved.taxTotal, totalWithTax: resolved.totalWithTax, nightlyRates: nightlyRatesOf(resolved) };
       const confirmationNumber = await this.generateConfirmationNumber(tx, tenantId);
 
       const reservation = await this.createReservationRow(tx, {
@@ -549,8 +595,8 @@ export class ReservationsService {
         corporateAccountId: deal.corporateAccountId,
         promoCode: deal.promoCode,
         confirmationNumber,
-        confirmedRate: resolved.subtotal,
-        nightlyRates: nightlyRatesOf(resolved),
+        confirmedRate: pricing.subtotal,
+        nightlyRates: pricing.nightlyRates,
         status: dto.joinWaitlist ? 'waitlisted' : 'confirmed',
         channel: dto.channel ?? 'direct',
         checkInDate,
@@ -592,9 +638,9 @@ export class ReservationsService {
             checkOutDate: dto.checkOutDate,
             adults: dto.adults,
             children: dto.children ?? 0,
-            subtotal: block ? new Prisma.Decimal(block.blockRate).mul(this.stayNights(reservation)) : resolved.subtotal,
-            taxTotal: block ? new Prisma.Decimal(0) : resolved.taxTotal,
-            total: block ? new Prisma.Decimal(block.blockRate).mul(this.stayNights(reservation)) : resolved.totalWithTax,
+            subtotal: pricing.subtotal,
+            taxTotal: pricing.taxTotal,
+            total: pricing.totalWithTax,
           }),
           trigger: 'booking_confirmation',
         });
@@ -614,13 +660,21 @@ export class ReservationsService {
 
       const roomType = await this.assertRoomType(tx, branchId, dto.roomTypeId);
       this.assertWithinCapacity(roomType, dto.adults, dto.children ?? 0);
+      // The same gates an advance booking passes: stop-sell and length-of-stay
+      // restrictions, and the room-type pool for the WHOLE stay. A room that is
+      // physically free tonight may already be promised to tomorrow's
+      // arrivals — walking a guest into it for three nights overbooked them.
+      await this.restrictionsService.assertNoViolation(tx, branchId, dto.roomTypeId, checkInDate, checkOutDate);
       const guest = await this.guestsService.findOrCreateGuestInTx(tx, tenantId, guestInput);
 
+      await this.lockRoomType(tx, dto.roomTypeId);
+      await this.lockRoom(tx, dto.roomId);
       const room = await tx.room.findFirst({ where: { id: dto.roomId, deletedAt: null } });
       if (!room) {
         throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Room not found' });
       }
       await this.assertRoomCheckInReady(tx, room, branchId, dto.roomTypeId, checkInDate, checkOutDate);
+      await this.assertAvailableForStay(tx, branchId, dto.roomTypeId, checkInDate, checkOutDate);
 
       const deal = await this.dealTerms(tx, dto);
       const resolved = await this.rateResolverService.resolveStay(
@@ -1185,7 +1239,25 @@ export class ReservationsService {
         });
       }
       const branch = await this.propertyService.assertBranch(tx, reservation.branchId);
-      const policy = (branch.noShowPolicy ?? {}) as { defaultPenalty?: PenaltyType; flatFeeAmount?: number };
+      const policy = (branch.noShowPolicy ?? {}) as { defaultPenalty?: PenaltyType; flatFeeAmount?: number; cutoffTime?: string };
+      // A guest can't have failed to arrive before they could have: never
+      // before the arrival day, and on it only once the branch's no-show
+      // cut-off has passed. The night audit applies the same rule on its own;
+      // this is the button, which used to accept a booking a month away.
+      const today = toBranchDate(todayInTimezone(branch.timezone));
+      if (reservation.checkInDate > today) {
+        throw new ConflictException({
+          code: ErrorCode.INVALID_STATUS_TRANSITION,
+          message: `This guest is due on ${reservation.checkInDate.toISOString().slice(0, 10)} — a booking can't be marked a no-show before its arrival day`,
+        });
+      }
+      const cutoff = /^\d{2}:\d{2}$/.test(policy.cutoffTime ?? '') ? `${policy.cutoffTime}:00` : null;
+      if (cutoff && reservation.checkInDate.getTime() === today.getTime() && !hasPassedBranchCutoff(today, cutoff, branch.timezone)) {
+        throw new ConflictException({
+          code: ErrorCode.INVALID_STATUS_TRANSITION,
+          message: `Not yet — this branch marks no-shows after ${policy.cutoffTime} on the arrival day`,
+        });
+      }
       const penaltyType = policy.defaultPenalty ?? 'none';
       return this.markNoShowInTx(tx, tenantId, reservation, penaltyType, policy.flatFeeAmount, actorId);
     });
@@ -1347,6 +1419,8 @@ export class ReservationsService {
       const checkOutDate = toBranchDate(dto.checkOutDate);
       this.assertValidRange(checkInDate, checkOutDate);
       const roomType = await this.assertRoomType(tx, reservation.branchId, reservation.roomTypeId);
+      await this.restrictionsService.assertNoViolation(tx, reservation.branchId, reservation.roomTypeId, checkInDate, checkOutDate);
+      await this.lockRoomType(tx, reservation.roomTypeId);
       await this.assertAvailableForStay(tx, reservation.branchId, reservation.roomTypeId, checkInDate, checkOutDate, reservationId, reservation.groupBlockId ?? undefined);
 
       const resolved = await this.rateResolverService.resolveStay(
@@ -1423,7 +1497,12 @@ export class ReservationsService {
       // confirmed one is checked EXCLUDING its own current hold, so
       // shrinking a stay or nudging it by a day doesn't get rejected for
       // "conflicting" with the booking being changed.
+      if (datesOrRoomTypeChanged) {
+        // The same stop-sell and length-of-stay rules a new booking meets.
+        await this.restrictionsService.assertNoViolation(tx, reservation.branchId, roomTypeId, checkInDate, checkOutDate);
+      }
       if (datesOrRoomTypeChanged && reservation.status === 'confirmed') {
+        await this.lockRoomType(tx, roomTypeId);
         await this.assertAvailableForStay(tx, reservation.branchId, roomTypeId, checkInDate, checkOutDate, reservationId, reservation.groupBlockId ?? undefined);
       }
 
@@ -1515,6 +1594,8 @@ export class ReservationsService {
       // shape `modifyReservation` already uses. A checked-in guest keeps
       // their own physical room in practice; this proves the type's pool
       // isn't already fully committed to other guests for those nights.
+      await this.restrictionsService.assertExtensionAllowed(tx, reservation.branchId, reservation.roomTypeId, reservation.checkInDate, reservation.checkOutDate, newCheckOutDate);
+      await this.lockRoomType(tx, reservation.roomTypeId);
       await this.assertAvailableForStay(tx, reservation.branchId, reservation.roomTypeId, reservation.checkOutDate, newCheckOutDate, reservationId, reservation.groupBlockId ?? undefined);
 
       // The SPECIFIC assigned room must also be free of any block for the
@@ -1630,10 +1711,12 @@ export class ReservationsService {
       const today = toBranchDate(todayInTimezone(branch.timezone));
       const tonight = today > reservation.checkInDate ? today : reservation.checkInDate;
       // Physically free for the nights left — the same hard checks as check-in.
+      await this.lockRoom(tx, room.id);
       await this.assertRoomCheckInReady(tx, room, reservation.branchId, room.roomTypeId, tonight, reservation.checkOutDate > tonight ? reservation.checkOutDate : tonight);
 
       const typeChanges = room.roomTypeId !== reservation.roomTypeId;
       if (typeChanges && reservation.checkOutDate > tonight) {
+        await this.lockRoomType(tx, room.roomTypeId);
         await this.assertAvailableForStay(tx, reservation.branchId, room.roomTypeId, tonight, reservation.checkOutDate, reservationId);
       }
 
@@ -1810,6 +1893,7 @@ export class ReservationsService {
           message: `Cannot promote a reservation with status "${reservation.status}" — only a waitlisted one can be promoted`,
         });
       }
+      await this.lockRoomType(tx, reservation.roomTypeId);
       await this.assertAvailableForStay(tx, reservation.branchId, reservation.roomTypeId, reservation.checkInDate, reservation.checkOutDate);
       const updated = await tx.reservation.update({
         where: { id: reservationId },
@@ -1817,6 +1901,32 @@ export class ReservationsService {
         include: RESERVATION_INCLUDE,
       });
       await this.audit(tx, tenantId, reservation.branchId, actorId, 'reservation.promoted', reservationId);
+
+      // The guest hears that their waitlisted request is now a booking — the
+      // same confirmation an ordinary booking sends, priced from what the
+      // reservation already holds.
+      const branch = await this.propertyService.assertBranch(tx, reservation.branchId);
+      const priced = await this.taxesService.priceCharge(tx, reservation.branchId, 'room', updated.confirmedRate, this.stayNights(updated));
+      await this.commsLogService.logAutomatedInTx(tx, tenantId, reservation.branchId, {
+        reservationId,
+        guestId: updated.guestId,
+        channel: 'email',
+        subject: `Reservation Confirmed — ${updated.confirmationNumber}`,
+        body: bookingConfirmationBody({
+          guestName: updated.guest.name,
+          confirmationNumber: updated.confirmationNumber,
+          branch,
+          roomTypeName: updated.roomType.name,
+          checkInDate: updated.checkInDate.toISOString().slice(0, 10),
+          checkOutDate: updated.checkOutDate.toISOString().slice(0, 10),
+          adults: updated.adults,
+          children: updated.children,
+          subtotal: priced.price,
+          taxTotal: priced.addedTax,
+          total: priced.total,
+        }),
+        trigger: 'booking_confirmation',
+      });
       return updated;
     });
   }
@@ -1842,7 +1952,8 @@ export class ReservationsService {
    * rarely fires today, and starts mattering the moment deposit-at-booking
    * lands.
    */
-  async walkReservation(tenantId: string, reservationId: string, dto: WalkReservationDto, actorId: string) {
+  async walkReservation(tenantId: string, reservationId: string, dto: WalkReservationDto, actor: JwtPayload) {
+    const actorId = actor.sub;
     return this.prisma.withTenant(tenantId, async (tx) => {
       const reservation = await this.findReservationOrThrow(tx, reservationId);
       if (reservation.status !== 'confirmed') {
@@ -1870,33 +1981,36 @@ export class ReservationsService {
         include: RESERVATION_INCLUDE,
       });
 
+      // What the guest paid goes back through the refund workflow — approval,
+      // and the cash-shift rule when it is handed over — not as reversal rows
+      // written straight into the ledger, which skipped both. A manager's own
+      // request is approved on the spot; the money leaves at pay-out.
       const folio = await tx.folio.findFirst({ where: { reservationId, deletedAt: null } });
-      let refundedTotal = new Prisma.Decimal(0);
+      let refundRequested = new Prisma.Decimal(0);
       if (folio) {
-        const payments = await tx.payment.findMany({ where: { folioId: folio.id, isVoid: false, amount: { gt: 0 } } });
-        for (const payment of payments) {
-          const reversal = await tx.payment.create({
-            data: {
-              tenantId,
-              folioId: folio.id,
-              method: payment.method,
-              amount: payment.amount.negated(),
-              currency: payment.currency,
-              paymentPurpose: 'payment',
-              reference: `Walk refund — reversing payment ${payment.id}`,
-              recordedBy: actorId,
-            },
+        const { available } = await this.refundsService.refundable(tx, folio.id);
+        if (available.greaterThan(0)) {
+          const lastPayment = await tx.payment.findFirst({
+            where: { folioId: folio.id, isVoid: false, deletedAt: null, amount: { gt: 0 }, method: { in: ['cash', 'card', 'bank_transfer'] } },
+            orderBy: { recordedAt: 'desc' },
+            select: { method: true },
           });
-          refundedTotal = refundedTotal.add(payment.amount);
-          await this.webhookEvents.paymentRecorded(tx, { tenantId, branchId: reservation.branchId, type: 'refund.paid', paymentId: reversal.id });
+          await this.refundsService.requestInTx(
+            tx,
+            tenantId,
+            folio,
+            { amount: Number(available.toFixed(2)), method: (lastPayment?.method ?? 'bank_transfer') as 'cash' | 'card' | 'bank_transfer', reason: `Walked to ${dto.relocationProperty}` },
+            actor,
+          );
+          refundRequested = available;
         }
       }
 
       await this.audit(tx, tenantId, reservation.branchId, actorId, 'reservation.walked', reservationId, {
         relocationProperty: dto.relocationProperty,
-        refundedTotal: refundedTotal.toFixed(2),
+        refundRequested: refundRequested.toFixed(2),
       });
-      return { reservation: updated, walkRecord, refundedTotal: refundedTotal.toFixed(2) };
+      return { reservation: updated, walkRecord, refundRequested: refundRequested.toFixed(2) };
     });
   }
 

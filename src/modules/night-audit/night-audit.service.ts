@@ -6,6 +6,7 @@ import { PrismaService, TenantTx } from '../../prisma/prisma.service';
 import { PropertyService } from '../property/property.service';
 import { FoliosService } from '../folios/folios.service';
 import { ReservationsService } from '../reservations/reservations.service';
+import { HousekeepingService } from '../housekeeping/housekeeping.service';
 
 /** `Branch.noShowPolicy` JSON (schema comment: `{cutoffTime, defaultPenalty, autoMark, notifyMinutesBefore}`), plus a flat-fee amount the enum implies but the comment omits. */
 interface NoShowPolicy {
@@ -36,6 +37,7 @@ export class NightAuditService {
     private readonly propertyService: PropertyService,
     private readonly foliosService: FoliosService,
     private readonly reservationsService: ReservationsService,
+    private readonly housekeepingService: HousekeepingService,
   ) {}
 
   /** The date a run closes: yesterday in the branch's own timezone — the night that just ended. */
@@ -141,6 +143,23 @@ export class NightAuditService {
           errors.push({ reservationId: reservation.id, reason: error instanceof Error ? error.message : 'Unknown error' });
         }
       }
+
+      // Stay-over service: every room still occupied this morning gets its
+      // daily housekeeping task, unless one is already waiting for it.
+      const serviceDate = new Date(auditDate.getTime() + 86_400_000);
+      let stayoverTasks = 0;
+      for (const reservation of inHouse) {
+        if (!reservation.roomId) continue;
+        await tx.$executeRawUnsafe('SAVEPOINT night_audit_housekeeping');
+        try {
+          if (await this.housekeepingService.ensureStayoverTaskInTx(tx, tenantId, branchId, reservation.roomId, reservation.id, serviceDate)) stayoverTasks += 1;
+          await tx.$executeRawUnsafe('RELEASE SAVEPOINT night_audit_housekeeping');
+        } catch (error) {
+          await tx.$executeRawUnsafe('ROLLBACK TO SAVEPOINT night_audit_housekeeping');
+          errors.push({ reservationId: reservation.id, reason: `Housekeeping task: ${error instanceof Error ? error.message : 'Unknown error'}` });
+        }
+      }
+      if (stayoverTasks > 0) this.logger.log(`Night audit ${auditDateStr}: ${stayoverTasks} stay-over housekeeping task(s) raised`);
 
       // 2. Mark no-shows: confirmed arrivals for this date that never checked in.
       const noShowsMarked = await this.markNoShows(tx, tenantId, branchId, auditDate, triggeredBy, errors);

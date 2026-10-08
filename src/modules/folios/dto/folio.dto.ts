@@ -1,6 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
-import { ArrayMinSize, IsArray, IsBoolean, IsIn, IsISO8601, IsNumber, IsOptional, IsPositive, IsString, IsUUID, MaxLength, MinLength, ValidateIf } from 'class-validator';
+import { ArrayMinSize, IsArray, IsBoolean, IsIn, IsNumber, IsOptional, IsPositive, IsString, IsUUID, MaxLength, MinLength, ValidateIf } from 'class-validator';
+import { IsDateOnly } from '../../../common/validation/is-date-only.decorator';
 import { ChargeType, PaymentMethod, PaymentPurpose } from '@prisma/client';
 
 /** `tax` and `correction` are excluded: tax rows are written by the engine, corrections by `POST /line-items/:id/correct`. Neither is a thing a human posts directly. */
@@ -25,7 +26,7 @@ export class PostChargeDto {
 
   @ApiPropertyOptional({ example: '2026-08-27', description: 'Date the service occurred. Defaults to today in the branch timezone.' })
   @IsOptional()
-  @IsISO8601({ strict: true })
+  @IsDateOnly()
   serviceDate?: string;
 }
 
@@ -102,12 +103,12 @@ export class SplitFolioDto {
 export class ListTransfersQueryDto {
   @ApiPropertyOptional({ example: '2026-10-01' })
   @IsOptional()
-  @IsISO8601({ strict: true })
+  @IsDateOnly()
   from?: string;
 
   @ApiPropertyOptional({ example: '2026-10-31' })
   @IsOptional()
-  @IsISO8601({ strict: true })
+  @IsDateOnly()
   to?: string;
 }
 

@@ -1,5 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsIn, IsISO8601, IsOptional, IsUUID } from 'class-validator';
+import { IsIn, IsOptional, IsUUID } from 'class-validator';
+import { IsDateOnly } from '../../../common/validation/is-date-only.decorator';
 
 const GROUP_BY_VALUES = ['day', 'week', 'month'] as const;
 export type ReportGroupBy = (typeof GROUP_BY_VALUES)[number];
@@ -7,11 +8,11 @@ export type ReportGroupBy = (typeof GROUP_BY_VALUES)[number];
 /** Shared by every report — `to` is exclusive, matching this codebase's date-range convention everywhere else (availability, exposure). */
 export class ReportQueryDto {
   @ApiProperty({ example: '2026-08-01' })
-  @IsISO8601({ strict: true })
+  @IsDateOnly()
   from!: string;
 
   @ApiProperty({ example: '2026-09-01', description: 'Exclusive' })
-  @IsISO8601({ strict: true })
+  @IsDateOnly()
   to!: string;
 
   @ApiPropertyOptional({ enum: GROUP_BY_VALUES, description: 'Occupancy report only — defaults to "day"' })

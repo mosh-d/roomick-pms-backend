@@ -13,6 +13,7 @@ import {
   SetCompetitorRatesDto,
   UpdateCompetitorDto,
 } from './dto/revenue-management.dto';
+import { HorizonQueryDto, RateRecommendationsQueryDto } from './dto/horizon-query.dto';
 import { RestrictionsService, AvailabilityRestrictionSummary } from './restrictions.service';
 import { DemandForecastService, ForecastDay } from './demand-forecast.service';
 import { RateRecommendationsService, RateRecommendation } from './rate-recommendations.service';
@@ -56,8 +57,8 @@ export class RevenueManagementController {
   @Delete('availability-restrictions/:restrictionId')
   @BranchOf('availabilityRestriction', 'restrictionId')
   @ApiOperation({ summary: 'Remove a restriction' })
-  async deleteRestriction(@CurrentTenant() tenantId: string, @Param('restrictionId', ParseUUIDPipe) restrictionId: string): Promise<{ ok: true }> {
-    await this.restrictionsService.deleteRestriction(tenantId, restrictionId);
+  async deleteRestriction(@CurrentTenant() tenantId: string, @CurrentUser() user: JwtPayload, @Param('restrictionId', ParseUUIDPipe) restrictionId: string): Promise<{ ok: true }> {
+    await this.restrictionsService.deleteRestriction(tenantId, restrictionId, user.sub);
     return { ok: true };
   }
 
@@ -68,9 +69,9 @@ export class RevenueManagementController {
   getForecast(
     @CurrentTenant() tenantId: string,
     @Param('branchId', ParseUUIDPipe) branchId: string,
-    @Query('horizonDays') horizonDays?: string,
+    @Query() query: HorizonQueryDto,
   ): Promise<ForecastDay[]> {
-    return this.demandForecastService.getForecast(tenantId, branchId, horizonDays ? Number(horizonDays) : undefined);
+    return this.demandForecastService.getForecast(tenantId, branchId, query.horizonDays);
   }
 
   // --- Rate Recommendations -------------------------------------------------------
@@ -80,10 +81,9 @@ export class RevenueManagementController {
   getRecommendations(
     @CurrentTenant() tenantId: string,
     @Param('branchId', ParseUUIDPipe) branchId: string,
-    @Query('roomTypeId', ParseUUIDPipe) roomTypeId: string,
-    @Query('horizonDays') horizonDays?: string,
+    @Query() query: RateRecommendationsQueryDto,
   ): Promise<RateRecommendation[]> {
-    return this.rateRecommendationsService.getRecommendations(tenantId, branchId, roomTypeId, horizonDays ? Number(horizonDays) : undefined);
+    return this.rateRecommendationsService.getRecommendations(tenantId, branchId, query.roomTypeId, query.horizonDays);
   }
 
   @Post('branches/:branchId/rate-recommendations/approve')

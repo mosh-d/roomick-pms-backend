@@ -34,6 +34,16 @@ export class ListAuditLogsQueryDto {
   @IsISO8601({ strict: true })
   to?: string;
 
+  @ApiPropertyOptional({ example: 'reservation', description: 'The kind of record — everything that happened to reservations, folios, guests…' })
+  @IsOptional()
+  @MaxLength(50)
+  entityType?: string;
+
+  @ApiPropertyOptional({ description: 'One record’s whole history' })
+  @IsOptional()
+  @MaxLength(64)
+  entityId?: string;
+
   @ApiPropertyOptional({ default: 1 })
   @IsOptional()
   @Type(() => Number)

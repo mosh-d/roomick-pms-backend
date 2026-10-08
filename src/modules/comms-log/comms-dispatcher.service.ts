@@ -9,6 +9,16 @@ const BATCH_SIZE = 50;
 /** Only this channel has a real transport. See `dispatchForTenant` for why the others are deliberately left alone. */
 const DISPATCHABLE_CHANNEL = 'email' as const;
 
+/**
+ * The same schedule the webhook dispatcher uses: a provider timeout at two
+ * in the morning is tried again a minute later, then at growing intervals
+ * for about a day, before the message is given up on. A send error used to
+ * mark the row `failed` on the first try — one SMTP hiccup silently dropped
+ * every confirmation, invitation and password reset queued that minute.
+ */
+export const RETRY_DELAYS_MS = [60_000, 5 * 60_000, 15 * 60_000, 60 * 60_000, 3 * 3_600_000, 6 * 3_600_000, 12 * 3_600_000];
+export const MAX_ATTEMPTS = RETRY_DELAYS_MS.length + 1;
+
 export interface DispatchSummary {
   sent: number;
   failed: number;
@@ -86,10 +96,16 @@ export class CommsDispatcherService {
       tx.communicationLog.findMany({
         // Outbound only: an inbound email (once a provider's inbound webhook exists) is a message the guest sent US —
         // "dispatching" it would email the guest their own words back.
-        where: { deliveryStatus: 'queued', channel: DISPATCHABLE_CHANNEL, direction: 'outbound' },
+        where: {
+          deliveryStatus: 'queued',
+          channel: DISPATCHABLE_CHANNEL,
+          direction: 'outbound',
+          // Never tried, or due for another try.
+          OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: new Date() } }],
+        },
         orderBy: { sentAt: 'asc' },
         take: BATCH_SIZE,
-        select: { id: true, subject: true, body: true, bodyHtml: true, guest: { select: { email: true } } },
+        select: { id: true, subject: true, body: true, bodyHtml: true, attempts: true, guest: { select: { email: true } } },
       }),
     );
 
@@ -128,13 +144,18 @@ export class CommsDispatcherService {
         );
         summary.sent += 1;
       } catch (err) {
-        // Left as `failed` rather than returned to `queued`: without an
-        // attempt counter on the row there's nothing to stop an endless retry
-        // loop against a permanently broken address. A real retry policy
-        // wants an `attempts` column and a backoff, which is its own change.
-        this.logger.warn(`Failed to send communication ${row.id}: ${err instanceof Error ? err.message : String(err)}`);
-        await this.markFailed(tenantId, row.id);
-        summary.failed += 1;
+        const reason = (err instanceof Error ? err.message : String(err)).slice(0, 500);
+        const attempts = (row.attempts ?? 0) + 1;
+        if (attempts >= MAX_ATTEMPTS) {
+          this.logger.warn(`Giving up on communication ${row.id} after ${attempts} attempts: ${reason}`);
+          await this.markFailed(tenantId, row.id, attempts, reason);
+          summary.failed += 1;
+        } else {
+          const nextAttemptAt = new Date(Date.now() + RETRY_DELAYS_MS[attempts - 1]);
+          this.logger.warn(`Communication ${row.id} failed (attempt ${attempts}), trying again at ${nextAttemptAt.toISOString()}: ${reason}`);
+          await this.prisma.withTenant(tenantId, (tx) => tx.communicationLog.update({ where: { id: row.id }, data: { attempts, nextAttemptAt, lastError: reason } }));
+          summary.skipped += 1;
+        }
       }
     }
 
@@ -145,7 +166,9 @@ export class CommsDispatcherService {
     return summary;
   }
 
-  private async markFailed(tenantId: string, id: string): Promise<void> {
-    await this.prisma.withTenant(tenantId, (tx) => tx.communicationLog.update({ where: { id }, data: { deliveryStatus: 'failed' } }));
+  private async markFailed(tenantId: string, id: string, attempts?: number, lastError?: string): Promise<void> {
+    await this.prisma.withTenant(tenantId, (tx) =>
+      tx.communicationLog.update({ where: { id }, data: { deliveryStatus: 'failed', ...(attempts !== undefined ? { attempts } : {}), ...(lastError ? { lastError } : {}) } }),
+    );
   }
 }

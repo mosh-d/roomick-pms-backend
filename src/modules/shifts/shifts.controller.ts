@@ -40,7 +40,7 @@ export class ShiftsController {
     @Param('shiftId', ParseUUIDPipe) shiftId: string,
     @Body() dto: CloseShiftDto,
   ): ReturnType<ShiftsService['closeShift']> {
-    return this.shiftsService.closeShift(tenantId, shiftId, dto, user.sub);
+    return this.shiftsService.closeShift(tenantId, shiftId, dto, user);
   }
 
   @Get('shifts/:shiftId')

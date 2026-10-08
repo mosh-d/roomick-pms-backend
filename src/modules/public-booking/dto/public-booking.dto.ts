@@ -1,14 +1,15 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
-import { IsBoolean, IsEmail, IsIn, IsISO8601, IsInt, IsOptional, IsString, IsUUID, Matches, MaxLength, Max, Min, MinLength } from 'class-validator';
+import { IsBoolean, IsEmail, IsIn, IsInt, IsOptional, IsString, IsUUID, Matches, MaxLength, Max, Min, MinLength } from 'class-validator';
+import { IsDateOnly } from '../../../common/validation/is-date-only.decorator';
 
 export class PublicAvailabilityQueryDto {
   @ApiProperty({ example: '2026-10-01' })
-  @IsISO8601({ strict: true })
+  @IsDateOnly()
   from!: string;
 
   @ApiProperty({ example: '2026-10-04', description: 'Exclusive' })
-  @IsISO8601({ strict: true })
+  @IsDateOnly()
   to!: string;
 
   @ApiPropertyOptional({ description: 'Narrow to a single room type; omit for every bookable type' })
@@ -23,11 +24,11 @@ export class PublicQuoteQueryDto {
   roomTypeId!: string;
 
   @ApiProperty({ example: '2026-10-01' })
-  @IsISO8601({ strict: true })
+  @IsDateOnly()
   checkInDate!: string;
 
   @ApiProperty({ example: '2026-10-04', description: 'Exclusive' })
-  @IsISO8601({ strict: true })
+  @IsDateOnly()
   checkOutDate!: string;
 
   @ApiPropertyOptional({ description: 'Matches a promotional RatePlan.promoCode' })
@@ -65,11 +66,11 @@ export class PublicCreateReservationDto {
   roomTypeId!: string;
 
   @ApiProperty({ example: '2026-10-01' })
-  @IsISO8601({ strict: true })
+  @IsDateOnly()
   checkInDate!: string;
 
   @ApiProperty({ example: '2026-10-04', description: 'Exclusive' })
-  @IsISO8601({ strict: true })
+  @IsDateOnly()
   checkOutDate!: string;
 
   @ApiProperty({ example: 2 })

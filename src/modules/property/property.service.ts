@@ -176,7 +176,8 @@ export class PropertyService {
   ): Promise<Branch> {
     if (dto.timezone) assertValidTimezone(dto.timezone);
     return this.prisma.withTenant(tenantId, async (tx) => {
-      await this.assertBranch(tx, branchId);
+      const branch = await this.assertBranch(tx, branchId);
+      await this.assertCurrencyAndTimezoneUnlocked(tx, branch, dto);
       const updated = await tx.branch.update({
         where: { id: branchId },
         data: {
@@ -193,6 +194,27 @@ export class PropertyService {
       await this.audit(tx, tenantId, actorId, 'branch.updated', 'branch', branchId, dto as Prisma.InputJsonValue);
       return updated;
     });
+  }
+
+  /**
+   * Currency and timezone are fixed once the branch has taken a booking or a
+   * payment: every stored amount would silently change currency, and every
+   * business-day boundary would move under the records already filed.
+   */
+  private async assertCurrencyAndTimezoneUnlocked(tx: TenantTx, branch: Branch, dto: UpdateBranchDto): Promise<void> {
+    const changesCurrency = dto.currency !== undefined && dto.currency !== branch.currency;
+    const changesTimezone = dto.timezone !== undefined && dto.timezone !== branch.timezone;
+    if (!changesCurrency && !changesTimezone) return;
+    const [reservations, payments] = await Promise.all([
+      tx.reservation.count({ where: { branchId: branch.id, deletedAt: null } }),
+      tx.payment.count({ where: { folio: { branchId: branch.id } } }),
+    ]);
+    if (reservations > 0 || payments > 0) {
+      throw new ConflictException({
+        code: ErrorCode.CONFLICT,
+        message: `The ${changesCurrency ? 'currency' : 'timezone'} can't be changed once a branch has bookings or payments — contact support if it was set up wrong`,
+      });
+    }
   }
 
   /**
@@ -452,8 +474,9 @@ export class PropertyService {
         globalEnabled: dto.globalEnabled,
         maxOverbookPct: dto.maxOverbookPct,
         alertAtPct: dto.alertAtPct,
-        validFrom: dto.validFrom ? new Date(dto.validFrom) : undefined,
-        validTo: dto.validTo ? new Date(dto.validTo) : undefined,
+        // `null` clears a date; leaving it out keeps it.
+        validFrom: dto.validFrom === null ? null : dto.validFrom ? new Date(dto.validFrom) : undefined,
+        validTo: dto.validTo === null ? null : dto.validTo ? new Date(dto.validTo) : undefined,
         updatedBy: actorId,
       };
       // NULL roomTypeId rows aren't caught by the unique constraint (NULLs are

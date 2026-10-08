@@ -12,7 +12,8 @@ const TYPE_B = '77777777-7777-4777-8777-777777777777';
 function makeTx() {
   return {
     roomType: { findMany: jest.fn().mockResolvedValue([{ id: TYPE_A, name: 'Standard' }, { id: TYPE_B, name: 'Deluxe' }]) },
-    room: { count: jest.fn().mockResolvedValue(0) },
+    room: { count: jest.fn().mockResolvedValue(0), findMany: jest.fn().mockResolvedValue([]) },
+    roomBlock: { findMany: jest.fn().mockResolvedValue([]) },
     reservation: { findMany: jest.fn().mockResolvedValue([]) },
     lineItem: { findMany: jest.fn().mockResolvedValue([]) },
     payment: { findMany: jest.fn().mockResolvedValue([]) },

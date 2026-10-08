@@ -48,15 +48,27 @@ function priced(price: Prisma.Decimal | string, taxes: TaxStub[] = []) {
 }
 
 function makeTx() {
+  const lineItemFindMany = jest.fn().mockResolvedValue([]);
+  const paymentFindMany = jest.fn().mockResolvedValue([]);
+  // `groupBy` answers from the same rows `findMany` is mocked with, so a test
+  // that sets up a bill's lines and payments gets the same balance from the
+  // list's grouped sums as from `computeTotals`.
+  const sumByFolio = (findMany: jest.Mock) =>
+    jest.fn(async ({ where }: { where: { folioId: { in: string[] } } }) => {
+      const rows = (await findMany()) as Array<{ amount: Prisma.Decimal }>;
+      const sum = rows.reduce((s, r) => s.plus(r.amount), new Prisma.Decimal(0));
+      return where.folioId.in.map((folioId) => ({ folioId, _sum: { amount: sum } }));
+    });
   return {
     folio: { findFirst: jest.fn(), findMany: jest.fn().mockResolvedValue([]), create: jest.fn().mockResolvedValue(folio()), update: jest.fn().mockResolvedValue(folio({ status: 'settled' })) },
     lineItem: {
       findFirst: jest.fn().mockResolvedValue(null),
-      findMany: jest.fn().mockResolvedValue([]),
+      findMany: lineItemFindMany,
       create: jest.fn().mockImplementation(({ data }: { data: Record<string, unknown> }) => Promise.resolve({ id: 'li-1', ...data })),
       updateMany: jest.fn().mockResolvedValue({ count: 2 }),
+      groupBy: sumByFolio(lineItemFindMany),
     },
-    payment: { findMany: jest.fn().mockResolvedValue([]), create: jest.fn().mockResolvedValue({ id: 'pay-1' }) },
+    payment: { findMany: paymentFindMany, create: jest.fn().mockResolvedValue({ id: 'pay-1' }), groupBy: sumByFolio(paymentFindMany) },
     folioTransfer: {
       create: jest.fn().mockResolvedValue({ id: 'transfer-1' }),
       findMany: jest.fn().mockResolvedValue([]),
@@ -679,10 +691,20 @@ describe('FoliosService', () => {
       );
     });
 
-    it('settles at a credit balance too', async () => {
+    it('refuses to close over a credit — the guest is owed money, and closing made it vanish from every outstanding list', async () => {
       tx.lineItem.findMany.mockResolvedValue([{ amount: new Prisma.Decimal('100'), chargeType: 'room' }]);
       tx.payment.findMany.mockResolvedValue([{ amount: new Prisma.Decimal('150'), paymentPurpose: 'payment' }]);
-      await expect(service.closeFolio(TENANT_ID, FOLIO_ID, ACTOR_ID)).resolves.toBeDefined();
+      await expect(service.closeFolio(TENANT_ID, FOLIO_ID, ACTOR_ID)).rejects.toMatchObject({ response: { code: 'FOLIO_CREDIT_BALANCE' } });
+      expect(tx.folio.update).not.toHaveBeenCalled();
+    });
+
+    it('a credit shows as refund_due on the branch list, so it is not forgotten', async () => {
+      tx.folio.findMany.mockResolvedValue([{ id: FOLIO_ID, status: 'open', openedAt: new Date(), closedAt: null, guest: { id: 'g-1', name: 'Guest' }, reservation: { id: RESERVATION_ID, status: 'checked_out', checkOutDate: new Date('2026-09-04') } }]);
+      tx.lineItem.findMany.mockResolvedValue([{ amount: new Prisma.Decimal('100'), chargeType: 'room' }]);
+      tx.payment.findMany.mockResolvedValue([{ amount: new Prisma.Decimal('150'), paymentPurpose: 'payment' }]);
+      const [row] = await service.listFolios(TENANT_ID, BRANCH_ID, 'refund_due');
+      expect(row.guestStatus).toBe('refund_due');
+      expect(row.balanceDue.toFixed(2)).toBe('-50.00');
     });
   });
 

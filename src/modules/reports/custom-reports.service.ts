@@ -2,6 +2,7 @@ import { BadRequestException, Injectable, NotFoundException } from '@nestjs/comm
 import { Prisma, ReportTemplate } from '@prisma/client';
 import { ErrorCode } from '../../common/errors/error-codes';
 import { branchDayStart, localDateOf, toBranchDate } from '../../common/utils/branch-date';
+import { csvCell } from '../../common/utils/csv';
 import { PrismaService, TenantTx } from '../../prisma/prisma.service';
 import { PropertyService } from '../property/property.service';
 import { CatalogField, DATASETS, DatasetKey, OPERATORS, datasetOf } from './custom-report.catalog';
@@ -56,8 +57,7 @@ export class CustomReportsService {
 
   async runCsv(tenantId: string, branchId: string, dto: RunCustomReportDto): Promise<string> {
     const { columns, rows } = await this.compute(tenantId, branchId, dto);
-    const escape = (value: Cell) => `"${String(value ?? '').replace(/"/g, '""')}"`;
-    return [columns.map((c) => escape(c.label)).join(','), ...rows.map((row) => columns.map((c) => escape(row[c.key])).join(','))].join('\n');
+    return [columns.map((c) => csvCell(c.label)).join(','), ...rows.map((row) => columns.map((c) => csvCell(row[c.key])).join(','))].join('\n');
   }
 
   async listTemplates(tenantId: string, branchId: string) {

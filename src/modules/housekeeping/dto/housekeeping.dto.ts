@@ -2,6 +2,7 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import { IsIn, IsInt, IsOptional, IsString, IsUUID, Max, MaxLength, Min } from 'class-validator';
 import { HousekeepingStatus } from '@prisma/client';
+import { IsDateOnly } from '../../../common/validation/is-date-only.decorator';
 
 export class CreateTaskDto {
   @ApiProperty()
@@ -33,6 +34,24 @@ export class ListTasksQueryDto {
   @IsOptional()
   @IsUUID()
   assigneeId?: string;
+
+  @ApiPropertyOptional({ example: '2026-10-01', description: 'Tasks dated from this day' })
+  @IsOptional()
+  @IsDateOnly()
+  from?: string;
+
+  @ApiPropertyOptional({ example: '2026-10-08', description: 'Tasks dated up to and including this day' })
+  @IsOptional()
+  @IsDateOnly()
+  to?: string;
+
+  @ApiPropertyOptional({ example: 500, description: 'At most 1000, newest first — the board used to load every task since opening day' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(1000)
+  limit?: number;
 }
 
 export class AssignTaskDto {

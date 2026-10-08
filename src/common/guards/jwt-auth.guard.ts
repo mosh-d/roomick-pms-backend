@@ -1,9 +1,10 @@
-import { BadRequestException, ExecutionContext, Injectable, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, ExecutionContext, ForbiddenException, Injectable, UnauthorizedException } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { AuthGuard } from '@nestjs/passport';
 import { isObservable, lastValueFrom } from 'rxjs';
 import { AccountStatusService } from '../auth/account-status.service';
 import { ApiKeyAuthService, presentedApiKey } from '../auth/api-key-auth.service';
+import { TENANT_SUSPENDED_MESSAGE } from '../auth/tenant-status';
 import { IS_PUBLIC_KEY } from '../decorators/public.decorator';
 import { ErrorCode } from '../errors/error-codes';
 import { AuthenticatedRequest } from '../types/request-context';
@@ -46,7 +47,11 @@ export class JwtAuthGuard extends AuthGuard('jwt') {
     const verdict = super.canActivate(context);
     const tokenOk = isObservable(verdict) ? await lastValueFrom(verdict) : await verdict;
     if (!tokenOk || !request.user) return false;
-    if (!(await this.accounts.isOpen(request.user))) {
+    const state = await this.accounts.check(request.user);
+    if (state === 'suspended') {
+      throw new ForbiddenException({ code: ErrorCode.TENANT_SUSPENDED, message: TENANT_SUSPENDED_MESSAGE });
+    }
+    if (state !== 'open') {
       throw new UnauthorizedException({ code: ErrorCode.UNAUTHORIZED, message: 'This account is no longer active — sign in again' });
     }
     return true;

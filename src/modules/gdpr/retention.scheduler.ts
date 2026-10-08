@@ -18,6 +18,8 @@ export class RetentionScheduler {
       if (run.registrationCards > 0 || run.idDocuments > 0) {
         this.logger.log(`Retention: removed ${run.registrationCards} registration card(s) and ${run.idDocuments} ID document(s)`);
       }
+      const quotes = await this.retentionService.pruneRateQuotes();
+      if (quotes > 0) this.logger.log(`Retention: pruned ${quotes} rate quote(s) older than 90 days that never became a booking`);
     } catch (error) {
       this.logger.error('Retention run failed', error);
     }

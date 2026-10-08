@@ -57,4 +57,10 @@ export enum ErrorCode {
   SHIFT_REQUIRED = 'SHIFT_REQUIRED',
   /** Checking in before the booked arrival day — the stay's dates are moved first. */
   EARLY_CHECK_IN = 'EARLY_CHECK_IN',
+  /** The organisation is suspended or cancelled — nobody in it may sign in or keep working. */
+  TENANT_SUSPENDED = 'TENANT_SUSPENDED',
+  /** The request body is over the size the API accepts (a photo too large, usually). */
+  PAYLOAD_TOO_LARGE = 'PAYLOAD_TOO_LARGE',
+  /** The guest is owed money on this bill — it can't be closed until the credit is refunded or moved. */
+  FOLIO_CREDIT_BALANCE = 'FOLIO_CREDIT_BALANCE',
 }

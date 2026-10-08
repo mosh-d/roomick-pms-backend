@@ -1,4 +1,4 @@
-import { Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { EncryptionService } from '../../common/crypto/encryption.service';
 import { DOCUMENT_STORAGE_ADAPTER, DocumentStorageAdapter } from '../../common/documents/document-storage.interface';
@@ -114,8 +114,18 @@ export class GuestsService {
     @Inject(DOCUMENT_STORAGE_ADAPTER) private readonly documentStorage: DocumentStorageAdapter,
   ) {}
 
+  /** An explicit "new guest" — refused when the email or phone already belongs to a profile, so the desk opens that one instead of a duplicate. */
   async createGuest(tenantId: string, dto: CreateGuestDto): Promise<GuestSummary> {
-    return this.prisma.withTenant(tenantId, (tx) => this.createGuestInTx(tx, tenantId, dto));
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const known = await this.knownGuest(tx, dto, { fillIn: false });
+      if (known) {
+        throw new ConflictException({
+          code: ErrorCode.CONFLICT,
+          message: `${known.name} is already on file with this ${known.email && dto.email && known.email.toLowerCase() === dto.email.trim().toLowerCase() ? 'email' : 'phone number'} — open that profile instead of creating another`,
+        });
+      }
+      return this.createGuestInTx(tx, tenantId, dto);
+    });
   }
 
   async getGuestById(tenantId: string, guestId: string): Promise<GuestProfile> {
@@ -156,13 +166,24 @@ export class GuestsService {
       if (!existing) {
         throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Guest not found' });
       }
+      // An email identifies a guest (bookings match on it), so two profiles can't share one.
+      if (dto.email) {
+        const clash = await tx.guestProfile.findFirst({
+          where: { email: { equals: dto.email, mode: 'insensitive' }, id: { not: guestId }, deletedAt: null },
+          select: { name: true },
+        });
+        if (clash) {
+          throw new ConflictException({ code: ErrorCode.CONFLICT, message: `That email already belongs to ${clash.name}'s profile` });
+        }
+      }
       await tx.guestProfile.update({
         where: { id: guestId },
         data: {
           name: dto.name,
+          // `null` clears the field; leaving it out keeps it.
           email: dto.email,
           phone: dto.phone,
-          phoneDigits: dto.phone === undefined ? undefined : phoneDigitsOf(dto.phone),
+          phoneDigits: dto.phone === undefined ? undefined : dto.phone === null ? null : phoneDigitsOf(dto.phone),
           preferences: dto.preferences as unknown as Prisma.InputJsonValue | undefined,
           vipLevel: dto.vipLevel,
           tags: dto.tags,
@@ -215,21 +236,24 @@ export class GuestsService {
 
   /** Full profile including the ID-document fields — masked unless `reveal` (the `?reveal=true` convention `AuditInterceptor` records as `pii.reveal`). */
   async getGuestDetail(tenantId: string, guestId: string, reveal: boolean): Promise<GuestDetail> {
-    return this.prisma.withTenant(tenantId, async (tx) => {
-      const guest = await tx.guestProfile.findFirst({
-        where: { id: guestId, deletedAt: null },
-        select: GUEST_DETAIL_SELECT,
-      });
-      if (!guest) {
-        throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Guest not found' });
-      }
-      const plainIdDocNumber = guest.idDocNumber ? this.encryption.decrypt(guest.idDocNumber) : null;
-      return {
-        ...guest,
-        idDocNumber: plainIdDocNumber ? (reveal ? plainIdDocNumber : this.encryption.mask(plainIdDocNumber)) : null,
-        idCheckState: this.deriveIdCheckState(guest.idDocExpiryDate),
-      };
+    return this.prisma.withTenant(tenantId, (tx) => this.getGuestDetailInTx(tx, guestId, reveal));
+  }
+
+  /** The same, inside a caller's transaction — a GDPR export reads it alongside the guest's bookings and bills. */
+  async getGuestDetailInTx(tx: TenantTx, guestId: string, reveal: boolean): Promise<GuestDetail> {
+    const guest = await tx.guestProfile.findFirst({
+      where: { id: guestId, deletedAt: null },
+      select: GUEST_DETAIL_SELECT,
     });
+    if (!guest) {
+      throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Guest not found' });
+    }
+    const plainIdDocNumber = guest.idDocNumber ? this.encryption.decrypt(guest.idDocNumber) : null;
+    return {
+      ...guest,
+      idDocNumber: plainIdDocNumber ? (reveal ? plainIdDocNumber : this.encryption.mask(plainIdDocNumber)) : null,
+      idCheckState: this.deriveIdCheckState(guest.idDocExpiryDate),
+    };
   }
 
   /**
@@ -259,6 +283,7 @@ export class GuestsService {
       idDocUrl = await this.documentStorage.write(`${tenantId}/id-documents/${guestId}-${Date.now()}.enc`, encryptedPhoto);
     }
 
+    const previous = idDocUrl ? await tx.guestProfile.findFirst({ where: { id: guestId }, select: { idDocUrl: true } }) : null;
     await tx.guestProfile.update({
       where: { id: guestId },
       data: {
@@ -269,6 +294,11 @@ export class GuestsService {
         ...(idDocUrl ? { idDocUrl } : {}),
       },
     });
+    // A re-captured document replaces the old photo; the old encrypted file
+    // used to stay on disk for good. Best effort — a file already gone is fine.
+    if (idDocUrl && previous?.idDocUrl && previous.idDocUrl !== idDocUrl) {
+      await this.documentStorage.remove(previous.idDocUrl).catch(() => undefined);
+    }
 
     // Never the document number itself — even encrypted, an audit row isn't the place for it.
     await tx.auditLog.create({
@@ -348,7 +378,7 @@ export class GuestsService {
    * VIP tag and marketing consent split across them. Whatever the booking
    * gives that the profile lacks — an email, a phone — is filled in.
    */
-  private async knownGuest(tx: TenantTx, dto: CreateGuestDto): Promise<GuestSummary | null> {
+  private async knownGuest(tx: TenantTx, dto: CreateGuestDto, options: { fillIn: boolean } = { fillIn: true }): Promise<GuestSummary | null> {
     const email = dto.email?.trim().toLowerCase();
     const digits = phoneDigitsOf(dto.phone);
     const phoneEnd = digits && digits.length >= PHONE_MATCH_DIGITS ? digits.slice(-PHONE_MATCH_DIGITS) : null;
@@ -363,6 +393,7 @@ export class GuestsService {
       select: GUEST_SUMMARY_SELECT,
     });
     if (!found) return null;
+    if (!options.fillIn) return found;
 
     const fill: Prisma.GuestProfileUncheckedUpdateInput = {};
     if (!found.email && email) fill.email = email;

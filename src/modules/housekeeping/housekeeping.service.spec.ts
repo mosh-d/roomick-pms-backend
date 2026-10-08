@@ -54,6 +54,7 @@ function makeTx() {
       update: jest.fn().mockImplementation(({ data }: { data: Record<string, unknown> }) => Promise.resolve(task({ ...data }))),
     },
     auditLog: { create: jest.fn().mockResolvedValue({}) },
+    userBranchRole: { findFirst: jest.fn().mockResolvedValue({ id: 'ubr-1' }) },
   };
 }
 

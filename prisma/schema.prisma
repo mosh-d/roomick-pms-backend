@@ -1182,6 +1182,9 @@ model EventBooking {
   notes          String?
   createdAt      DateTime @default(now()) @db.Timestamptz(6)
   createdBy      String?  @db.Uuid
+  // `confirmed` | `cancelled` — a cancelled event stays on record (its BEO, its notes) rather than being deleted.
+  status         String    @default("confirmed") @db.VarChar(20)
+  cancelledAt    DateTime? @db.Timestamptz(6)
   // The Banquet Event Order's details.
   setupStyle     String?  @db.VarChar(20) // theater | classroom | banquet | u_shape
   headcount      Int? // guaranteed numbers, checked against the space's capacity for the layout
@@ -2232,6 +2235,11 @@ model CommunicationLog {
   sentBy            String?        @db.Uuid // NULL = automated system send
   sentAt            DateTime       @default(now()) @db.Timestamptz(6)
   deliveredAt       DateTime?      @db.Timestamptz(6)
+  // Delivery attempts so far, when the next one is due, and why the last one failed — a provider
+  // hiccup is retried with the same backoff as a webhook instead of losing the message for good.
+  attempts          Int            @default(0)
+  nextAttemptAt     DateTime?      @db.Timestamptz(6)
+  lastError         String?        @db.VarChar(500)
 
   tenant      Tenant       @relation(fields: [tenantId], references: [id], onDelete: Restrict)
   branch      Branch       @relation(fields: [branchId], references: [id], onDelete: Restrict)

@@ -1,6 +1,8 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { MaintenanceStatus, Prisma } from '@prisma/client';
 import { ErrorCode } from '../../common/errors/error-codes';
+import { JwtPayload } from '../../common/types/request-context';
+import { isSupervisorAt } from '../../common/utils/branch-roles';
 import { PrismaService, TenantTx } from '../../prisma/prisma.service';
 import { CreateAssetDto, CreateWorkOrderDto, UpdateWorkOrderDto } from './dto/maintenance.dto';
 
@@ -26,9 +28,31 @@ export class MaintenanceService {
    * work order that's supposed to block a room can't exist for a moment
    * without actually blocking it.
    */
-  async createWorkOrder(tenantId: string, branchId: string, dto: CreateWorkOrderDto, actorId: string) {
+  async createWorkOrder(tenantId: string, branchId: string, dto: CreateWorkOrderDto, actor: JwtPayload) {
+    const actorId = actor.sub;
     return this.prisma.withTenant(tenantId, async (tx) => {
-      const takesRoomOutOfService = Boolean(dto.blockRoom && dto.roomId);
+      // The room and the asset must be this branch's own — a work order at one
+      // branch used to take another branch's room out of service by id.
+      const room = dto.roomId ? await tx.room.findFirst({ where: { id: dto.roomId, branchId, deletedAt: null } }) : null;
+      if (dto.roomId && !room) {
+        throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Room not found at this branch' });
+      }
+      if (dto.assetId) {
+        const asset = await tx.asset.findFirst({ where: { id: dto.assetId, branchId }, select: { id: true } });
+        if (!asset) throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Asset not found at this branch' });
+      }
+      const takesRoomOutOfService = Boolean(dto.blockRoom && room);
+      if (takesRoomOutOfService && room) {
+        // Taking a room off sale is a supervisor's call — the same rule the
+        // room-status route applies to the held axis — and never over a
+        // guest's head: an occupied room is moved or checked out first.
+        if (!isSupervisorAt(actor, branchId)) {
+          throw new ForbiddenException({ code: ErrorCode.FORBIDDEN, message: 'Only a manager can take a room out of service — submit the work order without blocking the room' });
+        }
+        if (room.occupancyStatus === 'occupied') {
+          throw new ConflictException({ code: ErrorCode.CONFLICT, message: `Room ${room.number} is occupied — move or check out the guest before taking it out of service` });
+        }
+      }
       const order = await tx.maintenanceOrder.create({
         data: {
           tenantId,
@@ -45,8 +69,8 @@ export class MaintenanceService {
         include: WORK_ORDER_INCLUDE,
       });
 
-      if (takesRoomOutOfService && dto.roomId) {
-        await tx.room.update({ where: { id: dto.roomId }, data: { heldStatus: 'out_of_order' } });
+      if (takesRoomOutOfService && room) {
+        await tx.room.update({ where: { id: room.id }, data: { heldStatus: 'out_of_order' } });
       }
 
       await this.audit(tx, tenantId, branchId, actorId, 'maintenance.work_order_created', order.id, {
@@ -81,6 +105,17 @@ export class MaintenanceService {
       const existing = await tx.maintenanceOrder.findFirst({ where: { id: orderId } });
       if (!existing) {
         throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Work order not found' });
+      }
+      // Whoever it's assigned to must be a live member of staff at this branch;
+      // `null` takes the assignment off again.
+      if (dto.assignedTo) {
+        const assignee = await tx.userBranchRole.findFirst({
+          where: { userId: dto.assignedTo, OR: [{ branchId: null }, { branchId: existing.branchId }], user: { deletedAt: null } },
+          select: { id: true },
+        });
+        if (!assignee) {
+          throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: 'That person isn’t on the staff at this branch' });
+        }
       }
 
       const updated = await tx.maintenanceOrder.update({

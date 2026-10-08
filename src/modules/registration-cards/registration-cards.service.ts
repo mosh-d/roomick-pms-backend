@@ -128,7 +128,7 @@ export class RegistrationCardsService {
    * mistake needs a fresh card, not a silently overwritten signature.
    */
   async signCard(tenantId: string, cardId: string, dto: SignRegistrationCardDto, actorId: string): Promise<RegistrationCard> {
-    return this.prisma.withTenant(tenantId, async (tx) => {
+    const signed = await this.prisma.withTenant(tenantId, async (tx) => {
       const card = await tx.registrationCard.findFirst({ where: { id: cardId } });
       if (!card) {
         throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Registration card not found' });
@@ -139,25 +139,24 @@ export class RegistrationCardsService {
       if (card.purgedAt) {
         throw new ConflictException({ code: ErrorCode.CONFLICT, message: 'This card’s guest details were removed after the retention period — it can’t be signed now' });
       }
-      const signed = await tx.registrationCard.update({
+      const row = await tx.registrationCard.update({
         where: { id: cardId },
         data: { signatureData: dto.signatureData, signedAt: new Date(), witnessedBy: actorId },
       });
-
-      // The legal document is final at signature — generate and persist the
-      // PDF now, not lazily, so `documentUrl` is never stale relative to
-      // `signedAt`. Encrypted the same way an ID document photo is
-      // (`EncryptionService.encryptBuffer` → `DocumentStorageAdapter`).
-      const pdf = await renderRegistrationCardPdf(signed);
-      const documentUrl = await this.documentStorage.write(
-        `${tenantId}/registration-cards/${cardId}.pdf.enc`,
-        this.encryption.encryptBuffer(pdf),
-      );
-      const updated = await tx.registrationCard.update({ where: { id: cardId }, data: { documentUrl } });
-
       await this.audit(tx, tenantId, card.branchId, actorId, 'registration_card.signed', cardId, { reservationId: card.reservationId });
-      return updated;
+      return row;
     });
+
+    // The legal document is final at signature — generate and persist the
+    // PDF now, not lazily, so `documentUrl` is never stale relative to
+    // `signedAt`. Encrypted the same way an ID document photo is
+    // (`EncryptionService.encryptBuffer` → `DocumentStorageAdapter`). Rendered
+    // and written OUTSIDE the transaction: a slow disk no longer holds a lock,
+    // and a render that fails leaves a signed card that `getCardPdf` renders
+    // live, rather than rolling the signature back after the file was written.
+    const pdf = await renderRegistrationCardPdf(signed);
+    const documentUrl = await this.documentStorage.write(`${tenantId}/registration-cards/${cardId}.pdf.enc`, this.encryption.encryptBuffer(pdf));
+    return this.prisma.withTenant(tenantId, (tx) => tx.registrationCard.update({ where: { id: cardId }, data: { documentUrl } }));
   }
 
   /**

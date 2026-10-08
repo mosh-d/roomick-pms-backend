@@ -1,6 +1,8 @@
 import { ApiProperty, ApiPropertyOptional, PartialType } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
+  ArrayMaxSize,
+  IsArray,
   IsBoolean,
   IsIn,
   IsInt,
@@ -9,6 +11,8 @@ import {
   IsObject,
   IsOptional,
   IsString,
+  IsUrl,
+  Length,
   Matches,
   Max,
   MaxLength,
@@ -105,10 +109,15 @@ export class NoShowPolicyDto {
 
   @ApiPropertyOptional({ description: 'Auto-mark no-shows during night audit' })
   @IsOptional()
+  @IsBoolean()
   autoMark?: boolean;
 
   @ApiPropertyOptional({ example: 120 })
   @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(1440)
   notifyMinutesBefore?: number;
 
   // Missing until now: the penalty code has always read `flatFeeAmount`, but
@@ -164,26 +173,34 @@ export class GuestTermsDto {
 }
 
 export class RegCardTemplateDto {
-  @ApiPropertyOptional()
+  @ApiPropertyOptional({ description: 'An https address — it is rendered on every card and on the printable PDF' })
   @IsOptional()
-  @IsString()
+  @IsUrl({ protocols: ['https'], require_protocol: true }, { message: 'logoUrl must be an https:// address' })
+  @MaxLength(2048)
   logoUrl?: string;
 
   @ApiPropertyOptional({ example: 'No smoking. Checkout 11:00.' })
   @IsOptional()
   @IsString()
+  @MaxLength(5000)
   houseRules?: string;
 
   @ApiPropertyOptional({ type: [String], example: ['name', 'idNumber', 'signature'] })
   @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(20)
+  @IsString({ each: true })
+  @MaxLength(50, { each: true })
   requiredFields?: string[];
 
   @ApiPropertyOptional()
   @IsOptional()
+  @IsBoolean()
   showRate?: boolean;
 
   @ApiPropertyOptional({ example: 'en' })
   @IsOptional()
   @IsString()
+  @Length(2, 10)
   language?: string;
 }

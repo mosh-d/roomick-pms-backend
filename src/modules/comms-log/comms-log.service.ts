@@ -26,6 +26,7 @@ export const MARKETING_CAMPAIGN_TRIGGER = 'marketing_campaign';
 const INBOX_LIMIT = 100;
 const THREAD_LIMIT = 200;
 const GUEST_THREAD_LIMIT = 100;
+const GUEST_HISTORY_LIMIT = 500;
 const PREVIEW_LENGTH = 160;
 
 const RESERVATION_SUMMARY = {
@@ -120,13 +121,19 @@ export class CommsLogService {
   }
 
   async listForGuest(tenantId: string, guestId: string, from?: string, to?: string): Promise<CommunicationLog[]> {
+    // Calendar days, both inclusive — `to` runs to the end of its day.
+    const sentAt =
+      from || to
+        ? {
+            ...(from ? { gte: new Date(`${from}T00:00:00.000Z`) } : {}),
+            ...(to ? { lt: new Date(new Date(`${to}T00:00:00.000Z`).getTime() + 86_400_000) } : {}),
+          }
+        : undefined;
     return this.prisma.withTenant(tenantId, (tx) =>
       tx.communicationLog.findMany({
-        where: {
-          guestId,
-          ...(from || to ? { sentAt: { gte: from ? new Date(from) : undefined, lte: to ? new Date(to) : undefined } } : {}),
-        },
+        where: { guestId, ...(sentAt ? { sentAt } : {}) },
         orderBy: { sentAt: 'desc' },
+        take: GUEST_HISTORY_LIMIT,
       }),
     );
   }
@@ -151,23 +158,46 @@ export class CommsLogService {
         take: INBOX_LIMIT,
       });
 
+      const guestIds = writers.map((w) => w.guestId);
+      if (guestIds.length === 0) return [];
+
+      // Four queries for the whole inbox instead of four per conversation: the
+      // guests, each one's latest message and latest booking (DISTINCT ON —
+      // row-level security applies to raw SQL inside the tenant transaction
+      // like any other query), and the unread counts.
+      const [guests, lastMessages, latestReservations, unread] = await Promise.all([
+        tx.guestProfile.findMany({ where: { id: { in: guestIds } }, select: { id: true, name: true, email: true, phone: true } }),
+        tx.$queryRaw<Array<{ guestId: string; direction: CommsDirection; channel: CommsChannel; trigger: string; body: string; sentAt: Date }>>`
+          SELECT DISTINCT ON ("guestId") "guestId", direction, channel, trigger, body, "sentAt"
+          FROM communication_log
+          WHERE "branchId" = ${branchId}::uuid AND "guestId" = ANY(${guestIds}::uuid[]) AND trigger <> ${MARKETING_CAMPAIGN_TRIGGER}
+          ORDER BY "guestId", "sentAt" DESC`,
+        tx.$queryRaw<Array<{ guestId: string; id: string }>>`
+          SELECT DISTINCT ON ("guestId") "guestId", id
+          FROM reservations
+          WHERE "branchId" = ${branchId}::uuid AND "guestId" = ANY(${guestIds}::uuid[]) AND "deletedAt" IS NULL
+          ORDER BY "guestId", "checkInDate" DESC`,
+        tx.communicationLog.groupBy({
+          by: ['guestId'],
+          where: { branchId, guestId: { in: guestIds }, direction: 'inbound', readAt: null },
+          _count: { _all: true },
+        }),
+      ]);
+      const reservations = await tx.reservation.findMany({ where: { id: { in: latestReservations.map((r) => r.id) } }, select: RESERVATION_SUMMARY });
+
+      const guestById = new Map(guests.map((g) => [g.id, g]));
+      const lastByGuest = new Map(lastMessages.map((m) => [m.guestId, m]));
+      const reservationByGuest = new Map(latestReservations.map((r) => [r.guestId, reservations.find((x) => x.id === r.id) ?? null]));
+      const unreadByGuest = new Map(unread.map((u) => [u.guestId, u._count._all]));
+
       const conversations: InboxConversation[] = [];
-      for (const { guestId } of writers) {
-        const guest = await tx.guestProfile.findFirst({ where: { id: guestId }, select: { id: true, name: true, email: true, phone: true } });
-        const last = await tx.communicationLog.findFirst({
-          where: { branchId, guestId, trigger: { not: MARKETING_CAMPAIGN_TRIGGER } },
-          orderBy: { sentAt: 'desc' },
-        });
+      for (const guestId of guestIds) {
+        const guest = guestById.get(guestId);
+        const last = lastByGuest.get(guestId);
         if (!guest || !last) continue;
-        const unreadCount = await tx.communicationLog.count({ where: { branchId, guestId, direction: 'inbound', readAt: null } });
-        const reservation = await tx.reservation.findFirst({
-          where: { branchId, guestId, deletedAt: null },
-          orderBy: { checkInDate: 'desc' },
-          select: RESERVATION_SUMMARY,
-        });
         conversations.push({
           guest,
-          reservation,
+          reservation: reservationByGuest.get(guestId) ?? null,
           lastMessage: {
             direction: last.direction,
             channel: last.channel,
@@ -175,7 +205,7 @@ export class CommsLogService {
             preview: last.body.length > PREVIEW_LENGTH ? `${last.body.slice(0, PREVIEW_LENGTH)}…` : last.body,
             sentAt: last.sentAt,
           },
-          unreadCount,
+          unreadCount: unreadByGuest.get(guestId) ?? 0,
         });
       }
       return conversations.sort((a, b) => b.lastMessage.sentAt.getTime() - a.lastMessage.sentAt.getTime());

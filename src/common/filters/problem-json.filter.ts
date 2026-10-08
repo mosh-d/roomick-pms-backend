@@ -30,6 +30,29 @@ const STATUS_TO_CODE: Record<number, ErrorCode> = {
 };
 
 /**
+ * Express's body parser throws plain errors, not `HttpException`s: a body
+ * over the size limit, or one that isn't JSON. They carry a `type` and a 4xx
+ * `status`, and used to fall through to the 500 branch below — a photo too
+ * large at check-in came back as "Something went wrong".
+ */
+function bodyParserError(exception: unknown): { status: number; code: ErrorCode; detail: string } | null {
+  if (!exception || typeof exception !== 'object') return null;
+  const { type, status } = exception as { type?: unknown; status?: unknown };
+  if (typeof type !== 'string' || typeof status !== 'number' || status < 400 || status >= 500) return null;
+  if (type === 'entity.too.large') {
+    return {
+      status: HttpStatus.PAYLOAD_TOO_LARGE,
+      code: ErrorCode.PAYLOAD_TOO_LARGE,
+      detail: 'The request is too large. If it carried a photo, take it again closer to the document or choose a smaller image.',
+    };
+  }
+  if (type === 'entity.parse.failed') {
+    return { status: HttpStatus.BAD_REQUEST, code: ErrorCode.VALIDATION_FAILED, detail: 'The request body is not valid JSON' };
+  }
+  return { status, code: ErrorCode.VALIDATION_FAILED, detail: 'The request body could not be read' };
+}
+
+/**
  * Global exception filter producing RFC 9457 application/problem+json bodies
  * with stable error codes. Internals are never leaked (spec §6).
  *
@@ -51,7 +74,10 @@ export class ProblemJsonExceptionFilter implements ExceptionFilter {
     let code: string = ErrorCode.INTERNAL;
     let errors: unknown;
 
-    if (exception instanceof HttpException) {
+    const unreadable = bodyParserError(exception);
+    if (unreadable) {
+      ({ status, code, detail } = unreadable);
+    } else if (exception instanceof HttpException) {
       status = exception.getStatus();
       const body = exception.getResponse();
       code = STATUS_TO_CODE[status] ?? ErrorCode.INTERNAL;

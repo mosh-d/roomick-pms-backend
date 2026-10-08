@@ -11,7 +11,7 @@ describe('HqService', () => {
   let service: HqService;
   let prisma: { withTenant: jest.Mock };
   let foliosService: { listFolios: jest.Mock };
-  let reportsService: { getOccupancy: jest.Mock; getAdr: jest.Mock; getRevpar: jest.Mock; getRevenue: jest.Mock };
+  let reportsService: { getOccupancy: jest.Mock; getAdr: jest.Mock; getRevpar: jest.Mock; getRevenue: jest.Mock; range: jest.Mock };
   let tx: { brand: { findMany: jest.Mock }; branch: { findMany: jest.Mock }; room: { count: jest.Mock }; reservation: { count: jest.Mock } };
 
   beforeEach(async () => {
@@ -23,7 +23,7 @@ describe('HqService', () => {
     };
     prisma = { withTenant: jest.fn((_t: string, fn: (x: unknown) => unknown) => fn(tx)) };
     foliosService = { listFolios: jest.fn().mockResolvedValue([]) };
-    reportsService = { getOccupancy: jest.fn(), getAdr: jest.fn(), getRevpar: jest.fn(), getRevenue: jest.fn() };
+    reportsService = { getOccupancy: jest.fn(), getAdr: jest.fn(), getRevpar: jest.fn(), getRevenue: jest.fn(), range: jest.fn((dto: { from: string; to: string }) => ({ from: new Date(dto.from), to: new Date(dto.to) })) };
 
     const moduleRef = await Test.createTestingModule({
       providers: [

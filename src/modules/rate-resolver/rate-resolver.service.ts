@@ -142,9 +142,9 @@ export class RateResolverService {
     dto: CalculateRateDto,
     userId: string | null,
     options: { persistAudit?: boolean } = {},
-  ): Promise<Omit<StayResolution, 'auditLogIds'>> {
+  ): Promise<Omit<StayResolution, 'auditLogIds'> & { currency: string }> {
     return this.prisma.withTenant(tenantId, async (tx) => {
-      await this.propertyService.assertBranch(tx, branchId);
+      const branch = await this.propertyService.assertBranch(tx, branchId);
       const roomType = await tx.roomType.findFirst({ where: { id: dto.roomTypeId, branchId, deletedAt: null } });
       if (!roomType) throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Room type not found at this branch' });
       const checkInDate = toBranchDate(dto.checkInDate);
@@ -168,7 +168,8 @@ export class RateResolverService {
         { promoCode: dto.promoCode, corporateAccountId: dto.corporateAccountId },
         { triggeredBy: 'booking_create', userId: userId ?? undefined, persistAudit: options.persistAudit },
       );
-      return resolution;
+      // The branch's currency rides along, so a quote is never shown as a bare number.
+      return { ...resolution, currency: branch.currency };
     });
   }
 

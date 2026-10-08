@@ -4,6 +4,7 @@ import { Cron, CronExpression } from '@nestjs/schedule';
 import { Brand, Tenant } from '@prisma/client';
 import { AccountStatusService } from '../../common/auth/account-status.service';
 import { ErrorCode } from '../../common/errors/error-codes';
+import { MfaService } from '../auth/mfa.service';
 import { tenantModelInsertOrder } from '../../common/prisma/tenant-models';
 import { PrismaService } from '../../prisma/prisma.service';
 import { ConfigureModeDto } from './dto/configure-mode.dto';
@@ -22,6 +23,7 @@ export class TenantsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly accountStatus: AccountStatusService,
+    private readonly mfaService: MfaService,
   ) {}
 
   /**
@@ -159,10 +161,19 @@ export class TenantsService {
    * is the one action in the app with no way back, so a stolen session or a
    * mis-click on the wrong account mustn't be enough.
    */
-  async deleteOrganizationAsOwner(tenantId: string, actorId: string, password: string): Promise<void> {
+  async deleteOrganizationAsOwner(tenantId: string, actorId: string, password: string, mfaCode?: string): Promise<void> {
     const owner = await this.prisma.withTenant(tenantId, (tx) => tx.user.findFirst({ where: { id: actorId, deletedAt: null } }));
     if (!owner?.passwordHash || !(await bcrypt.compare(password, owner.passwordHash))) {
       throw new UnauthorizedException({ code: ErrorCode.INVALID_CREDENTIALS, message: 'That isn’t your password' });
+    }
+    // An owner with two-step sign-in proves the second step here too — a
+    // stolen password alone used to be enough to erase the whole organisation.
+    if (owner.mfaEnabledAt) {
+      if (!mfaCode) {
+        throw new UnauthorizedException({ code: ErrorCode.MFA_REQUIRED, message: 'Enter the code from your authenticator app as well' });
+      }
+      const result = await this.mfaService.checkSecondFactor(tenantId, actorId, mfaCode);
+      if (!result.ok) throw this.mfaService.failureFor(result);
     }
     await this.deleteOrganization(tenantId);
   }

@@ -7,7 +7,6 @@ import {
   IsBoolean,
   IsIn,
   IsInt,
-  IsISO8601,
   IsNumber,
   IsOptional,
   IsString,
@@ -19,6 +18,7 @@ import {
   MinLength,
   ValidateNested,
 } from 'class-validator';
+import { IsDateOnly } from '../../../common/validation/is-date-only.decorator';
 
 const OUTLET_CATEGORIES = ['restaurant', 'bar', 'spa', 'laundry', 'retail', 'room_service'] as const;
 const SETTLEMENTS = ['room', 'cash', 'card'] as const;
@@ -227,7 +227,7 @@ export class ListOrdersQueryDto {
   @ApiPropertyOptional({ example: '2026-09-15', description: "The outlet's business day in the branch timezone; defaults to today" })
   @IsOptional()
   @Matches(/^\d{4}-\d{2}-\d{2}$/, { message: 'date must be YYYY-MM-DD' })
-  @IsISO8601({ strict: true })
+  @IsDateOnly()
   date?: string;
 }
 

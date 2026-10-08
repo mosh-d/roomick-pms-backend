@@ -2,9 +2,9 @@ import { Body, Controller, Get, Param, ParseUUIDPipe, Patch, Post, Query } from 
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentTenant, CurrentUser } from '../../common/decorators';
 import { Permission } from '../../common/decorators/permission.decorator';
-import { ALL_SYSTEM_ROLES, Roles, SystemRole } from '../../common/decorators/roles.decorator';
+import { Roles, SystemRole } from '../../common/decorators/roles.decorator';
 import { JwtPayload } from '../../common/types/request-context';
-import { AddGuestNoteDto, CreateGuestDto, UpdateGuestDto } from './dto/guest.dto';
+import { AddGuestNoteDto, CreateGuestDto, ListGuestsQueryDto, SearchGuestsQueryDto, UpdateGuestDto } from './dto/guest.dto';
 import { GuestsService } from './guests.service';
 
 @ApiTags('guests')
@@ -21,27 +21,24 @@ export class GuestsController {
     return this.guestsService.createGuest(tenantId, dto);
   }
 
+  // Guest contact details are the front office's to read — not a POS
+  // cashier's or a housekeeper's, who could list the whole guest database.
   @Get('guests')
-  @Roles(...ALL_SYSTEM_ROLES)
+  @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk)
   @ApiOperation({ summary: 'Guest Profiles & CRM — the browsable, paginated list (unlike /guests/search, q is optional)' })
-  listGuests(
-    @CurrentTenant() tenantId: string,
-    @Query('q') q?: string,
-    @Query('page') page?: string,
-    @Query('limit') limit?: string,
-  ): ReturnType<GuestsService['listGuests']> {
-    return this.guestsService.listGuests(tenantId, q, page ? Number(page) : 1, limit ? Number(limit) : 50);
+  listGuests(@CurrentTenant() tenantId: string, @Query() query: ListGuestsQueryDto): ReturnType<GuestsService['listGuests']> {
+    return this.guestsService.listGuests(tenantId, query.q, query.page ?? 1, query.limit ?? 50);
   }
 
   @Get('guests/search')
-  @Roles(...ALL_SYSTEM_ROLES)
+  @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk)
   @ApiOperation({ summary: 'Search guests by name, email or phone (top 20 matches) — the walk-in and booking forms suggest returning guests from it' })
-  searchGuests(@CurrentTenant() tenantId: string, @Query('q') q: string): ReturnType<GuestsService['searchGuests']> {
-    return this.guestsService.searchGuests(tenantId, q);
+  searchGuests(@CurrentTenant() tenantId: string, @Query() query: SearchGuestsQueryDto): ReturnType<GuestsService['searchGuests']> {
+    return this.guestsService.searchGuests(tenantId, query.q);
   }
 
   @Get('guests/:guestId')
-  @Roles(...ALL_SYSTEM_ROLES)
+  @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk)
   @ApiOperation({ summary: 'Full guest profile — preferences, loyalty, stay history, spend summary, notes feed' })
   getGuest(
     @CurrentTenant() tenantId: string,

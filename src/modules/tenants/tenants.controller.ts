@@ -50,6 +50,6 @@ export class TenantsController {
       'the same way every other endpoint derives it, never trusted from a client-supplied ID).',
   })
   deleteOrganization(@CurrentTenant() tenantId: string, @CurrentUser() user: JwtPayload, @Body() dto: DeleteOrganizationDto): Promise<void> {
-    return this.tenantsService.deleteOrganizationAsOwner(tenantId, user.sub, dto.password);
+    return this.tenantsService.deleteOrganizationAsOwner(tenantId, user.sub, dto.password, dto.mfaCode);
   }
 }

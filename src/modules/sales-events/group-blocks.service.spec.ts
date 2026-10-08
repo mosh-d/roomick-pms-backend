@@ -187,9 +187,16 @@ describe('GroupBlocksService', () => {
       expect(result).toEqual({ reservationId: 'res-Jane', confirmationNumber: 'RES-Jane' });
     });
 
-    it('takes stay dates given for an early arrival', async () => {
+    it('takes stay dates given for an early arrival — a shoulder night the group contract covers', async () => {
       await service.bookIntoBlock(TENANT_ID, 'block-1', { adults: 1, guest: { name: 'Early' }, checkInDate: day(29) }, actor());
       expect(reservationsService.createReservation.mock.calls[0][2]).toMatchObject({ checkInDate: day(29), checkOutDate: day(33) });
+    });
+
+    it('refuses a stay outside the block’s nights — the group rate was negotiated for those dates, not a weekend weeks later', async () => {
+      await expect(service.bookIntoBlock(TENANT_ID, 'block-1', { adults: 1, guest: { name: 'Far' }, checkInDate: day(50), checkOutDate: day(52) }, actor())).rejects.toThrow(
+        /within the block's dates/,
+      );
+      expect(reservationsService.createReservation).not.toHaveBeenCalled();
     });
 
     it('needs dates when the block has none of its own', async () => {

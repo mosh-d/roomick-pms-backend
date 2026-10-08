@@ -5,6 +5,7 @@ import { Permission } from '../../common/decorators/permission.decorator';
 import { ALL_SYSTEM_ROLES, Roles, SystemRole } from '../../common/decorators/roles.decorator';
 import { JwtPayload } from '../../common/types/request-context';
 import { CorrectLineItemDto, CreateFolioDto, ListTransfersQueryDto, PostChargeDto, RecordPaymentDto, SplitFolioDto } from './dto/folio.dto';
+import { ListFoliosQueryDto } from './dto/list-folios-query.dto';
 import { FoliosService } from './folios.service';
 import { BranchOf } from '../../common/decorators/branch-of.decorator';
 
@@ -57,10 +58,9 @@ export class FoliosController {
   listFolios(
     @CurrentTenant() tenantId: string,
     @Param('branchId', ParseUUIDPipe) branchId: string,
-    @Query('filter') filter?: string,
+    @Query() query: ListFoliosQueryDto,
   ): ReturnType<FoliosService['listFolios']> {
-    const safeFilter = filter === 'outstanding' || filter === 'overdue' ? filter : 'all';
-    return this.foliosService.listFolios(tenantId, branchId, safeFilter);
+    return this.foliosService.listFolios(tenantId, branchId, query.filter ?? 'all', { limit: query.limit, offset: query.offset });
   }
 
   @Post('folios/:folioId/charges')
@@ -93,7 +93,7 @@ export class FoliosController {
   @BranchOf('folio', 'folioId')
   @Permission('folios', 'update')
   @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk, SystemRole.Accountant)
-  @ApiOperation({ summary: 'Close/settle a folio — only permitted at a zero or credit balance' })
+  @ApiOperation({ summary: 'Close/settle a folio — only at exactly zero: money owed is collected first, a credit is refunded first' })
   closeFolio(
     @CurrentTenant() tenantId: string,
     @CurrentUser() user: JwtPayload,

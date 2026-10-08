@@ -1,5 +1,6 @@
 import { ApiProperty } from '@nestjs/swagger';
-import { IsISO8601, IsObject } from 'class-validator';
+import { IsObject } from 'class-validator';
+import { IsDateOnly } from '../../../common/validation/is-date-only.decorator';
 
 /**
  * Loose on purpose, strict at the point of use: each connector parses its own
@@ -15,10 +16,10 @@ export class SaveConnectionDto {
 
 export class ExportRangeQueryDto {
   @ApiProperty({ example: '2026-09-01', description: 'First day, inclusive (the property’s own calendar)' })
-  @IsISO8601({ strict: true })
+  @IsDateOnly()
   from!: string;
 
   @ApiProperty({ example: '2026-09-15', description: 'Last day, inclusive' })
-  @IsISO8601({ strict: true })
+  @IsDateOnly()
   to!: string;
 }

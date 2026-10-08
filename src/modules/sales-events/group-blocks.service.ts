@@ -48,6 +48,9 @@ export interface RoomingListResult {
   failed: Array<{ row: number; guestName: string; message: string }>;
 }
 
+/** How far outside a block's own nights a group booking may reach — the early-arrival and late-departure nights a group contract covers. */
+const SHOULDER_NIGHTS = 2;
+
 function invalid(message: string): BadRequestException {
   return new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message });
 }
@@ -207,6 +210,8 @@ export class GroupBlocksService {
     const checkInDate = dto.checkInDate ?? isoDate(block.arrivalDate);
     const checkOutDate = dto.checkOutDate ?? isoDate(block.departureDate);
     if (!checkInDate || !checkOutDate) throw invalid('Give the stay dates — this block has none of its own');
+    const outside = this.outsideBlock(block, checkInDate, checkOutDate);
+    if (outside) throw invalid(`A group block books only its own nights: ${outside}`);
 
     const reservation = await this.reservationsService.createReservation(
       tenantId,
@@ -234,6 +239,26 @@ export class GroupBlocksService {
    * left. A row the booking itself refuses (a room type that sleeps two, say)
    * is reported with its reason and the rest carry on.
    */
+  /**
+   * A block books its own nights only. Its rate was negotiated for those
+   * dates; a booking outside them took a room off the block's allotment while
+   * the guest paid the group rate for a weekend months away. A block made
+   * before stay dates existed has none to check against.
+   */
+  private outsideBlock(block: { arrivalDate: Date | null; departureDate: Date | null }, checkInDate: string, checkOutDate: string): string | null {
+    const arrival = isoDate(block.arrivalDate);
+    const departure = isoDate(block.departureDate);
+    if (!arrival || !departure) return null;
+    // A group contract usually covers a night or two either side of the event
+    // for early arrivals and late departures — the shoulder nights. Anything
+    // beyond that is not the group's stay.
+    const shift = (day: string, nights: number) => new Date(new Date(`${day}T00:00:00.000Z`).getTime() + nights * 86_400_000).toISOString().slice(0, 10);
+    if (checkInDate < shift(arrival, -SHOULDER_NIGHTS) || checkOutDate > shift(departure, SHOULDER_NIGHTS)) {
+      return `the stay must fall within the block's dates (${arrival} to ${departure}, give or take ${SHOULDER_NIGHTS} shoulder nights) — book other dates as an ordinary reservation`;
+    }
+    return null;
+  }
+
   async importRoomingList(tenantId: string, blockId: string, dto: RoomingListDto, actor: JwtPayload): Promise<RoomingListResult> {
     const { block, pickup } = await this.prisma.withTenant(tenantId, async (tx) => {
       const found = await tx.groupBlock.findFirst({ where: { id: blockId } });
@@ -254,6 +279,10 @@ export class GroupBlocksService {
       if (!guestName) problems.push(`Row ${rowNumber}: the guest's name is missing`);
       if (!checkInDate || !checkOutDate) problems.push(`Row ${rowNumber}: no stay dates, and the block has none to fall back on`);
       else if (checkOutDate <= checkInDate) problems.push(`Row ${rowNumber}: check-out must be after check-in`);
+      else {
+        const outside = this.outsideBlock(block, checkInDate, checkOutDate);
+        if (outside) problems.push(`Row ${rowNumber}: ${outside}`);
+      }
       return { rowNumber, guestName, checkInDate: checkInDate ?? '', checkOutDate: checkOutDate ?? '', row };
     });
     if (problems.length > 0) {

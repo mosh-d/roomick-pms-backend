@@ -52,7 +52,7 @@ export class FeatureFlagsService {
    * genuine platform/engineering territory this pass doesn't build a
    * console for (see the module's own header comment).
    */
-  async setEnabledForTenant(tenantId: string, flagId: string, enabled: boolean): Promise<TenantFeatureFlag> {
+  async setEnabledForTenant(tenantId: string, flagId: string, enabled: boolean, actorId?: string): Promise<TenantFeatureFlag> {
     const flag = await this.prisma.featureFlag.findUnique({ where: { id: flagId } });
     if (!flag) throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Feature flag not found' });
 
@@ -64,8 +64,15 @@ export class FeatureFlagsService {
 
     const updated = await this.prisma.featureFlag.update({
       where: { id: flagId },
-      data: { enabledForTenants: nextTenants, updatedBy: tenantId },
+      // Who flipped it — it used to record the organisation's id as the person.
+      data: { enabledForTenants: nextTenants, updatedBy: actorId ?? tenantId },
     });
+    // The flag table is global; the audit trail is the tenant's own.
+    await this.prisma.withTenant(tenantId, (tx) =>
+      tx.auditLog.create({
+        data: { tenantId, userId: actorId ?? null, action: enabled ? 'feature_flag.enabled' : 'feature_flag.disabled', entityType: 'feature_flag', entityId: flagId, after: { name: flag.name, enabled } },
+      }),
+    );
 
     return {
       id: updated.id,

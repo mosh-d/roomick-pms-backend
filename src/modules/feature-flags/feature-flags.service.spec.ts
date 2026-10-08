@@ -7,11 +7,12 @@ const TENANT_B = '22222222-2222-4222-8222-222222222222';
 
 describe('FeatureFlagsService', () => {
   let service: FeatureFlagsService;
-  let prisma: { featureFlag: { findMany: jest.Mock; findUnique: jest.Mock; update: jest.Mock } };
+  let prisma: { featureFlag: { findMany: jest.Mock; findUnique: jest.Mock; update: jest.Mock }; withTenant: jest.Mock };
 
   beforeEach(async () => {
     prisma = {
       featureFlag: { findMany: jest.fn(), findUnique: jest.fn(), update: jest.fn() },
+      withTenant: jest.fn((_t: string, fn: (x: unknown) => unknown) => fn({ auditLog: { create: jest.fn().mockResolvedValue({}) } })),
     };
     const moduleRef = await Test.createTestingModule({
       providers: [FeatureFlagsService, { provide: PrismaService, useValue: prisma }],

@@ -56,7 +56,19 @@ export interface FolioTotals {
  * resolve before departure; a departed guest who still owes is a City
  * Ledger receivable, i.e. collections. Never blocks anything — it's a label.
  */
-export type FolioGuestStatus = 'in_house' | 'city_ledger' | null;
+/** `refund_due` — the bill holds a credit: the guest is owed money, and the bill can't close until it goes back. */
+export type FolioGuestStatus = 'in_house' | 'city_ledger' | 'refund_due' | null;
+
+/**
+ * `in_house` — open bills of guests currently checked in (what the front-desk
+ * pages need for live balances, instead of every bill the branch ever had);
+ * `refund_due` — bills with a credit owed to the guest.
+ */
+export type FolioListFilter = 'all' | 'outstanding' | 'overdue' | 'in_house' | 'refund_due';
+
+/** The `all` list is paged; the others are already narrowed to open bills. */
+export const FOLIO_LIST_LIMIT = 200;
+export const FOLIO_LIST_MAX = 500;
 
 /**
  * The night's own price, as the resolver quoted it when the stay was booked
@@ -876,6 +888,14 @@ export class FoliosService {
           message: `Folio still has an outstanding balance of ${totals.balanceDue.toFixed(2)}`,
         });
       }
+      // A credit is money owed to the guest. Closing over it made the credit
+      // vanish from every outstanding list — refund it or move it first.
+      if (totals.balanceDue.lessThan(0)) {
+        throw new ConflictException({
+          code: ErrorCode.FOLIO_CREDIT_BALANCE,
+          message: `The guest is owed ${totals.balanceDue.negated().toFixed(2)} on this bill — refund it, or transfer it to another bill, before closing`,
+        });
+      }
       const settled = await tx.folio.update({
         where: { id: folioId },
         data: { status: 'settled', closedAt: new Date() },
@@ -890,7 +910,8 @@ export class FoliosService {
   /** Settles a folio if it is fully paid, WITHOUT throwing when it isn't — the check-out path (which must never block). Returns whether it settled. */
   async settleIfFullyPaid(tx: TenantTx, folio: Folio, actorId: string | null, via: string): Promise<boolean> {
     const totals = await this.computeTotals(tx, folio.id);
-    if (totals.balanceDue.greaterThan(0)) return false;
+    // Exactly zero: a bill the guest still owes on, or is owed on, stays open.
+    if (!totals.balanceDue.isZero()) return false;
     await tx.folio.update({ where: { id: folio.id }, data: { status: 'settled', closedAt: new Date() } });
     await this.audit(tx, folio.tenantId, folio.branchId, actorId, 'folio.closed', folio.id, {
       balanceDue: totals.balanceDue.toFixed(2),
@@ -1029,11 +1050,17 @@ export class FoliosService {
    * the guest's check-out date has already passed (i.e. a City Ledger
    * receivable) — `PMS-OPERATIONS-GUIDE.md:221`.
    */
-  async listFolios(tenantId: string, branchId: string, filter: 'all' | 'outstanding' | 'overdue') {
+  async listFolios(tenantId: string, branchId: string, filter: FolioListFilter, page: { limit?: number; offset?: number } = {}) {
     return this.prisma.withTenant(tenantId, async (tx) => {
       const branch = await this.propertyService.assertBranch(tx, branchId);
+      const take = Math.min(Math.max(page.limit ?? FOLIO_LIST_LIMIT, 1), FOLIO_LIST_MAX);
       const folios = await tx.folio.findMany({
-        where: { branchId, deletedAt: null, ...(filter === 'all' ? {} : { status: { not: 'settled' } }) },
+        where: {
+          branchId,
+          deletedAt: null,
+          ...(filter === 'all' ? {} : { status: { not: 'settled' } }),
+          ...(filter === 'in_house' ? { reservation: { is: { status: 'checked_in', deletedAt: null } } } : {}),
+        },
         include: {
           guest: { select: { id: true, name: true } },
           reservation: {
@@ -1041,30 +1068,33 @@ export class FoliosService {
           },
         },
         orderBy: { openedAt: 'desc' },
+        ...(filter === 'all' ? { take, skip: Math.max(page.offset ?? 0, 0) } : {}),
       });
 
+      // Every balance from two grouped sums, not a pair of queries per bill —
+      // the old loop re-read every line item and payment the branch ever had.
+      const balances = await this.balancesFor(tx, folios.map((f) => f.id));
       const today = toBranchDate(todayInTimezone(branch.timezone));
-      const rows = await Promise.all(
-        folios.map(async (folio) => {
-          const totals = await this.computeTotals(tx, folio.id);
-          return {
-            id: folio.id,
-            // `null` on the primary folio; a split folio's own name ("Company"). Without it, every folio on a
-            // reservation reads identically in a list — same guest, same room.
-            label: folio.label,
-            status: folio.status,
-            openedAt: folio.openedAt,
-            closedAt: folio.closedAt,
-            guest: folio.guest,
-            reservation: folio.reservation,
-            balanceDue: totals.balanceDue,
-            currency: branch.currency,
-            guestStatus: this.deriveGuestStatus(folio.reservation?.status ?? null, totals.balanceDue),
-          };
-        }),
-      );
+      const rows = folios.map((folio) => {
+        const balanceDue = balances.get(folio.id) ?? ZERO;
+        return {
+          id: folio.id,
+          // `null` on the primary folio; a split folio's own name ("Company"). Without it, every folio on a
+          // reservation reads identically in a list — same guest, same room.
+          label: folio.label,
+          status: folio.status,
+          openedAt: folio.openedAt,
+          closedAt: folio.closedAt,
+          guest: folio.guest,
+          reservation: folio.reservation,
+          balanceDue,
+          currency: branch.currency,
+          guestStatus: this.deriveGuestStatus(folio.reservation?.status ?? null, balanceDue),
+        };
+      });
 
       if (filter === 'outstanding') return rows.filter((r) => r.balanceDue.greaterThan(0));
+      if (filter === 'refund_due') return rows.filter((r) => r.balanceDue.lessThan(0));
       if (filter === 'overdue') {
         // `guestStatus === 'city_ledger'` (not just "balance>0 and checkOutDate
         // passed" alone) — a guest who's STILL checked in past their own
@@ -1171,6 +1201,19 @@ export class FoliosService {
   }
 
   /** `balance = SUM(line_items not void/deleted) − SUM(payments not void)` — computed, never stored (spec §4.5). */
+  /** Each bill's balance — charges (tax rows included) less payments — in two grouped sums for any number of bills. */
+  private async balancesFor(tx: TenantTx, folioIds: string[]): Promise<Map<string, Prisma.Decimal>> {
+    const balances = new Map<string, Prisma.Decimal>(folioIds.map((id) => [id, ZERO]));
+    if (folioIds.length === 0) return balances;
+    const [charges, payments] = await Promise.all([
+      tx.lineItem.groupBy({ by: ['folioId'], where: { folioId: { in: folioIds }, isVoid: false, deletedAt: null }, _sum: { amount: true } }),
+      tx.payment.groupBy({ by: ['folioId'], where: { folioId: { in: folioIds }, isVoid: false, deletedAt: null }, _sum: { amount: true } }),
+    ]);
+    for (const row of charges) balances.set(row.folioId, (balances.get(row.folioId) ?? ZERO).plus(row._sum.amount ?? ZERO));
+    for (const row of payments) balances.set(row.folioId, (balances.get(row.folioId) ?? ZERO).minus(row._sum.amount ?? ZERO));
+    return balances;
+  }
+
   private async computeTotals(tx: TenantTx, folioId: string): Promise<FolioTotals> {
     const [lineItems, payments] = await Promise.all([
       tx.lineItem.findMany({
@@ -1206,6 +1249,7 @@ export class FoliosService {
    * The same holds for an unpaid cancellation charge.
    */
   private deriveGuestStatus(reservationStatus: string | null, balanceDue: Prisma.Decimal): FolioGuestStatus {
+    if (balanceDue.lessThan(0)) return 'refund_due';
     if (!balanceDue.greaterThan(0)) return null;
     if (reservationStatus === 'checked_out' || reservationStatus === 'no_show' || reservationStatus === 'cancelled') return 'city_ledger';
     if (reservationStatus === 'checked_in') return 'in_house';

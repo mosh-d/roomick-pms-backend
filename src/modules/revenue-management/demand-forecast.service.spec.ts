@@ -76,14 +76,13 @@ describe('DemandForecastService', () => {
     expect(callArgs.from).toBe(branchCreatedAt.toISOString().slice(0, 10));
   });
 
-  it('collapses the queried range to a single day for a branch created today, rather than treating any prior day as real history', async () => {
-    // A few seconds in the past, not `new Date()` itself — otherwise this
-    // and the service's own `today` can land on the identical millisecond,
-    // making `lookbackFrom < today` false and skipping the call entirely.
+  it('skips the history query for a branch created today and reports every day as "not enough data"', async () => {
+    // Created earlier today: there is no completed night to learn from, and asking the
+    // occupancy report for an empty range would say nothing either.
     branchCreatedAt = new Date(Date.now() - 5_000);
-    reportsService.getOccupancy.mockResolvedValue({ trend: [{ period: branchCreatedAt.toISOString().slice(0, 10), occupancyPct: 0 }] });
-    await service.getForecast(TENANT_ID, BRANCH_ID, 7);
-    const callArgs = reportsService.getOccupancy.mock.calls[0][2];
-    expect(callArgs.from).toBe(callArgs.to);
+    const forecast = await service.getForecast(TENANT_ID, BRANCH_ID, 7);
+    expect(reportsService.getOccupancy).not.toHaveBeenCalled();
+    expect(forecast).toHaveLength(7);
+    expect(forecast.every((d) => d.forecastOccupancyPct === null && d.historicalSampleSize === 0)).toBe(true);
   });
 });

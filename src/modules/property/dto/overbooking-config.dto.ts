@@ -1,6 +1,7 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
-import { IsBoolean, IsISO8601, IsNumber, IsOptional, IsUUID, Max, Min } from 'class-validator';
+import { IsBoolean, IsNumber, IsOptional, IsUUID, Max, Min } from 'class-validator';
+import { IsDateOnly } from '../../../common/validation/is-date-only.decorator';
 
 export class UpdateOverbookingConfigDto {
   @ApiPropertyOptional({ description: 'Scope to one room type; omit = all types' })
@@ -31,11 +32,11 @@ export class UpdateOverbookingConfigDto {
 
   @ApiPropertyOptional({ example: '2026-12-01' })
   @IsOptional()
-  @IsISO8601({ strict: true })
+  @IsDateOnly()
   validFrom?: string;
 
   @ApiPropertyOptional({ example: '2027-01-15' })
   @IsOptional()
-  @IsISO8601({ strict: true })
+  @IsDateOnly()
   validTo?: string;
 }

@@ -78,6 +78,14 @@ export class RateRecommendationsService {
       throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: 'There is no adjustment to approve for this date' });
     }
     const nextDay = new Date(new Date(`${dto.date}T00:00:00.000Z`).getTime() + 86_400_000).toISOString().slice(0, 10);
+    // Approving the same night twice used to stack two seasonal plans on it;
+    // the newer approval retires the earlier one for that night first.
+    await this.prisma.withTenant(tenantId, (tx) =>
+      tx.ratePlan.updateMany({
+        where: { branchId, roomTypeId: dto.roomTypeId, type: 'seasonal', isActive: true, name: { startsWith: 'Rate Recommendation — ' }, validFrom: new Date(`${dto.date}T00:00:00.000Z`) },
+        data: { isActive: false },
+      }),
+    );
     return this.rateResolverService.createRatePlan(tenantId, branchId, {
       roomTypeId: dto.roomTypeId,
       name: `Rate Recommendation — ${dto.date}`,

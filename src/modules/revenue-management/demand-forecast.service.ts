@@ -49,8 +49,10 @@ export class DemandForecastService {
     const branch = await this.prisma.withTenant(tenantId, (tx) => tx.branch.findFirst({ where: { id: branchId }, select: { createdAt: true } }));
     const lookbackFrom = branch && branch.createdAt > earliestLookback ? branch.createdAt : earliestLookback;
 
+    // Compared as calendar days: a branch created earlier today has no history yet, and an
+    // empty range is what the report would return anyway.
     const historical =
-      lookbackFrom < today ? await this.reportsService.getOccupancy(tenantId, branchId, { from: isoDate(lookbackFrom), to: isoDate(today), groupBy: 'day' }) : { trend: [] };
+      isoDate(lookbackFrom) < isoDate(today) ? await this.reportsService.getOccupancy(tenantId, branchId, { from: isoDate(lookbackFrom), to: isoDate(today), groupBy: 'day' }) : { trend: [] };
 
     const byWeekday = new Map<number, number[]>();
     for (const entry of historical.trend) {

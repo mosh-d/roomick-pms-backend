@@ -1,7 +1,8 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import { MaintenancePriority, MaintenanceStatus } from '@prisma/client';
-import { IsArray, IsBoolean, IsIn, IsInt, IsISO8601, IsOptional, IsPositive, IsString, IsUUID, MaxLength } from 'class-validator';
+import { IsArray, IsBoolean, IsIn, IsInt, IsOptional, IsPositive, IsString, IsUUID, MaxLength } from 'class-validator';
+import { IsDateOnly } from '../../../common/validation/is-date-only.decorator';
 
 /**
  * The architecture map's own payload (`location: {roomId?, areaId?}`,
@@ -58,7 +59,7 @@ export class UpdateWorkOrderDto {
   @ApiPropertyOptional({ description: 'Staff member to assign this to' })
   @IsOptional()
   @IsUUID()
-  assignedTo?: string;
+  assignedTo?: string | null;
 
   @ApiPropertyOptional()
   @IsOptional()
@@ -98,12 +99,12 @@ export class CreateAssetDto {
 
   @ApiPropertyOptional({ example: '2024-03-01' })
   @IsOptional()
-  @IsISO8601({ strict: true })
+  @IsDateOnly()
   purchaseDate?: string;
 
   @ApiPropertyOptional({ example: '2027-03-01' })
   @IsOptional()
-  @IsISO8601({ strict: true })
+  @IsDateOnly()
   warrantyUntil?: string;
 
   @ApiPropertyOptional({ example: 180, description: 'Preventive maintenance cadence, in days' })
@@ -117,4 +118,11 @@ export class CreateAssetDto {
   @IsOptional()
   @IsString()
   notes?: string;
+}
+
+export class ListWorkOrdersQueryDto {
+  @ApiPropertyOptional({ enum: ['open', 'in_progress', 'on_hold', 'resolved', 'cancelled'] })
+  @IsOptional()
+  @IsIn(['open', 'in_progress', 'on_hold', 'resolved', 'cancelled'])
+  status?: MaintenanceStatus;
 }

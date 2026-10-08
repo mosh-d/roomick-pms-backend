@@ -1,7 +1,8 @@
 import { Body, Controller, Get, Param, ParseUUIDPipe, Patch } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
-import { CurrentTenant } from '../../common/decorators';
+import { CurrentTenant, CurrentUser } from '../../common/decorators';
 import { Roles, SystemRole } from '../../common/decorators/roles.decorator';
+import { JwtPayload } from '../../common/types/request-context';
 import { ToggleFeatureFlagDto } from './dto/feature-flags.dto';
 import { FeatureFlagsService } from './feature-flags.service';
 
@@ -22,9 +23,10 @@ export class FeatureFlagsController {
   @ApiOperation({ summary: "Opt this tenant in or out of a flag — never touches global rollout or any other tenant's membership" })
   toggle(
     @CurrentTenant() tenantId: string,
+    @CurrentUser() user: JwtPayload,
     @Param('flagId', ParseUUIDPipe) flagId: string,
     @Body() dto: ToggleFeatureFlagDto,
   ): ReturnType<FeatureFlagsService['setEnabledForTenant']> {
-    return this.featureFlagsService.setEnabledForTenant(tenantId, flagId, dto.enabled);
+    return this.featureFlagsService.setEnabledForTenant(tenantId, flagId, dto.enabled, user.sub);
   }
 }

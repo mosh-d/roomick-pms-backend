@@ -1,6 +1,7 @@
 import { Body, Controller, Get, Param, ParseUUIDPipe, Post } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiPropertyOptional, ApiTags } from '@nestjs/swagger';
-import { IsISO8601, IsOptional } from 'class-validator';
+import { IsOptional } from 'class-validator';
+import { IsDateOnly } from '../../common/validation/is-date-only.decorator';
 import { CurrentTenant, CurrentUser } from '../../common/decorators';
 import { Permission } from '../../common/decorators/permission.decorator';
 import { ALL_SYSTEM_ROLES, Roles, SystemRole } from '../../common/decorators/roles.decorator';
@@ -10,7 +11,7 @@ import { NightAuditService } from './night-audit.service';
 export class RunNightAuditDto {
   @ApiPropertyOptional({ example: '2026-08-26', description: 'Date to close. Defaults to yesterday in the branch timezone.' })
   @IsOptional()
-  @IsISO8601({ strict: true })
+  @IsDateOnly()
   auditDate?: string;
 }
 

@@ -1,7 +1,7 @@
 import { Test } from '@nestjs/testing';
 import { MAIL_TRANSPORT } from '../../common/mail/mail-transport.interface';
 import { PrismaService } from '../../prisma/prisma.service';
-import { CommsDispatcherService } from './comms-dispatcher.service';
+import { CommsDispatcherService, MAX_ATTEMPTS } from './comms-dispatcher.service';
 
 const TENANT_ID = '11111111-1111-4111-8111-111111111111';
 
@@ -33,7 +33,7 @@ describe('CommsDispatcherService', () => {
     it('only picks up queued EMAIL rows — other channels have no transport and must not be touched', async () => {
       await service.dispatchForTenant(TENANT_ID);
       expect(tx.communicationLog.findMany).toHaveBeenCalledWith(
-        expect.objectContaining({ where: { deliveryStatus: 'queued', channel: 'email', direction: 'outbound' } }),
+        expect.objectContaining({ where: expect.objectContaining({ deliveryStatus: 'queued', channel: 'email', direction: 'outbound' }) }),
       );
     });
 
@@ -81,19 +81,38 @@ describe('CommsDispatcherService', () => {
       expect(summary.failed).toBe(1);
     });
 
-    it('marks a row failed — not back to queued — when the transport throws, so a broken address cannot loop forever', async () => {
+    it('a transport error is tried again later — attempts counted, the next try scheduled — not failed on the first error', async () => {
       tx.communicationLog.findMany.mockResolvedValue([queuedRow()]);
       transport.send.mockRejectedValue(new Error('smtp refused'));
       const summary = await service.dispatchForTenant(TENANT_ID);
-      expect(tx.communicationLog.update).toHaveBeenCalledWith({ where: { id: 'log-1' }, data: { deliveryStatus: 'failed' } });
+      expect(tx.communicationLog.update).toHaveBeenCalledWith({
+        where: { id: 'log-1' },
+        data: { attempts: 1, nextAttemptAt: expect.any(Date), lastError: 'smtp refused' },
+      });
+      const scheduled = (tx.communicationLog.update.mock.calls[0] as [{ data: { nextAttemptAt: Date } }])[0].data.nextAttemptAt;
+      expect(scheduled.getTime() - Date.now()).toBeGreaterThan(50_000);
+      expect(summary).toEqual({ sent: 0, failed: 0, skipped: 1 });
+    });
+
+    it('gives up after the last attempt, so a permanently broken address cannot loop forever', async () => {
+      tx.communicationLog.findMany.mockResolvedValue([queuedRow({ attempts: MAX_ATTEMPTS - 1 })]);
+      transport.send.mockRejectedValue(new Error('smtp refused'));
+      const summary = await service.dispatchForTenant(TENANT_ID);
+      expect(tx.communicationLog.update).toHaveBeenCalledWith({ where: { id: 'log-1' }, data: { deliveryStatus: 'failed', attempts: MAX_ATTEMPTS, lastError: 'smtp refused' } });
       expect(summary).toEqual({ sent: 0, failed: 1, skipped: 0 });
+    });
+
+    it('only picks up rows that are due — never tried, or whose next try has come', async () => {
+      await service.dispatchForTenant(TENANT_ID);
+      const where = (tx.communicationLog.findMany.mock.calls[0] as [{ where: { OR: unknown[] } }])[0].where;
+      expect(where.OR).toEqual([{ nextAttemptAt: null }, { nextAttemptAt: { lte: expect.any(Date) } }]);
     });
 
     it('one failing row does not stop the rest of the batch', async () => {
       tx.communicationLog.findMany.mockResolvedValue([queuedRow({ id: 'a' }), queuedRow({ id: 'b' }), queuedRow({ id: 'c' })]);
       transport.send.mockRejectedValueOnce(new Error('transient')).mockResolvedValue({ externalMessageId: 'prov-x' });
       const summary = await service.dispatchForTenant(TENANT_ID);
-      expect(summary).toEqual({ sent: 2, failed: 1, skipped: 0 });
+      expect(summary).toEqual({ sent: 2, failed: 0, skipped: 1 });
     });
   });
 

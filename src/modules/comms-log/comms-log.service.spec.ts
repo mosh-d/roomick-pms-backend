@@ -15,14 +15,19 @@ function makeTx() {
       findFirst: jest.fn().mockResolvedValue({ id: RESERVATION_ID, branchId: BRANCH_ID, guestId: GUEST_ID }),
       findMany: jest.fn().mockResolvedValue([]),
     },
-    guestProfile: { findFirst: jest.fn().mockResolvedValue({ id: GUEST_ID, name: 'Ada Okafor', email: 'ada@example.com', phone: null }) },
+    guestProfile: {
+      findFirst: jest.fn().mockResolvedValue({ id: GUEST_ID, name: 'Ada Okafor', email: 'ada@example.com', phone: null }),
+      findMany: jest.fn().mockResolvedValue([]),
+    },
     communicationLog: {
       create: jest.fn().mockImplementation(({ data }: { data: Record<string, unknown> }) => Promise.resolve({ id: 'comm-1', ...data })),
       findMany: jest.fn().mockResolvedValue([]),
       findFirst: jest.fn().mockResolvedValue(null),
       count: jest.fn().mockResolvedValue(0),
+      groupBy: jest.fn().mockResolvedValue([]),
       updateMany: jest.fn().mockResolvedValue({ count: 0 }),
     },
+    $queryRaw: jest.fn().mockResolvedValue([]),
   };
 }
 
@@ -80,32 +85,39 @@ describe('CommsLogService', () => {
       const where = tx.communicationLog.findMany.mock.calls[0][0].where;
       expect(where.guestId).toBe(GUEST_ID);
       expect(where.sentAt.gte).toEqual(new Date('2026-01-01'));
-      expect(where.sentAt.lte).toEqual(new Date('2026-02-01'));
+      // `to` is a calendar day, so the filter runs to the end of it.
+      expect(where.sentAt.lt).toEqual(new Date('2026-02-02'));
     });
   });
 
   describe('unified inbox', () => {
-    type Where = { where: { id?: string; guestId?: string } };
 
     it('lists only guests who have written in — newest activity first, with unread counts and a short preview', async () => {
       tx.communicationLog.findMany.mockResolvedValueOnce([{ guestId: 'g-old' }, { guestId: 'g-new' }]);
-      tx.guestProfile.findFirst.mockImplementation(({ where }: Where) => Promise.resolve({ id: where.id, name: where.id, email: null, phone: null }));
-      tx.communicationLog.findFirst.mockImplementation(({ where }: Where) =>
-        Promise.resolve({
-          direction: 'inbound', channel: 'in_app_chat', trigger: 'guest_message', body: 'x'.repeat(300),
-          sentAt: where.guestId === 'g-new' ? new Date('2026-10-02') : new Date('2026-10-01'),
-        }),
-      );
-      tx.communicationLog.count.mockImplementation(({ where }: Where) => Promise.resolve(where.guestId === 'g-new' ? 2 : 0));
-      tx.reservation.findFirst.mockResolvedValue(null);
+      tx.guestProfile.findMany.mockResolvedValue([
+        { id: 'g-old', name: 'g-old', email: null, phone: null },
+        { id: 'g-new', name: 'g-new', email: null, phone: null },
+      ]);
+      // The latest message per guest, then the latest booking per guest — one DISTINCT ON query each.
+      tx.$queryRaw
+        .mockResolvedValueOnce([
+          { guestId: 'g-old', direction: 'inbound', channel: 'in_app_chat', trigger: 'guest_message', body: 'x'.repeat(300), sentAt: new Date('2026-10-01') },
+          { guestId: 'g-new', direction: 'inbound', channel: 'in_app_chat', trigger: 'guest_message', body: 'x'.repeat(300), sentAt: new Date('2026-10-02') },
+        ])
+        .mockResolvedValueOnce([]);
+      tx.communicationLog.groupBy.mockResolvedValue([{ guestId: 'g-new', _count: { _all: 2 } }]);
 
       const inbox = await service.listInbox(TENANT_ID, BRANCH_ID, 'all');
       expect(tx.communicationLog.findMany.mock.calls[0][0].where).toEqual({ branchId: BRANCH_ID, direction: 'inbound' });
       expect(inbox.map((c) => c.guest.id)).toEqual(['g-new', 'g-old']);
       expect(inbox[0].unreadCount).toBe(2);
+      expect(inbox[1].unreadCount).toBe(0);
       expect(inbox[0].lastMessage.preview).toHaveLength(161);
       // A newsletter sent after the guest wrote in must not become their conversation's preview.
-      expect(tx.communicationLog.findFirst.mock.calls[0][0].where).toEqual({ branchId: BRANCH_ID, guestId: expect.any(String), trigger: { not: MARKETING_CAMPAIGN_TRIGGER } });
+      const latestMessageSql = (tx.$queryRaw.mock.calls[0][0] as readonly string[]).join('?');
+      expect(latestMessageSql).toContain('DISTINCT ON ("guestId")');
+      expect(latestMessageSql).toContain('trigger <> ?');
+      expect(tx.$queryRaw.mock.calls[0].slice(1)).toContain(MARKETING_CAMPAIGN_TRIGGER);
     });
 
     it('the unread filter only looks at inbound messages nobody has read', async () => {

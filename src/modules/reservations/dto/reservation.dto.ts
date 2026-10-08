@@ -7,7 +7,6 @@ import {
   IsBoolean,
   IsIn,
   IsInt,
-  IsISO8601,
   IsNumber,
   IsOptional,
   IsString,
@@ -19,6 +18,7 @@ import {
   MinLength,
   ValidateNested,
 } from 'class-validator';
+import { IsDateOnly } from '../../../common/validation/is-date-only.decorator';
 import { ReservationChannel, ReservationStatus } from '@prisma/client';
 import { CreateGuestDto, RecordIdDocumentDto } from '../../guests/dto/guest.dto';
 
@@ -47,11 +47,11 @@ export class CreateReservationDto {
   roomTypeId!: string;
 
   @ApiProperty({ example: '2026-09-01' })
-  @IsISO8601({ strict: true })
+  @IsDateOnly()
   checkInDate!: string;
 
   @ApiProperty({ example: '2026-09-04', description: 'Exclusive — the last night stayed is the day before this' })
-  @IsISO8601({ strict: true })
+  @IsDateOnly()
   checkOutDate!: string;
 
   @ApiProperty({ example: 2 })
@@ -132,7 +132,7 @@ export class WalkInReservationDto {
     example: '2026-09-04',
     description: 'checkInDate is NOT accepted — the server forces it to today in the branch timezone',
   })
-  @IsISO8601({ strict: true })
+  @IsDateOnly()
   checkOutDate!: string;
 
   @ApiProperty({ example: 2 })
@@ -244,7 +244,7 @@ export class RoomMoveQuoteQueryDto {
 
 export class ExtendStayDto {
   @ApiProperty({ example: '2026-09-06', description: 'Must be strictly after the reservation\'s current checkOutDate' })
-  @IsISO8601({ strict: true })
+  @IsDateOnly()
   checkOutDate!: string;
 }
 
@@ -289,11 +289,11 @@ export class CancelWithWaiverDto extends CancelReservationDto {
 
 export class AvailabilityQueryDto {
   @ApiProperty({ example: '2026-09-01' })
-  @IsISO8601({ strict: true })
+  @IsDateOnly()
   from!: string;
 
   @ApiProperty({ example: '2026-09-04', description: 'Exclusive' })
-  @IsISO8601({ strict: true })
+  @IsDateOnly()
   to!: string;
 
   @ApiProperty()
@@ -361,12 +361,12 @@ export class ListReservationsQueryDto {
 export class ModifyReservationDto {
   @ApiPropertyOptional({ example: '2026-09-02' })
   @IsOptional()
-  @IsISO8601({ strict: true })
+  @IsDateOnly()
   checkInDate?: string;
 
   @ApiPropertyOptional({ example: '2026-09-05' })
   @IsOptional()
-  @IsISO8601({ strict: true })
+  @IsDateOnly()
   checkOutDate?: string;
 
   @ApiPropertyOptional()
@@ -404,11 +404,11 @@ export class ModifyReservationDto {
  */
 export class ReinstateNoShowDto {
   @ApiProperty({ example: '2026-09-02' })
-  @IsISO8601({ strict: true })
+  @IsDateOnly()
   checkInDate!: string;
 
   @ApiProperty({ example: '2026-09-05' })
-  @IsISO8601({ strict: true })
+  @IsDateOnly()
   checkOutDate!: string;
 
   @ApiPropertyOptional({ description: 'Also waive the no-show penalty (if any) as part of the reinstatement' })
@@ -440,4 +440,11 @@ export class WalkReservationDto {
   @IsString()
   @MaxLength(500)
   compensationOffered?: string;
+}
+
+export class DateOnlyQueryDto {
+  @ApiPropertyOptional({ example: '2026-10-08', description: 'Defaults to today at the branch' })
+  @IsOptional()
+  @IsDateOnly()
+  date?: string;
 }

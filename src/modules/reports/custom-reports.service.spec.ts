@@ -105,9 +105,9 @@ describe('CustomReportsService', () => {
     expect(result.rows).toEqual([{ guestName: 'Ada Obi', company: 'Dangote Group' }]);
   });
 
-  it('the CSV has every row, quoted', async () => {
+  it('the CSV has every row, quoted only where a cell needs it', async () => {
     const csv = await service.runCsv(TENANT_ID, BRANCH_ID, { ...base, fields: ['guestName', 'company'] });
-    expect(csv.split('\n')).toEqual(['"Guest","Company"', '"Ada Obi","Dangote Group"', '"Bayo Ade",""', '"Chi Eze",""']);
+    expect(csv.split('\n')).toEqual(['Guest,Company', 'Ada Obi,Dangote Group', 'Bayo Ade,', 'Chi Eze,']);
   });
 
   it('refuses a range that ends before it starts', async () => {

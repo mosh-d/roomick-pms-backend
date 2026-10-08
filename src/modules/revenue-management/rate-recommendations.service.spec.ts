@@ -15,7 +15,7 @@ describe('RateRecommendationsService', () => {
   let rateResolverService: { createRatePlan: jest.Mock };
 
   beforeEach(async () => {
-    prisma = { withTenant: jest.fn((_t: string, fn: (x: unknown) => unknown) => fn({ roomType: { findFirst: jest.fn().mockResolvedValue({ id: ROOM_TYPE_ID, baseRate: 100 }) } })) };
+    prisma = { withTenant: jest.fn((_t: string, fn: (x: unknown) => unknown) => fn({ roomType: { findFirst: jest.fn().mockResolvedValue({ id: ROOM_TYPE_ID, baseRate: 100 }) }, ratePlan: { updateMany: jest.fn().mockResolvedValue({ count: 0 }) } })) };
     demandForecastService = { getForecast: jest.fn() };
     rateResolverService = { createRatePlan: jest.fn().mockResolvedValue({ id: 'plan-1' }) };
     const moduleRef = await Test.createTestingModule({
@@ -31,7 +31,7 @@ describe('RateRecommendationsService', () => {
 
   describe('getRecommendations', () => {
     it('throws NOT_FOUND when the room type does not belong to this branch', async () => {
-      prisma.withTenant.mockImplementationOnce((_t: string, fn: (x: unknown) => unknown) => fn({ roomType: { findFirst: jest.fn().mockResolvedValue(null) } }));
+      prisma.withTenant.mockImplementationOnce((_t: string, fn: (x: unknown) => unknown) => fn({ roomType: { findFirst: jest.fn().mockResolvedValue(null) }, ratePlan: { updateMany: jest.fn().mockResolvedValue({ count: 0 }) } }));
       await expect(service.getRecommendations(TENANT_ID, BRANCH_ID, ROOM_TYPE_ID)).rejects.toMatchObject({ status: 404 });
     });
 

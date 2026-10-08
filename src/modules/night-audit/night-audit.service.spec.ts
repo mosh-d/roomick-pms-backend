@@ -5,6 +5,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { PropertyService } from '../property/property.service';
 import { FoliosService } from '../folios/folios.service';
 import { ReservationsService } from '../reservations/reservations.service';
+import { HousekeepingService } from '../housekeeping/housekeeping.service';
 import { NightAuditService } from './night-audit.service';
 
 const TENANT_ID = '11111111-1111-4111-8111-111111111111';
@@ -73,6 +74,7 @@ describe('NightAuditService', () => {
         { provide: PropertyService, useValue: { assertBranch: jest.fn().mockResolvedValue({ id: BRANCH_ID, timezone: 'Africa/Lagos' }) } },
         { provide: FoliosService, useValue: foliosService },
         { provide: ReservationsService, useValue: reservationsService },
+        { provide: HousekeepingService, useValue: { ensureStayoverTaskInTx: jest.fn().mockResolvedValue(true) } },
       ],
     }).compile();
     service = moduleRef.get(NightAuditService);

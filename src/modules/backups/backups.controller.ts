@@ -1,5 +1,6 @@
 import { Controller, Get, Param, ParseUUIDPipe, Post } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
 import { CurrentTenant } from '../../common/decorators';
 import { Roles, SystemRole } from '../../common/decorators/roles.decorator';
 import { BackupsService, BackupRecordSummary, RestoreDrillResult } from './backups.service';
@@ -18,6 +19,8 @@ export class BackupsController {
   }
 
   @Post()
+  // A backup is a full copy of the organisation's data on disk; a few an hour is plenty, a loop is not.
+  @Throttle({ default: { limit: 3, ttl: 3_600_000 } })
   @ApiOperation({ summary: 'Trigger an on-demand backup for this tenant, outside the nightly schedule' })
   trigger(@CurrentTenant() tenantId: string): ReturnType<BackupsService['runTenantBackup']> {
     return this.backupsService.runTenantBackup(tenantId);

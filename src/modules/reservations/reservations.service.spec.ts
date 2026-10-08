@@ -13,10 +13,18 @@ import { CommsLogService } from '../comms-log/comms-log.service';
 import { RestrictionsService } from '../revenue-management/restrictions.service';
 import { LoyaltyService } from '../loyalty/loyalty.service';
 import { WebhookEventsService } from '../integrations/webhook-events.service';
+import { TaxesService } from '../taxes/taxes.service';
+import { RefundsService } from '../folios/refunds.service';
 import { ReservationsService } from './reservations.service';
 
 /** Webhook events are raised from the same audit calls these tests exercise; what they send is `WebhookEventsService`'s own spec. */
 const webhookEvents = { reservationChanged: jest.fn().mockResolvedValue(undefined), paymentRecorded: jest.fn().mockResolvedValue(undefined) };
+const taxesService = {
+  priceCharge: jest.fn().mockImplementation((_tx: unknown, _branchId: string, _type: string, price: Prisma.Decimal) =>
+    Promise.resolve({ price, net: price, taxes: [], taxTotal: new Prisma.Decimal(0), includedTax: new Prisma.Decimal(0), addedTax: new Prisma.Decimal(0), total: price }),
+  ),
+};
+const refundsService = { refundable: jest.fn().mockResolvedValue({ credit: new Prisma.Decimal(0), available: new Prisma.Decimal(0) }), requestInTx: jest.fn().mockResolvedValue({ id: 'refund-1' }) };
 
 const TENANT_ID = '11111111-1111-4111-8111-111111111111';
 const BRANCH_ID = '33333333-3333-4333-8333-333333333333';
@@ -25,6 +33,7 @@ const ROOM_ID = '77777777-7777-4777-8777-777777777777';
 const GUEST_ID = '55555555-5555-4555-8555-555555555555';
 const RESERVATION_ID = '22222222-2222-4222-8222-222222222222';
 const ACTOR_ID = '44444444-4444-4444-8444-444444444444';
+const ACTOR = { sub: ACTOR_ID, tenantId: TENANT_ID, email: '', roles: [{ role: 'manager', branchId: null }], tokenType: 'access' as const };
 
 function reservation(overrides: Partial<Record<string, unknown>> = {}) {
   return {
@@ -42,6 +51,7 @@ function reservation(overrides: Partial<Record<string, unknown>> = {}) {
     confirmedRate: { toFixed: () => '300.00' },
     deletedAt: null,
     branch: { currency: 'NGN' },
+    guest: { id: GUEST_ID, name: 'Ada Obi', email: 'ada@example.com', phone: null },
     roomType: { name: 'Standard' },
     ...overrides,
   };
@@ -60,7 +70,7 @@ function makeTx() {
     branch: { findFirst: jest.fn().mockResolvedValue({ timezone: 'Africa/Lagos' }) },
     walkRecord: { create: jest.fn().mockImplementation(({ data }: { data: Record<string, unknown> }) => Promise.resolve({ id: 'walk-1', ...data })) },
     folio: { findFirst: jest.fn().mockResolvedValue(null) },
-    payment: { findMany: jest.fn().mockResolvedValue([]), create: jest.fn().mockResolvedValue({}) },
+    payment: { findMany: jest.fn().mockResolvedValue([]), findFirst: jest.fn().mockResolvedValue(null), create: jest.fn().mockResolvedValue({}) },
     reservation: {
       findMany: jest.fn().mockResolvedValue([]),
       groupBy: jest.fn().mockResolvedValue([]),
@@ -108,7 +118,7 @@ describe('ReservationsService', () => {
   let rateResolverService: { resolveStay: jest.Mock; linkAuditLogsToReservation: jest.Mock };
   let registrationCardsService: { generateCardInTx: jest.Mock };
   let commsLogService: { logAutomatedInTx: jest.Mock };
-  let restrictionsService: { assertNoViolation: jest.Mock };
+  let restrictionsService: { assertNoViolation: jest.Mock; assertExtensionAllowed: jest.Mock };
 
   beforeEach(async () => {
     tx = makeTx();
@@ -170,7 +180,7 @@ describe('ReservationsService', () => {
     commsLogService = { logAutomatedInTx: jest.fn().mockResolvedValue({ id: 'comm-1' }) };
     // Every existing test books a stay with no restrictions configured —
     // matches real behavior exactly (a tenant with none sees no violation).
-    restrictionsService = { assertNoViolation: jest.fn().mockResolvedValue(undefined) };
+    restrictionsService = { assertNoViolation: jest.fn().mockResolvedValue(undefined), assertExtensionAllowed: jest.fn().mockResolvedValue(undefined) };
 
     const moduleRef = await Test.createTestingModule({
       providers: [
@@ -190,6 +200,8 @@ describe('ReservationsService', () => {
         { provide: RestrictionsService, useValue: restrictionsService },
         { provide: LoyaltyService, useValue: { earnForStayInTx: jest.fn().mockResolvedValue(0) } },
         { provide: WebhookEventsService, useValue: webhookEvents },
+        { provide: TaxesService, useValue: taxesService },
+        { provide: RefundsService, useValue: refundsService },
       ],
     }).compile();
     service = moduleRef.get(ReservationsService);
@@ -1255,39 +1267,42 @@ describe('ReservationsService', () => {
 
     it('rejects a reservation that is not confirmed', async () => {
       tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'checked_in' }));
-      await expect(service.walkReservation(TENANT_ID, RESERVATION_ID, dto, ACTOR_ID)).rejects.toThrow(ConflictException);
+      await expect(service.walkReservation(TENANT_ID, RESERVATION_ID, dto, ACTOR)).rejects.toThrow(ConflictException);
     });
 
     it('creates a WalkRecord and sets status to "walked" — a distinct status from a plain cancellation', async () => {
       tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'confirmed' }));
-      await service.walkReservation(TENANT_ID, RESERVATION_ID, dto, ACTOR_ID);
+      await service.walkReservation(TENANT_ID, RESERVATION_ID, dto, ACTOR);
       expect(tx.walkRecord.create).toHaveBeenCalledWith(
         expect.objectContaining({ data: expect.objectContaining({ relocationProperty: 'Sister Hotel Downtown', approvedBy: ACTOR_ID }) }),
       );
       expect(tx.reservation.update).toHaveBeenCalledWith(expect.objectContaining({ data: { status: 'walked' } }));
     });
 
-    it('no folio exists yet (the common case — no deposit-at-booking) — nothing to refund, no payment rows touched', async () => {
+    it('no folio exists yet (the common case — no deposit-at-booking) — nothing to refund, no refund raised', async () => {
       tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'confirmed' }));
       tx.folio.findFirst.mockResolvedValue(null);
-      const result = await service.walkReservation(TENANT_ID, RESERVATION_ID, dto, ACTOR_ID);
+      const result = await service.walkReservation(TENANT_ID, RESERVATION_ID, dto, ACTOR);
       expect(tx.payment.create).not.toHaveBeenCalled();
-      expect(result.refundedTotal).toBe('0.00');
+      expect(refundsService.requestInTx).not.toHaveBeenCalled();
+      expect(result.refundRequested).toBe('0.00');
     });
 
-    it('a folio WITH a real payment gets it reversed as a negative payment, same method/currency as the original — never a blind lump sum', async () => {
+    it('a bill holding the guest’s money raises a refund through the refund workflow — by the method they paid, never as a reversal row written into the ledger', async () => {
       tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'confirmed' }));
-      tx.folio.findFirst.mockResolvedValue({ id: 'folio-1' });
-      tx.payment.findMany.mockResolvedValue([
-        { id: 'pay-1', method: 'card', amount: new Prisma.Decimal('150'), currency: 'NGN' },
-      ]);
-      const result = await service.walkReservation(TENANT_ID, RESERVATION_ID, dto, ACTOR_ID);
-      expect(tx.payment.create).toHaveBeenCalledWith(
-        expect.objectContaining({ data: expect.objectContaining({ method: 'card', currency: 'NGN', amount: expect.objectContaining({ toString: expect.any(Function) }) }) }),
+      tx.folio.findFirst.mockResolvedValue({ id: 'folio-1', branchId: BRANCH_ID });
+      refundsService.refundable.mockResolvedValueOnce({ credit: new Prisma.Decimal('150'), available: new Prisma.Decimal('150') });
+      tx.payment.findFirst.mockResolvedValue({ method: 'card' });
+      const result = await service.walkReservation(TENANT_ID, RESERVATION_ID, dto, ACTOR);
+      expect(tx.payment.create).not.toHaveBeenCalled();
+      expect(refundsService.requestInTx).toHaveBeenCalledWith(
+        tx,
+        TENANT_ID,
+        expect.objectContaining({ id: 'folio-1' }),
+        expect.objectContaining({ amount: 150, method: 'card', reason: expect.stringContaining('Sister Hotel Downtown') }),
+        ACTOR,
       );
-      const call = (tx.payment.create.mock.calls[0] as [{ data: { amount: Prisma.Decimal } }])[0];
-      expect(call.data.amount.toString()).toBe('-150');
-      expect(result.refundedTotal).toBe('150.00');
+      expect(result.refundRequested).toBe('150.00');
     });
   });
 

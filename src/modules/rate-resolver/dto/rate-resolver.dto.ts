@@ -1,6 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
-import { IsBoolean, IsIn, IsInt, IsISO8601, IsNumber, IsOptional, IsString, IsUUID, Max, MaxLength, Min, MinLength } from 'class-validator';
+import { IsBoolean, IsIn, IsInt, IsNumber, IsOptional, IsString, IsUUID, Max, MaxLength, Min, MinLength } from 'class-validator';
+import { IsDateOnly } from '../../../common/validation/is-date-only.decorator';
 import { AdjustmentType, RateType } from '@prisma/client';
 
 export class CalculateRateDto {
@@ -9,11 +10,11 @@ export class CalculateRateDto {
   roomTypeId!: string;
 
   @ApiProperty({ example: '2026-09-01' })
-  @IsISO8601({ strict: true })
+  @IsDateOnly()
   checkInDate!: string;
 
   @ApiProperty({ example: '2026-09-04', description: 'Exclusive' })
-  @IsISO8601({ strict: true })
+  @IsDateOnly()
   checkOutDate!: string;
 
   @ApiPropertyOptional({ description: 'Matches a promotional RatePlan.promoCode' })
@@ -66,12 +67,12 @@ export class CreateRatePlanDto {
 
   @ApiPropertyOptional({ example: '2026-12-01' })
   @IsOptional()
-  @IsISO8601({ strict: true })
+  @IsDateOnly()
   validFrom?: string;
 
   @ApiPropertyOptional({ example: '2027-01-15' })
   @IsOptional()
-  @IsISO8601({ strict: true })
+  @IsDateOnly()
   validTo?: string;
 
   @ApiPropertyOptional({ example: 2, description: 'Minimum length of stay (nights) for this plan to apply' })

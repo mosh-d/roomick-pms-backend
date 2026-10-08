@@ -1,5 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsIn, IsISO8601, IsOptional, IsString } from 'class-validator';
+import { Transform } from 'class-transformer';
+import { IsArray, IsIn, IsOptional, IsUUID } from 'class-validator';
+import { IsDateOnly } from '../../../common/validation/is-date-only.decorator';
 
 const REPORT_TYPES = ['occupancy', 'adr', 'revpar', 'revenue'] as const;
 export type CrossPropertyReportType = (typeof REPORT_TYPES)[number];
@@ -11,15 +13,17 @@ export class CrossPropertyReportQueryDto {
   type!: CrossPropertyReportType;
 
   @ApiProperty({ example: '2026-08-01' })
-  @IsISO8601({ strict: true })
+  @IsDateOnly()
   from!: string;
 
   @ApiProperty({ example: '2026-09-01', description: 'Exclusive' })
-  @IsISO8601({ strict: true })
+  @IsDateOnly()
   to!: string;
 
-  @ApiPropertyOptional({ description: 'Comma-separated branch ids — every branch under the tenant when omitted' })
+  @ApiPropertyOptional({ type: String, description: 'Comma-separated branch ids — every branch under the tenant when omitted' })
   @IsOptional()
-  @IsString()
-  branchIds?: string;
+  @Transform(({ value }): unknown => (typeof value === 'string' ? value.split(',').map((s) => s.trim()).filter(Boolean) : value))
+  @IsArray()
+  @IsUUID('all', { each: true })
+  branchIds?: string[];
 }

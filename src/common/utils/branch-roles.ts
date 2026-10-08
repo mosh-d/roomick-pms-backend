@@ -6,6 +6,13 @@ export function hasRoleAtBranch(actor: JwtPayload, branchId: string, roles: read
   return actor.roles.some((r) => roles.includes(r.role) && (r.branchId === null || r.branchId === branchId));
 }
 
+/** The roles that supervise a branch: they close other people's shifts, take rooms out of service, assign housekeeping. */
+export const SUPERVISOR_ROLES: readonly string[] = ['owner', 'manager'];
+
+export function isSupervisorAt(actor: JwtPayload, branchId: string): boolean {
+  return hasRoleAtBranch(actor, branchId, SUPERVISOR_ROLES);
+}
+
 /**
  * `RolesGuard` checks a role at the branch named in the URL. A route addressed
  * by a record's own id names no branch, so the guard passes a role held at ANY

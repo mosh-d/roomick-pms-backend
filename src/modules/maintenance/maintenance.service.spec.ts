@@ -8,6 +8,7 @@ const BRANCH_ID = '22222222-2222-4222-8222-222222222222';
 const ROOM_ID = '33333333-3333-4333-8333-333333333333';
 const ORDER_ID = '44444444-4444-4444-8444-444444444444';
 const ACTOR_ID = '55555555-5555-4555-8555-555555555555';
+const ACTOR = { sub: ACTOR_ID, tenantId: TENANT_ID, email: '', roles: [{ role: 'manager', branchId: null }], tokenType: 'access' as const };
 
 function order(overrides: Partial<Record<string, unknown>> = {}) {
   return {
@@ -30,14 +31,16 @@ function makeTx() {
       update: jest.fn().mockImplementation(({ data }: { data: Record<string, unknown> }) => Promise.resolve(order({ ...data }))),
     },
     asset: {
+      findFirst: jest.fn().mockResolvedValue({ id: 'asset-1' }),
       create: jest.fn().mockImplementation(({ data }: { data: Record<string, unknown> }) => Promise.resolve({ id: 'asset-1', ...data })),
       findMany: jest.fn().mockResolvedValue([]),
     },
     room: {
-      findFirst: jest.fn().mockResolvedValue({ id: ROOM_ID, heldStatus: 'out_of_order' }),
+      findFirst: jest.fn().mockResolvedValue({ id: ROOM_ID, number: '204', occupancyStatus: 'vacant', heldStatus: 'out_of_order' }),
       update: jest.fn().mockResolvedValue({}),
     },
     auditLog: { create: jest.fn().mockResolvedValue({}) },
+    userBranchRole: { findFirst: jest.fn().mockResolvedValue({ id: 'ubr-1' }) },
   };
 }
 
@@ -58,29 +61,29 @@ describe('MaintenanceService', () => {
 
   describe('createWorkOrder', () => {
     it('defaults priority to medium when omitted', async () => {
-      await service.createWorkOrder(TENANT_ID, BRANCH_ID, { title: 'Leaky faucet' }, ACTOR_ID);
+      await service.createWorkOrder(TENANT_ID, BRANCH_ID, { title: 'Leaky faucet' }, ACTOR);
       expect(tx.maintenanceOrder.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ priority: 'medium' }) }));
     });
 
     it('blockRoom + roomId together set takesRoomOutOfService and hold the room', async () => {
-      await service.createWorkOrder(TENANT_ID, BRANCH_ID, { title: 'AC broken', roomId: ROOM_ID, blockRoom: true }, ACTOR_ID);
+      await service.createWorkOrder(TENANT_ID, BRANCH_ID, { title: 'AC broken', roomId: ROOM_ID, blockRoom: true }, ACTOR);
       expect(tx.maintenanceOrder.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ takesRoomOutOfService: true }) }));
       expect(tx.room.update).toHaveBeenCalledWith({ where: { id: ROOM_ID }, data: { heldStatus: 'out_of_order' } });
     });
 
     it('blockRoom without a roomId does not take anything out of service', async () => {
-      await service.createWorkOrder(TENANT_ID, BRANCH_ID, { title: 'Lobby AC broken', blockRoom: true }, ACTOR_ID);
+      await service.createWorkOrder(TENANT_ID, BRANCH_ID, { title: 'Lobby AC broken', blockRoom: true }, ACTOR);
       expect(tx.maintenanceOrder.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ takesRoomOutOfService: false }) }));
       expect(tx.room.update).not.toHaveBeenCalled();
     });
 
     it('a plain request with no blockRoom never touches the room', async () => {
-      await service.createWorkOrder(TENANT_ID, BRANCH_ID, { title: 'Squeaky door', roomId: ROOM_ID }, ACTOR_ID);
+      await service.createWorkOrder(TENANT_ID, BRANCH_ID, { title: 'Squeaky door', roomId: ROOM_ID }, ACTOR);
       expect(tx.room.update).not.toHaveBeenCalled();
     });
 
     it('writes an audit log', async () => {
-      await service.createWorkOrder(TENANT_ID, BRANCH_ID, { title: 'Leaky faucet' }, ACTOR_ID);
+      await service.createWorkOrder(TENANT_ID, BRANCH_ID, { title: 'Leaky faucet' }, ACTOR);
       expect(tx.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: 'maintenance.work_order_created' }) }));
     });
   });

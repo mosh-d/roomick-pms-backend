@@ -11,6 +11,7 @@ import {
   CancelWithWaiverDto,
   CheckInDto,
   CreateReservationDto,
+  DateOnlyQueryDto,
   ExtendStayDto,
   GroupCheckInDto,
   ListReservationsQueryDto,
@@ -117,9 +118,9 @@ export class ReservationsController {
   listArrivals(
     @CurrentTenant() tenantId: string,
     @Param('branchId', ParseUUIDPipe) branchId: string,
-    @Query('date') date?: string,
+    @Query() query: DateOnlyQueryDto,
   ): ReturnType<ReservationsService['listArrivals']> {
-    return this.reservationsService.listArrivals(tenantId, branchId, date);
+    return this.reservationsService.listArrivals(tenantId, branchId, query.date);
   }
 
   @Get('branches/:branchId/departures')
@@ -128,9 +129,9 @@ export class ReservationsController {
   listDepartures(
     @CurrentTenant() tenantId: string,
     @Param('branchId', ParseUUIDPipe) branchId: string,
-    @Query('date') date?: string,
+    @Query() query: DateOnlyQueryDto,
   ): ReturnType<ReservationsService['listDepartures']> {
-    return this.reservationsService.listDepartures(tenantId, branchId, date);
+    return this.reservationsService.listDepartures(tenantId, branchId, query.date);
   }
 
   @Get('branches/:branchId/in-house')
@@ -373,6 +374,6 @@ export class ReservationsController {
     @Param('reservationId', ParseUUIDPipe) reservationId: string,
     @Body() dto: WalkReservationDto,
   ): ReturnType<ReservationsService['walkReservation']> {
-    return this.reservationsService.walkReservation(tenantId, reservationId, dto, user.sub);
+    return this.reservationsService.walkReservation(tenantId, reservationId, dto, user);
   }
 }

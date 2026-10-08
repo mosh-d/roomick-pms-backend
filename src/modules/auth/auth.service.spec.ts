@@ -20,6 +20,10 @@ const USER_ID = '22222222-2222-4222-8222-222222222222';
 
 function makeTx(): Record<string, Record<string, jest.Mock>> {
   return {
+    tenant: {
+      create: jest.fn().mockResolvedValue({ id: TENANT_ID, subdomain: 'acme' }),
+      findUnique: jest.fn().mockResolvedValue({ status: 'active' }),
+    },
     role: {
       createMany: jest.fn().mockResolvedValue({ count: 6 }),
       findUniqueOrThrow: jest.fn().mockResolvedValue({ id: 'role-owner', name: 'owner' }),
@@ -72,6 +76,7 @@ describe('AuthService', () => {
     tenant: { findUnique: jest.Mock; create: jest.Mock };
     userEmailIndex: { findUnique: jest.Mock; create: jest.Mock };
     withTenant: jest.Mock;
+    $transaction: jest.Mock;
   };
   let jwt: { signAsync: jest.Mock; verifyAsync: jest.Mock; decode: jest.Mock };
   let permissions: { invalidate: jest.Mock; rolesFor: jest.Mock };
@@ -96,6 +101,7 @@ describe('AuthService', () => {
         create: jest.fn().mockResolvedValue({}),
       },
       withTenant: jest.fn((_tenantId: string, fn: (t: unknown) => unknown) => fn(tx)),
+      $transaction: jest.fn((fn: (t: unknown) => unknown) => fn({ ...tx, $executeRaw: jest.fn().mockResolvedValue(1) })),
     };
     jwt = {
       signAsync: jest.fn().mockResolvedValue('signed.jwt.token'),
@@ -140,14 +146,14 @@ describe('AuthService', () => {
     it('rejects a duplicate email with EMAIL_TAKEN', async () => {
       prisma.userEmailIndex.findUnique.mockResolvedValue({ email: dto.email, tenantId: 'existing', userId: 'u' });
       await expect(service.register(dto)).rejects.toThrow(ConflictException);
-      expect(prisma.tenant.create).not.toHaveBeenCalled();
+      expect(tx.tenant.create).not.toHaveBeenCalled();
     });
 
     it('retries subdomain generation on a collision instead of failing', async () => {
       // First candidate ("acme") collides, second (suffixed) doesn't.
       prisma.tenant.findUnique.mockResolvedValueOnce({ id: 'existing', subdomain: 'acme' }).mockResolvedValueOnce(null);
       await service.register(dto);
-      expect(prisma.tenant.create).toHaveBeenCalledWith(
+      expect(tx.tenant.create).toHaveBeenCalledWith(
         expect.objectContaining({
           data: expect.objectContaining({ subdomain: expect.stringMatching(/^acme-[0-9a-f]{6}$/) }),
         }),
@@ -164,7 +170,7 @@ describe('AuthService', () => {
     it('creates tenant, all six system roles, owner user and role assignment', async () => {
       const result = await service.register(dto);
 
-      expect(prisma.tenant.create).toHaveBeenCalledWith(
+      expect(tx.tenant.create).toHaveBeenCalledWith(
         expect.objectContaining({
           data: expect.objectContaining({ subdomain: 'acme', status: 'trial' }),
         }),

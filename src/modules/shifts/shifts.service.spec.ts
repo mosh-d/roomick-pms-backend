@@ -9,6 +9,7 @@ const TENANT_ID = '11111111-1111-4111-8111-111111111111';
 const BRANCH_ID = '33333333-3333-4333-8333-333333333333';
 const AGENT_ID = '44444444-4444-4444-8444-444444444444';
 const SHIFT_ID = '55555555-5555-4555-8555-555555555555';
+const AGENT = { sub: AGENT_ID, tenantId: TENANT_ID, email: '', roles: [{ role: 'front_desk', branchId: BRANCH_ID }], tokenType: 'access' as const };
 
 function branch(overrides: Partial<Record<string, unknown>> = {}) {
   return { id: BRANCH_ID, timezone: 'Africa/Lagos', currency: 'NGN', policies: null, ...overrides };
@@ -88,7 +89,7 @@ describe('ShiftsService', () => {
       tx.shift.findFirst.mockResolvedValue(shift({ openingFloat: new Prisma.Decimal('50000') }));
       tx.payment.aggregate.mockResolvedValue({ _sum: { amount: new Prisma.Decimal('20000') } });
 
-      await service.closeShift(TENANT_ID, SHIFT_ID, { closingCashCounted: 70000 }, AGENT_ID);
+      await service.closeShift(TENANT_ID, SHIFT_ID, { closingCashCounted: 70000 }, AGENT);
 
       expect(tx.shift.update).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -107,7 +108,7 @@ describe('ShiftsService', () => {
       tx.shift.findFirst.mockResolvedValue(shift({ openingFloat: new Prisma.Decimal('50000') }));
       tx.payment.aggregate.mockResolvedValue({ _sum: { amount: new Prisma.Decimal('15000') } }); // 20000 taken, 5000 refunded, already netted by the DB sum
 
-      await service.closeShift(TENANT_ID, SHIFT_ID, { closingCashCounted: 65000 }, AGENT_ID);
+      await service.closeShift(TENANT_ID, SHIFT_ID, { closingCashCounted: 65000 }, AGENT);
 
       const data = tx.shift.update.mock.calls[0][0].data;
       expect(data.systemCashTotal.toFixed(2)).toBe('65000.00');
@@ -119,7 +120,7 @@ describe('ShiftsService', () => {
       tx.payment.aggregate.mockResolvedValue({ _sum: { amount: new Prisma.Decimal('20000') } });
       tx.posOrder.aggregate.mockResolvedValue({ _sum: { total: new Prisma.Decimal('5375') } });
 
-      await service.closeShift(TENANT_ID, SHIFT_ID, { closingCashCounted: 75375 }, AGENT_ID);
+      await service.closeShift(TENANT_ID, SHIFT_ID, { closingCashCounted: 75375 }, AGENT);
 
       expect(tx.posOrder.aggregate).toHaveBeenCalledWith({ _sum: { total: true }, where: { shiftId: SHIFT_ID, settlement: 'cash', voidedAt: null } });
       const data = tx.shift.update.mock.calls[0][0].data;
@@ -131,7 +132,7 @@ describe('ShiftsService', () => {
       tx.shift.findFirst.mockResolvedValue(shift({ openingFloat: new Prisma.Decimal('50000') }));
       tx.payment.aggregate.mockResolvedValue({ _sum: { amount: new Prisma.Decimal('0') } });
 
-      await expect(service.closeShift(TENANT_ID, SHIFT_ID, { closingCashCounted: 50100 }, AGENT_ID)).rejects.toThrow(BadRequestException);
+      await expect(service.closeShift(TENANT_ID, SHIFT_ID, { closingCashCounted: 50100 }, AGENT)).rejects.toThrow(BadRequestException);
       expect(tx.shift.update).not.toHaveBeenCalled();
     });
 
@@ -139,7 +140,7 @@ describe('ShiftsService', () => {
       tx.shift.findFirst.mockResolvedValue(shift({ openingFloat: new Prisma.Decimal('50000') }));
       tx.payment.aggregate.mockResolvedValue({ _sum: { amount: new Prisma.Decimal('0') } });
 
-      await service.closeShift(TENANT_ID, SHIFT_ID, { closingCashCounted: 50100, varianceExplanation: 'Till float miscounted at open.' }, AGENT_ID);
+      await service.closeShift(TENANT_ID, SHIFT_ID, { closingCashCounted: 50100, varianceExplanation: 'Till float miscounted at open.' }, AGENT);
       expect(tx.shift.update).toHaveBeenCalled();
     });
 
@@ -149,18 +150,18 @@ describe('ShiftsService', () => {
       tx.payment.aggregate.mockResolvedValue({ _sum: { amount: new Prisma.Decimal('0') } });
 
       // 100 variance would fail the 5.00 default but passes a 200 branch threshold with no explanation needed.
-      await service.closeShift(TENANT_ID, SHIFT_ID, { closingCashCounted: 50100 }, AGENT_ID);
+      await service.closeShift(TENANT_ID, SHIFT_ID, { closingCashCounted: 50100 }, AGENT);
       expect(tx.shift.update).toHaveBeenCalled();
     });
 
     it('rejects closing an already-closed shift', async () => {
       tx.shift.findFirst.mockResolvedValue(shift({ closedAt: new Date() }));
-      await expect(service.closeShift(TENANT_ID, SHIFT_ID, { closingCashCounted: 50000 }, AGENT_ID)).rejects.toThrow(ConflictException);
+      await expect(service.closeShift(TENANT_ID, SHIFT_ID, { closingCashCounted: 50000 }, AGENT)).rejects.toThrow(ConflictException);
     });
 
     it('404s on a shift that does not exist', async () => {
       tx.shift.findFirst.mockResolvedValue(null);
-      await expect(service.closeShift(TENANT_ID, SHIFT_ID, { closingCashCounted: 50000 }, AGENT_ID)).rejects.toThrow(NotFoundException);
+      await expect(service.closeShift(TENANT_ID, SHIFT_ID, { closingCashCounted: 50000 }, AGENT)).rejects.toThrow(NotFoundException);
     });
 
     it('logs bundled unresolvedIssues against the closing shift, in the same call', async () => {
@@ -171,7 +172,7 @@ describe('ShiftsService', () => {
         TENANT_ID,
         SHIFT_ID,
         { closingCashCounted: 50000, unresolvedIssues: [{ description: 'Room 214 minibar restock pending' }, { description: 'Guest disputing a charge', priority: 'high' }] },
-        AGENT_ID,
+        AGENT,
       );
 
       expect(tx.shiftIssue.create).toHaveBeenCalledTimes(2);
