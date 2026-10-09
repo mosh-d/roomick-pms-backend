@@ -68,7 +68,7 @@ describe('MaintenanceService', () => {
     it('blockRoom + roomId together set takesRoomOutOfService and hold the room', async () => {
       await service.createWorkOrder(TENANT_ID, BRANCH_ID, { title: 'AC broken', roomId: ROOM_ID, blockRoom: true }, ACTOR);
       expect(tx.maintenanceOrder.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ takesRoomOutOfService: true }) }));
-      expect(tx.room.update).toHaveBeenCalledWith({ where: { id: ROOM_ID }, data: { heldStatus: 'out_of_order' } });
+      expect(tx.room.update).toHaveBeenCalledWith({ where: { id: ROOM_ID }, data: { heldStatus: 'out_of_order', heldUntil: null } });
     });
 
     it('blockRoom without a roomId does not take anything out of service', async () => {
@@ -121,13 +121,13 @@ describe('MaintenanceService', () => {
       // The order itself, then no other open order holding the room.
       tx.maintenanceOrder.findFirst.mockResolvedValueOnce(order({ takesRoomOutOfService: true })).mockResolvedValueOnce(null);
       await service.updateWorkOrder(TENANT_ID, ORDER_ID, { status: 'resolved' }, ACTOR_ID);
-      expect(tx.room.update).toHaveBeenCalledWith({ where: { id: ROOM_ID }, data: { heldStatus: null } });
+      expect(tx.room.update).toHaveBeenCalledWith({ where: { id: ROOM_ID }, data: { heldStatus: null, heldUntil: null } });
     });
 
     it('also releases on cancelled, not just resolved', async () => {
       tx.maintenanceOrder.findFirst.mockResolvedValueOnce(order({ takesRoomOutOfService: true })).mockResolvedValueOnce(null);
       await service.updateWorkOrder(TENANT_ID, ORDER_ID, { status: 'cancelled' }, ACTOR_ID);
-      expect(tx.room.update).toHaveBeenCalledWith({ where: { id: ROOM_ID }, data: { heldStatus: null } });
+      expect(tx.room.update).toHaveBeenCalledWith({ where: { id: ROOM_ID }, data: { heldStatus: null, heldUntil: null } });
     });
 
     it('keeps the room out of order while another open order still needs it out', async () => {

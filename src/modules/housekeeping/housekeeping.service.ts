@@ -8,6 +8,7 @@ import { PropertyService } from '../property/property.service';
 import { CLEANLINESS_TRANSITIONS } from '../property/rooms.service';
 import { UsersService } from '../users/users.service';
 import { AssignTaskDto, CreateTaskDto, ListTasksQueryDto, ReportIssueDto } from './dto/housekeeping.dto';
+import { TURNDOWN } from './turndown';
 
 const TASK_INCLUDE = {
   room: { select: { id: true, number: true } },
@@ -39,19 +40,28 @@ export class HousekeepingService {
       if (!room) {
         throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Room not found at this branch' });
       }
-      // One open task per room: a second "clean 204" while the first waits only doubles the board.
-      const waiting = await tx.housekeepingTask.findFirst({ where: { roomId: room.id, status: { in: ['pending', 'in_progress'] } }, select: { status: true } });
+      // One open task of a kind per room: a second "clean 204" while the first
+      // waits only doubles the board. A turndown and a clean are different jobs.
+      const turndown = dto.kind === TURNDOWN;
+      const waiting = await tx.housekeepingTask.findFirst({
+        where: {
+          roomId: room.id,
+          status: { in: ['pending', 'in_progress'] },
+          ...(turndown ? { triggerEvent: TURNDOWN } : { OR: [{ triggerEvent: null }, { triggerEvent: { not: TURNDOWN } }] }),
+        },
+        select: { status: true },
+      });
       if (waiting) {
         throw new ConflictException({
           code: ErrorCode.CONFLICT,
-          message: `Room ${room.number} already has a task ${waiting.status === 'in_progress' ? 'in progress' : 'waiting'} — finish or skip it first`,
+          message: `Room ${room.number} already has a ${turndown ? 'turndown' : 'task'} ${waiting.status === 'in_progress' ? 'in progress' : 'waiting'} — finish or skip it first`,
         });
       }
       return this.createTaskInTx(tx, tenantId, branchId, {
         roomId: dto.roomId,
         priority: dto.priority,
         notes: dto.notes,
-        triggerEvent: 'manual',
+        triggerEvent: turndown ? TURNDOWN : 'manual',
         taskDate: toBranchDate(todayInTimezone(branch.timezone)),
         actorId,
       });
@@ -86,8 +96,9 @@ export class HousekeepingService {
     // inspected — a guest slept in it (the night audit's stay-over task), the
     // guest asked from the portal, a supervisor wants it redone — goes back to
     // dirty: the ladder starts from dirty, so the housekeeper's Start was
-    // refused ("clean → cleaning") on every such task.
-    const room = await tx.room.findFirst({ where: { id: opts.roomId, deletedAt: null }, select: { cleanlinessStatus: true } });
+    // refused ("clean → cleaning") on every such task. A turndown isn't a
+    // clean: the room's state is left as it is.
+    const room = opts.triggerEvent === TURNDOWN ? null : await tx.room.findFirst({ where: { id: opts.roomId, deletedAt: null }, select: { cleanlinessStatus: true } });
     if (room && (room.cleanlinessStatus === 'clean' || room.cleanlinessStatus === 'inspected')) {
       await this.transitionRoomCleanliness(tx, tenantId, opts.roomId, 'dirty', opts.actorId);
     }
@@ -115,9 +126,35 @@ export class HousekeepingService {
    * manual requests, so a three-night guest's room was never on it between.
    */
   async ensureStayoverTaskInTx(tx: TenantTx, tenantId: string, branchId: string, roomId: string, reservationId: string, taskDate: Date): Promise<boolean> {
-    const waiting = await tx.housekeepingTask.findFirst({ where: { roomId, status: { in: ['pending', 'in_progress'] } }, select: { id: true } });
+    // An evening turndown waiting for the room is not its daily service.
+    const waiting = await tx.housekeepingTask.findFirst({
+      where: { roomId, status: { in: ['pending', 'in_progress'] }, OR: [{ triggerEvent: null }, { triggerEvent: { not: TURNDOWN } }] },
+      select: { id: true },
+    });
     if (waiting) return false;
     await this.createTaskInTx(tx, tenantId, branchId, { roomId, priority: 3, triggerEvent: 'stayover', triggeredByReservationId: reservationId, taskDate, actorId: null });
+    return true;
+  }
+
+  /**
+   * The evening turndown of an occupied room — raised for the arrival
+   * evening at check-in and for each night after by the night audit, when
+   * the branch turns rooms down (every room, or only VIP guests'). One per
+   * room per evening. It tidies the room for the night and leaves its
+   * cleanliness as it is.
+   */
+  async ensureTurndownTaskInTx(tx: TenantTx, tenantId: string, branchId: string, roomId: string, reservationId: string, taskDate: Date): Promise<boolean> {
+    const raised = await tx.housekeepingTask.findFirst({ where: { roomId, taskDate, triggerEvent: TURNDOWN }, select: { id: true } });
+    if (raised) return false;
+    await this.createTaskInTx(tx, tenantId, branchId, {
+      roomId,
+      priority: 3,
+      triggerEvent: TURNDOWN,
+      triggeredByReservationId: reservationId,
+      notes: 'Evening turndown',
+      taskDate,
+      actorId: null,
+    });
     return true;
   }
 
@@ -130,7 +167,8 @@ export class HousekeepingService {
    * One already under way is left to finish.
    */
   async supersedeStayoverTasksInTx(tx: TenantTx, tenantId: string, branchId: string, roomId: string, why: string, actorId: string | null): Promise<number> {
-    const waiting = await tx.housekeepingTask.findMany({ where: { roomId, status: 'pending', triggerEvent: 'stayover' }, select: { id: true, notes: true } });
+    // A turndown waiting for the guest who left goes with it.
+    const waiting = await tx.housekeepingTask.findMany({ where: { roomId, status: 'pending', triggerEvent: { in: ['stayover', TURNDOWN] } }, select: { id: true, notes: true } });
     for (const task of waiting) {
       await tx.housekeepingTask.update({ where: { id: task.id }, data: { status: 'skipped', notes: task.notes ? `${task.notes}\n${why}` : why } });
       await this.audit(tx, tenantId, actorId, 'housekeeping.task_superseded', task.id, { roomId, why }, branchId);
@@ -212,7 +250,8 @@ export class HousekeepingService {
       if (task.assigneeId && task.assigneeId !== actorId) {
         throw new ForbiddenException({ code: ErrorCode.FORBIDDEN, message: 'This task is already assigned to someone else' });
       }
-      await this.transitionRoomCleanliness(tx, tenantId, task.roomId, 'cleaning', actorId);
+      // A turndown tidies an occupied room; it doesn't move it along the cleaning ladder.
+      if (task.triggerEvent !== TURNDOWN) await this.transitionRoomCleanliness(tx, tenantId, task.roomId, 'cleaning', actorId);
       const updated = await tx.housekeepingTask.update({
         where: { id: taskId },
         data: { status: 'in_progress', assigneeId: task.assigneeId ?? actorId },
@@ -233,7 +272,7 @@ export class HousekeepingService {
       if (task.assigneeId && task.assigneeId !== actorId) {
         throw new ForbiddenException({ code: ErrorCode.FORBIDDEN, message: 'This task is assigned to someone else' });
       }
-      await this.transitionRoomCleanliness(tx, tenantId, task.roomId, 'clean', actorId);
+      if (task.triggerEvent !== TURNDOWN) await this.transitionRoomCleanliness(tx, tenantId, task.roomId, 'clean', actorId);
       const updated = await tx.housekeepingTask.update({
         where: { id: taskId },
         data: { status: 'done', completedAt: new Date(), completedBy: actorId },
@@ -264,7 +303,7 @@ export class HousekeepingService {
       const note = `[${dto.areaOfIssue}] ${dto.description}`;
       // A task given up part-way leaves the room as it is — not clean. It used
       // to stay "cleaning" on the board until someone set it by hand.
-      if (task.status === 'in_progress') await this.transitionRoomCleanliness(tx, tenantId, task.roomId, 'dirty', actorId);
+      if (task.status === 'in_progress' && task.triggerEvent !== TURNDOWN) await this.transitionRoomCleanliness(tx, tenantId, task.roomId, 'dirty', actorId);
       const updated = await tx.housekeepingTask.update({
         where: { id: taskId },
         data: { status: 'skipped', notes: task.notes ? `${task.notes}\n${note}` : note },

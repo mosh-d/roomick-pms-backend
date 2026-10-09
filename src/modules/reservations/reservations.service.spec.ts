@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, NotFoundException } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -8,6 +8,8 @@ import { GuestsService } from '../guests/guests.service';
 import { FoliosService } from '../folios/folios.service';
 import { HousekeepingService } from '../housekeeping/housekeeping.service';
 import { RateResolverService } from '../rate-resolver/rate-resolver.service';
+import { PackagesService } from '../rate-resolver/packages.service';
+import { ChannelAllotmentsService } from '../revenue-management/channel-allotments.service';
 import { RegistrationCardsService } from '../registration-cards/registration-cards.service';
 import { CommsLogService } from '../comms-log/comms-log.service';
 import { RestrictionsService } from '../revenue-management/restrictions.service';
@@ -57,9 +59,23 @@ function reservation(overrides: Partial<Record<string, unknown>> = {}) {
   };
 }
 
+/**
+ * The rooms a pool query finds: `count`'s value as that many rooms in service
+ * — so a test sets the pool with `room.count` whichever of the two the code
+ * reads — plus any held ones a test adds with a release date.
+ */
+function roomPool(room: { count: jest.Mock }, held: Array<{ heldUntil: Date }> = []) {
+  return jest.fn().mockImplementation(async () => [
+    ...Array.from({ length: Number(await room.count()) }, (_, i) => ({ id: i === 0 ? ROOM_ID : `room-${i}`, heldStatus: null, heldUntil: null })),
+    ...held.map((h, i) => ({ id: `held-${i}`, heldStatus: 'out_of_order', heldUntil: h.heldUntil })),
+  ]);
+}
+
 function makeTx() {
+  const room: { count: jest.Mock; findFirst: jest.Mock; findMany?: jest.Mock } = { count: jest.fn().mockResolvedValue(5), findFirst: jest.fn() };
+  room.findMany = roomPool(room);
   return {
-    room: { count: jest.fn().mockResolvedValue(5), findFirst: jest.fn() },
+    room,
     roomType: {
       findFirst: jest.fn().mockResolvedValue({ id: TYPE_ID, branchId: BRANCH_ID, name: 'Standard', baseRate: '100.00', capacity: { adults: 10, children: 10 } }),
       findMany: jest.fn().mockResolvedValue([{ id: TYPE_ID, name: 'Standard' }]),
@@ -113,6 +129,7 @@ describe('ReservationsService', () => {
     previewCharge: jest.Mock;
     reverseChargeInTx: jest.Mock;
     paidOnPrimaryFolio: jest.Mock;
+    postChargeInTx: jest.Mock;
   };
   let housekeepingService: { createTaskInTx: jest.Mock; supersedeStayoverTasksInTx: jest.Mock };
   let rateResolverService: { resolveStay: jest.Mock; linkAuditLogsToReservation: jest.Mock };
@@ -152,6 +169,7 @@ describe('ReservationsService', () => {
       ),
       reverseChargeInTx: jest.fn().mockResolvedValue({ id: 'li-reversal' }),
       paidOnPrimaryFolio: jest.fn().mockResolvedValue(new Prisma.Decimal(0)),
+      postChargeInTx: jest.fn().mockResolvedValue({ id: 'li-fee' }),
     };
     housekeepingService = { createTaskInTx: jest.fn().mockResolvedValue({ id: 'task-1' }), supersedeStayoverTasksInTx: jest.fn().mockResolvedValue(0) };
     // Mirrors the OLD flat baseRate × nights math the resolver replaced —
@@ -198,6 +216,8 @@ describe('ReservationsService', () => {
         { provide: RegistrationCardsService, useValue: registrationCardsService },
         { provide: CommsLogService, useValue: commsLogService },
         { provide: RestrictionsService, useValue: restrictionsService },
+        { provide: PackagesService, useValue: { snapshotsFor: jest.fn().mockResolvedValue([]) } },
+        { provide: ChannelAllotmentsService, useValue: { assertWithinAllotment: jest.fn().mockResolvedValue(undefined) } },
         { provide: LoyaltyService, useValue: { earnForStayInTx: jest.fn().mockResolvedValue(0) } },
         { provide: WebhookEventsService, useValue: webhookEvents },
         { provide: TaxesService, useValue: taxesService },
@@ -261,11 +281,20 @@ describe('ReservationsService', () => {
       expect(result).toEqual([{ date: today, available: 2 }]);
     });
 
-    it('a held room reduces the pool for every night, not just some (heldStatus is a static flag, not date-scoped)', async () => {
-      tx.room.count.mockResolvedValue(4); // count() itself already excludes heldStatus rooms — pool is pre-reduced
+    it('a room held with no release date is out of the pool for every night', async () => {
+      tx.room.count.mockResolvedValue(4); // the query itself leaves out rooms held with no date — the pool is pre-reduced
       const result = await service.getAvailability(TENANT_ID, BRANCH_ID, { from: '2026-09-01', to: '2026-09-03', roomTypeId: TYPE_ID });
-      expect(tx.room.count).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ heldStatus: null }) }));
+      expect(tx.room.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: expect.objectContaining({ OR: [{ heldStatus: null }, { heldUntil: { not: null } }] }) }),
+      );
       expect(result.every((n) => n.available === 4)).toBe(true);
+    });
+
+    it('a room held until a date is sold again from that night', async () => {
+      tx.room.count.mockResolvedValue(2);
+      tx.room.findMany = roomPool(tx.room, [{ heldUntil: new Date('2026-09-02T00:00:00.000Z') }]);
+      const result = await service.getAvailability(TENANT_ID, BRANCH_ID, { from: '2026-09-01', to: '2026-09-04', roomTypeId: TYPE_ID });
+      expect(result.map((n) => n.available)).toEqual([2, 3, 3]);
     });
 
     it('confirmed and checked_in reservations both count against availability', async () => {
@@ -476,7 +505,7 @@ describe('ReservationsService', () => {
 
     it('books a company stay under an active account and keeps the company and promo code on the reservation', async () => {
       await service.createReservation(TENANT_ID, BRANCH_ID, { ...dto, corporateAccountId: 'corp-1', promoCode: ' SAVE10 ' }, ACTOR_ID);
-      expect(rateResolverService.resolveStay).toHaveBeenCalledWith(tx, TENANT_ID, BRANCH_ID, expect.anything(), expect.any(Date), expect.any(Date), { promoCode: 'SAVE10', corporateAccountId: 'corp-1' }, expect.anything());
+      expect(rateResolverService.resolveStay).toHaveBeenCalledWith(tx, TENANT_ID, BRANCH_ID, expect.anything(), expect.any(Date), expect.any(Date), expect.objectContaining({ promoCode: 'SAVE10', corporateAccountId: 'corp-1', occupancy: { adults: 2, children: 0 } }), expect.anything());
       expect(tx.reservation.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ corporateAccountId: 'corp-1', promoCode: 'SAVE10' }) }));
     });
 
@@ -536,7 +565,7 @@ describe('ReservationsService', () => {
         expect.objectContaining({ id: TYPE_ID }),
         expect.any(Date),
         expect.any(Date),
-        { promoCode: 'LABORDAY', corporateAccountId: 'corp-1' },
+        expect.objectContaining({ promoCode: 'LABORDAY', corporateAccountId: 'corp-1' }),
         { triggeredBy: 'booking_create', userId: ACTOR_ID },
       );
       expect(tx.reservation.create).toHaveBeenCalledWith(
@@ -870,12 +899,12 @@ describe('ReservationsService', () => {
   describe('checkOut', () => {
     it('rejects a non-checked_in reservation', async () => {
       tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'confirmed' }));
-      await expect(service.checkOut(TENANT_ID, RESERVATION_ID, ACTOR_ID)).rejects.toThrow(ConflictException);
+      await expect(service.checkOut(TENANT_ID, RESERVATION_ID, ACTOR)).rejects.toThrow(ConflictException);
     });
 
     it('happy path marks the room vacant + dirty in one call', async () => {
       tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'checked_in', roomId: ROOM_ID }));
-      await service.checkOut(TENANT_ID, RESERVATION_ID, ACTOR_ID);
+      await service.checkOut(TENANT_ID, RESERVATION_ID, ACTOR);
       expect(roomsService.applyReservationOccupancy).toHaveBeenCalledWith(
         tx, TENANT_ID, ROOM_ID, { occupancyStatus: 'vacant', cleanlinessStatus: 'dirty' }, ACTOR_ID,
       );
@@ -887,20 +916,20 @@ describe('ReservationsService', () => {
     it('SUCCEEDS with an outstanding balance and leaves the folio open (City Ledger receivable)', async () => {
       tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'checked_in', roomId: ROOM_ID }));
       foliosService.settleIfFullyPaid.mockResolvedValue(false); // balance still owed
-      await expect(service.checkOut(TENANT_ID, RESERVATION_ID, ACTOR_ID)).resolves.toBeDefined();
+      await expect(service.checkOut(TENANT_ID, RESERVATION_ID, ACTOR)).resolves.toBeDefined();
       expect(roomsService.applyReservationOccupancy).toHaveBeenCalled(); // room released regardless
     });
 
     it('settles the folio when it is fully paid', async () => {
       tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'checked_in', roomId: ROOM_ID }));
-      await service.checkOut(TENANT_ID, RESERVATION_ID, ACTOR_ID);
+      await service.checkOut(TENANT_ID, RESERVATION_ID, ACTOR);
       expect(foliosService.settleIfFullyPaid).toHaveBeenCalled();
     });
 
     // Task Board reflects a checked-out room automatically — nobody has to remember to flag it.
     it('creates a housekeeping task for the room, traceable back to this reservation', async () => {
       tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'checked_in', roomId: ROOM_ID }));
-      await service.checkOut(TENANT_ID, RESERVATION_ID, ACTOR_ID);
+      await service.checkOut(TENANT_ID, RESERVATION_ID, ACTOR);
       expect(housekeepingService.createTaskInTx).toHaveBeenCalledWith(
         tx, TENANT_ID, BRANCH_ID,
         expect.objectContaining({ roomId: ROOM_ID, triggerEvent: 'checkout', triggeredByReservationId: RESERVATION_ID }),
@@ -909,7 +938,7 @@ describe('ReservationsService', () => {
 
     it("retires the room's waiting stay-over service first — the check-out clean replaces it", async () => {
       tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'checked_in', roomId: ROOM_ID }));
-      await service.checkOut(TENANT_ID, RESERVATION_ID, ACTOR_ID);
+      await service.checkOut(TENANT_ID, RESERVATION_ID, ACTOR);
       expect(housekeepingService.supersedeStayoverTasksInTx).toHaveBeenCalledWith(tx, TENANT_ID, BRANCH_ID, ROOM_ID, expect.stringContaining('checked out'), ACTOR_ID);
       expect(housekeepingService.supersedeStayoverTasksInTx.mock.invocationCallOrder[0]).toBeLessThan(housekeepingService.createTaskInTx.mock.invocationCallOrder[0]);
     });
@@ -918,7 +947,7 @@ describe('ReservationsService', () => {
     // otherwise depart with un-posted nights.
     it('backfills any elapsed-but-unposted night before settling', async () => {
       tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'checked_in', roomId: ROOM_ID }));
-      await service.checkOut(TENANT_ID, RESERVATION_ID, ACTOR_ID);
+      await service.checkOut(TENANT_ID, RESERVATION_ID, ACTOR);
       expect(foliosService.backfillRoomCharges).toHaveBeenCalledWith(
         tx, expect.anything(), expect.anything(), expect.any(Date), 'Check-out', ACTOR_ID,
       );
@@ -929,8 +958,71 @@ describe('ReservationsService', () => {
 
     it('logs a post_stay comms row', async () => {
       tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'checked_in', roomId: ROOM_ID }));
-      await service.checkOut(TENANT_ID, RESERVATION_ID, ACTOR_ID);
+      await service.checkOut(TENANT_ID, RESERVATION_ID, ACTOR);
       expect(commsLogService.logAutomatedInTx).toHaveBeenCalledWith(tx, TENANT_ID, BRANCH_ID, expect.objectContaining({ guestId: GUEST_ID, trigger: 'post_stay' }));
+    });
+
+    describe('late check-out and early departure fees', () => {
+      const FRONT_DESK = { ...ACTOR, roles: [{ role: 'front_desk', branchId: BRANCH_ID }] };
+      function branchWithFees(stayFeePolicy: unknown) {
+        propertyService.assertBranch.mockResolvedValue({
+          id: BRANCH_ID,
+          timezone: 'Africa/Lagos',
+          currency: 'NGN',
+          checkInTime: new Date('1970-01-01T14:00:00.000Z'),
+          checkOutTime: new Date('1970-01-01T11:00:00.000Z'),
+          stayFeePolicy,
+        });
+      }
+      afterEach(() => jest.useRealTimers());
+
+      it('charges the late check-out fee after check-out time on the last day', async () => {
+        // 1 p.m. in Lagos on the departure day (the 4th).
+        jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] }).setSystemTime(new Date('2026-09-04T12:00:00.000Z'));
+        branchWithFees({ lateCheckout: { feeType: 'flat', amount: 5000, graceMinutes: 0 } });
+        tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'checked_in', roomId: ROOM_ID }));
+        await service.checkOut(TENANT_ID, RESERVATION_ID, ACTOR);
+        expect(foliosService.postChargeInTx).toHaveBeenCalledWith(
+          tx,
+          expect.objectContaining({ id: 'folio-1' }),
+          expect.objectContaining({ description: 'Late check-out fee', amount: new Prisma.Decimal(5000), chargeType: 'penalty' }),
+          ACTOR_ID,
+        );
+        // On the bill before it's checked for settling.
+        expect(foliosService.postChargeInTx.mock.invocationCallOrder[0]).toBeLessThan(foliosService.settleIfFullyPaid.mock.invocationCallOrder[0]);
+      });
+
+      it('charges the early departure fee when leaving before the booked last night', async () => {
+        jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] }).setSystemTime(new Date('2026-09-02T08:00:00.000Z'));
+        branchWithFees({ earlyDeparture: { feeType: 'flat', amount: 7500 } });
+        tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'checked_in', roomId: ROOM_ID }));
+        await service.checkOut(TENANT_ID, RESERVATION_ID, ACTOR);
+        expect(foliosService.postChargeInTx).toHaveBeenCalledWith(tx, expect.anything(), expect.objectContaining({ description: 'Early departure fee (2 nights given up)' }), ACTOR_ID);
+      });
+
+      it('a manager can waive them, with the reason on record', async () => {
+        jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] }).setSystemTime(new Date('2026-09-02T08:00:00.000Z'));
+        branchWithFees({ earlyDeparture: { feeType: 'flat', amount: 7500 } });
+        tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'checked_in', roomId: ROOM_ID }));
+        await service.checkOut(TENANT_ID, RESERVATION_ID, ACTOR, { waiveFees: true, waiverReason: 'Family emergency' });
+        expect(foliosService.postChargeInTx).not.toHaveBeenCalled();
+        expect(tx.auditLog.create).toHaveBeenCalledWith(
+          expect.objectContaining({ data: expect.objectContaining({ action: 'reservation.check_out_fees_waived', after: expect.objectContaining({ reason: 'Family emergency' }) }) }),
+        );
+      });
+
+      it('the front desk cannot waive them, and a waiver needs a reason', async () => {
+        tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'checked_in', roomId: ROOM_ID }));
+        await expect(service.checkOut(TENANT_ID, RESERVATION_ID, FRONT_DESK, { waiveFees: true, waiverReason: 'Nice guest' })).rejects.toThrow(ForbiddenException);
+        await expect(service.checkOut(TENANT_ID, RESERVATION_ID, ACTOR, { waiveFees: true })).rejects.toThrow(BadRequestException);
+      });
+
+      it('charges nothing without a policy', async () => {
+        jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] }).setSystemTime(new Date('2026-09-04T15:00:00.000Z'));
+        tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'checked_in', roomId: ROOM_ID }));
+        await service.checkOut(TENANT_ID, RESERVATION_ID, ACTOR);
+        expect(foliosService.postChargeInTx).not.toHaveBeenCalled();
+      });
     });
   });
 
@@ -1405,7 +1497,7 @@ describe('ReservationsService', () => {
         expect.objectContaining({ id: TYPE_ID }),
         expect.any(Date),
         expect.any(Date),
-        { promoCode: 'SAVE10', corporateAccountId: 'corp-1' },
+        expect.objectContaining({ promoCode: 'SAVE10', corporateAccountId: 'corp-1' }),
         { triggeredBy: 'modify', userId: ACTOR_ID, reservationId: RESERVATION_ID },
       );
     });
@@ -1537,7 +1629,7 @@ describe('ReservationsService', () => {
         expect.objectContaining({ id: TYPE_ID }),
         new Date('2026-09-01T00:00:00.000Z'),
         new Date('2026-09-06T00:00:00.000Z'),
-        {},
+        expect.objectContaining({ occupancy: expect.any(Object) }),
         { triggeredBy: 'extend_stay', userId: ACTOR_ID, reservationId: RESERVATION_ID },
       );
       // 2026-09-01 -> 2026-09-06 = 5 nights, baseRate 100 -> 500
@@ -1674,7 +1766,7 @@ describe('ReservationsService', () => {
       tx.reservation.findFirst.mockResolvedValue(inHouse());
       const quote = await service.roomMoveQuote(TENANT_ID, RESERVATION_ID, SUITE_ID);
       expect(quote).toMatchObject({ nightsLeft: 2, currentNightly: '100.00', keepTotal: '200.00', newNightly: '180.00', newTotal: '360.00', tonightAlreadyBilled: false });
-      expect(rateResolverService.resolveStay).toHaveBeenCalledWith(tx, TENANT_ID, BRANCH_ID, expect.objectContaining({ id: SUITE_ID }), today, expect.any(Date), {}, expect.objectContaining({ persistAudit: false }));
+      expect(rateResolverService.resolveStay).toHaveBeenCalledWith(tx, TENANT_ID, BRANCH_ID, expect.objectContaining({ id: SUITE_ID }), today, expect.any(Date), expect.objectContaining({ occupancy: expect.any(Object) }), expect.objectContaining({ persistAudit: false }));
       expect(tx.reservation.update).not.toHaveBeenCalled();
     });
   });
@@ -1860,7 +1952,7 @@ describe('ReservationsService', () => {
       tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'waitlisted' }));
       tx.room.count.mockResolvedValue(3);
       await service.promoteFromWaitlist(TENANT_ID, RESERVATION_ID, ACTOR_ID);
-      expect(tx.reservation.update).toHaveBeenCalledWith(expect.objectContaining({ data: { status: 'confirmed' } }));
+      expect(tx.reservation.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: 'confirmed' }) }));
     });
 
     it('stays waitlisted (throws) when nothing has opened up yet', async () => {

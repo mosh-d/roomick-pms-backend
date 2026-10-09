@@ -134,3 +134,26 @@ export function priceOrder(menuItems: PriceableItem[], requested: RequestedLine[
 
   return { lines, subtotal };
 }
+
+export type OrderDiscount = { type: 'percentage' | 'fixed'; value: number; reason?: string };
+
+/**
+ * What a discount takes off the items' price, before tax: a percentage of
+ * it, or a fixed amount — never more than the items come to.
+ */
+export function discountOff(subtotal: Prisma.Decimal, discount: OrderDiscount | undefined): Prisma.Decimal {
+  if (!discount) return new Prisma.Decimal(0);
+  if (discount.type === 'percentage') {
+    if (discount.value > 100) throw invalid('A discount can be at most 100%');
+    return subtotal.mul(discount.value).div(100).toDecimalPlaces(2);
+  }
+  const amount = new Prisma.Decimal(discount.value);
+  if (amount.greaterThan(subtotal)) throw invalid('A discount can’t be more than the order comes to');
+  return amount;
+}
+
+/** A discount as a share of the items' price, in % — what a staff limit is checked against. */
+export function discountPct(subtotal: Prisma.Decimal, discount: Prisma.Decimal): Prisma.Decimal {
+  return subtotal.isZero() ? new Prisma.Decimal(0) : discount.div(subtotal).mul(100);
+}
+

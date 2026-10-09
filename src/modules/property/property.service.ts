@@ -11,6 +11,10 @@ import { CreateBrandDto, UpdateBrandDto } from './dto/brand.dto';
 import {
   CreateBranchDto,
   CancellationPolicyDto,
+  DayUsePolicyDto,
+  TurndownPolicyDto,
+  DepositPolicyDto,
+  StayFeePolicyDto,
   GuestTermsDto,
   NoShowPolicyDto,
   RegCardTemplateDto,
@@ -172,11 +176,12 @@ export class PropertyService {
    * returns `[]` for them by design — this is a deliberately separate
    * endpoint, not a change to that one.
    */
-  async listBranches(tenantId: string): Promise<Array<Pick<Branch, 'id' | 'name'>>> {
+  async listBranches(tenantId: string): Promise<Array<Pick<Branch, 'id' | 'name' | 'timezone'>>> {
     return this.prisma.withTenant(tenantId, (tx) =>
       tx.branch.findMany({
         where: { deletedAt: null },
-        select: { id: true, name: true },
+        // The timezone too: the web app shows times and "today" on the hotel's clock.
+        select: { id: true, name: true, timezone: true },
         orderBy: { name: 'asc' },
       }),
     );
@@ -257,6 +262,118 @@ export class PropertyService {
         data: { noShowPolicy: dto as unknown as Prisma.InputJsonValue },
       });
       await this.audit(tx, tenantId, actorId, 'branch.no_show_policy_updated', 'branch', branchId, dto as Prisma.InputJsonValue, branchId);
+      return updated;
+    });
+  }
+
+  /** `Branch.depositPolicy` — NULL (type `none`) asks no deposit. New bookings pick it up; ones already made keep what they were asked. */
+  async setDepositPolicy(tenantId: string, branchId: string, dto: DepositPolicyDto, actorId: string): Promise<Branch> {
+    if (dto.type === 'percentage' && (dto.value ?? 0) > 100) {
+      throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: 'A deposit can be at most 100% of the stay' });
+    }
+    const policy = dto.type === 'none' ? null : { type: dto.type, value: dto.type === 'first_night' ? null : (dto.value ?? null), dueDaysBeforeArrival: dto.dueDaysBeforeArrival };
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const before = await this.assertBranch(tx, branchId);
+      const updated = await tx.branch.update({ where: { id: branchId }, data: { depositPolicy: policy ?? Prisma.JsonNull } });
+      await tx.auditLog.create({
+        data: {
+          tenantId,
+          branchId,
+          userId: actorId,
+          action: 'branch.deposit_policy_updated',
+          entityType: 'branch',
+          entityId: branchId,
+          before: before.depositPolicy ?? Prisma.JsonNull,
+          after: policy ?? Prisma.JsonNull,
+        },
+      });
+      return updated;
+    });
+  }
+
+  /** `Branch.dayUsePolicy` — the day-use hours, or NULL when the branch doesn't sell day use. */
+  async setDayUsePolicy(tenantId: string, branchId: string, dto: DayUsePolicyDto, actorId: string): Promise<Branch> {
+    if (dto.enabled && (!dto.from || !dto.until || dto.until <= dto.from)) {
+      throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: 'Day use ends after it starts — give a from and an until like 10:00 and 17:00' });
+    }
+    const policy = dto.enabled ? { from: dto.from, until: dto.until } : null;
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const before = await this.assertBranch(tx, branchId);
+      const updated = await tx.branch.update({ where: { id: branchId }, data: { dayUsePolicy: policy ?? Prisma.JsonNull } });
+      await tx.auditLog.create({
+        data: {
+          tenantId,
+          branchId,
+          userId: actorId,
+          action: 'branch.day_use_policy_updated',
+          entityType: 'branch',
+          entityId: branchId,
+          before: before.dayUsePolicy ?? Prisma.JsonNull,
+          after: policy ?? Prisma.JsonNull,
+        },
+      });
+      return updated;
+    });
+  }
+
+  /** `Branch.turndownPolicy` — the evening turndown: every occupied room, or only VIP guests'. Off: NULL. */
+  async setTurndownPolicy(tenantId: string, branchId: string, dto: TurndownPolicyDto, actorId: string): Promise<Branch> {
+    if (dto.enabled && !dto.scope) {
+      throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: 'Say whose rooms are turned down — every occupied room, or VIP guests only' });
+    }
+    const policy = dto.enabled ? { scope: dto.scope } : null;
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const before = await this.assertBranch(tx, branchId);
+      const updated = await tx.branch.update({ where: { id: branchId }, data: { turndownPolicy: policy ?? Prisma.JsonNull } });
+      await tx.auditLog.create({
+        data: {
+          tenantId,
+          branchId,
+          userId: actorId,
+          action: 'branch.turndown_policy_updated',
+          entityType: 'branch',
+          entityId: branchId,
+          before: before.turndownPolicy ?? Prisma.JsonNull,
+          after: policy ?? Prisma.JsonNull,
+        },
+      });
+      return updated;
+    });
+  }
+
+  /** `Branch.stayFeePolicy` — each half sent replaces what's on file (null switches it off); a half left out stays. */
+  async setStayFeePolicy(tenantId: string, branchId: string, dto: StayFeePolicyDto, actorId: string): Promise<Branch> {
+    for (const [label, part] of [['A late check-out', dto.lateCheckout], ['An early departure', dto.earlyDeparture]] as const) {
+      if (part && 'feeType' in part && part.feeType.startsWith('percent') && (part.amount ?? 0) > 100) {
+        throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: `${label} fee can be at most 100%` });
+      }
+    }
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const before = await this.assertBranch(tx, branchId);
+      const current = (before.stayFeePolicy && typeof before.stayFeePolicy === 'object' && !Array.isArray(before.stayFeePolicy) ? before.stayFeePolicy : {}) as Record<string, unknown>;
+      const policy = {
+        lateCheckout: dto.lateCheckout === undefined ? (current.lateCheckout ?? null) : dto.lateCheckout ? { ...dto.lateCheckout } : null,
+        earlyDeparture:
+          dto.earlyDeparture === undefined
+            ? (current.earlyDeparture ?? null)
+            : dto.earlyDeparture
+              ? { feeType: dto.earlyDeparture.feeType, amount: dto.earlyDeparture.feeType === 'first_night' ? null : (dto.earlyDeparture.amount ?? null) }
+              : null,
+      };
+      const off = policy.lateCheckout === null && policy.earlyDeparture === null;
+      const updated = await tx.branch.update({ where: { id: branchId }, data: { stayFeePolicy: off ? Prisma.JsonNull : (policy as Prisma.InputJsonValue) } });
+      await tx.auditLog.create({
+        data: {
+          tenantId,
+          branchId,
+          userId: actorId,
+          action: 'branch.stay_fee_policy_updated',
+          entityType: 'branch',
+          entityId: branchId,
+          before: before.stayFeePolicy ?? Prisma.JsonNull,
+          after: off ? Prisma.JsonNull : (policy as Prisma.InputJsonValue),
+        },
+      });
       return updated;
     });
   }

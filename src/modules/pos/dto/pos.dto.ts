@@ -16,12 +16,13 @@ import {
   MaxLength,
   Min,
   MinLength,
+  ValidateIf,
   ValidateNested,
 } from 'class-validator';
 import { IsDateOnly } from '../../../common/validation/is-date-only.decorator';
 
 const OUTLET_CATEGORIES = ['restaurant', 'bar', 'spa', 'laundry', 'retail', 'room_service'] as const;
-const SETTLEMENTS = ['room', 'cash', 'card'] as const;
+const SETTLEMENTS = ['room', 'cash', 'card', 'split'] as const;
 
 // --- Outlets -----------------------------------------------------------------
 
@@ -41,6 +42,13 @@ export class CreateOutletDto {
   @IsInt()
   @Min(0)
   sortOrder?: number;
+
+  @ApiPropertyOptional({ example: 10, nullable: true, description: 'The most the till’s staff may take off an order, as a %; managers any amount. null = only a manager discounts' })
+  @IsOptional()
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  @Max(100)
+  staffDiscountLimitPct?: number | null;
 }
 
 /** No `category`: it fixed the outlet's charge type at creation, and changing it later would split the outlet's own sales history across two types. */
@@ -62,6 +70,14 @@ export class UpdateOutletDto {
   @IsInt()
   @Min(0)
   sortOrder?: number;
+
+  @ApiPropertyOptional({ example: 10, nullable: true, description: 'The most the till’s staff may take off an order, as a %; null = only a manager discounts' })
+  @IsOptional()
+  @ValidateIf((_o, value) => value !== null)
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  @Max(100)
+  staffDiscountLimitPct?: number | null;
 }
 
 // --- Menu ---------------------------------------------------------------------
@@ -186,6 +202,25 @@ export class OrderItemDto {
   modifiers?: OrderModifierDto[];
 }
 
+/** Taken off the order's items before tax — a percentage of them, or a fixed amount — always with the reason. */
+export class OrderDiscountDto {
+  @ApiProperty({ enum: ['percentage', 'fixed'] })
+  @IsIn(['percentage', 'fixed'])
+  type!: 'percentage' | 'fixed';
+
+  @ApiProperty({ example: 10, description: 'A percentage (up to 100), or an amount in the branch currency' })
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0.01)
+  @Max(1_000_000_000)
+  value!: number;
+
+  @ApiPropertyOptional({ example: 'Regular guest — manager’s goodwill', description: 'Why — required on the order itself, not on a quote' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(300)
+  reason?: string;
+}
+
 export class QuotePosOrderDto {
   @ApiProperty({ type: [OrderItemDto] })
   @IsArray()
@@ -194,6 +229,12 @@ export class QuotePosOrderDto {
   @ValidateNested({ each: true })
   @Type(() => OrderItemDto)
   items!: OrderItemDto[];
+
+  @ApiPropertyOptional({ type: OrderDiscountDto })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => OrderDiscountDto)
+  discount?: OrderDiscountDto;
 }
 
 export class CreatePosOrderDto extends QuotePosOrderDto {
@@ -201,9 +242,16 @@ export class CreatePosOrderDto extends QuotePosOrderDto {
   @IsUUID()
   outletId!: string;
 
-  @ApiProperty({ enum: SETTLEMENTS, description: 'room = charge to an in-house guest; cash / card = paid at the outlet' })
+  @ApiProperty({ enum: SETTLEMENTS, description: 'room = charge to an in-house guest; cash / card = paid at the outlet; split = part cash, part card' })
   @IsIn(SETTLEMENTS)
   settlement!: (typeof SETTLEMENTS)[number];
+
+  @ApiPropertyOptional({ example: 5000, description: 'A split sale: the part paid in cash — the rest is by card' })
+  @ValidateIf((o: CreatePosOrderDto) => o.settlement === 'split')
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0.01)
+  @Max(1_000_000_000)
+  cashAmount?: number;
 
   @ApiPropertyOptional({ description: 'Required for a room charge — from the room lookup, so the cashier has confirmed the guest' })
   @IsOptional()

@@ -6,6 +6,7 @@ import { JwtPayload } from '../../common/types/request-context';
 import { assertRoleAtBranch } from '../../common/utils/branch-roles';
 import { PrismaService, TenantTx } from '../../prisma/prisma.service';
 import { TaxesService } from '../taxes/taxes.service';
+import { FoliosService } from '../folios/folios.service';
 import { renderBeoPdf } from './beo-pdf.util';
 import { CreateEventBookingDto, CreateEventSpaceDto, SETUP_STYLES, SetupStyle, UpdateEventBookingDto } from './dto/sales-events.dto';
 
@@ -49,6 +50,11 @@ export interface EventBookingSummary {
   status: string;
   cancelledAt: Date | null;
   createdAt: Date;
+  /** What the space costs for the event, before tax; null = no hire charge. */
+  spaceHireFee: string | null;
+  /** Billed: the bill its hire and catering went on, and when. */
+  folioId: string | null;
+  billedAt: Date | null;
 }
 
 /** A booking with its space and its catering priced: a line's amount, the subtotal, tax by the branch's F&B rules, and the total. */
@@ -56,8 +62,10 @@ export interface EventBookingDetail extends EventBookingSummary {
   space: EventSpaceSummary;
   currency: string;
   cateringLines: Array<CateringLine & { amount: string }>;
-  /** `taxTotal` is added on top of `subtotal`; `taxIncluded` is already inside it. */
-  totals: { subtotal: string; taxTotal: string; taxIncluded: string; total: string };
+  /** Hire and catering together. `taxTotal` is added on top of `subtotal`; `taxIncluded` is already inside it. */
+  totals: { hire: string; catering: string; subtotal: string; taxTotal: string; taxIncluded: string; total: string };
+  /** The bill it went on, the way the desk knows it. */
+  billedTo: { folioId: string; guestName: string; roomNumber: string | null; confirmationNumber: string | null } | null;
 }
 
 function parseCapacities(value: Prisma.JsonValue | null | undefined): SetupCapacities | null {
@@ -109,6 +117,9 @@ function toBookingSummary(booking: EventBooking): EventBookingSummary {
     status: booking.status,
     cancelledAt: booking.cancelledAt ?? null,
     createdAt: booking.createdAt,
+    spaceHireFee: booking.spaceHireFee ? booking.spaceHireFee.toFixed(2) : null,
+    folioId: booking.folioId ?? null,
+    billedAt: booking.billedAt ?? null,
   };
 }
 
@@ -125,14 +136,16 @@ function optionalText(value: string | null | undefined): string | null | undefin
  * `Reservation`. Each booking carries what its Banquet Event Order needs:
  * layout, guaranteed headcount (checked against the space's seats for that
  * layout), contact, priced catering and AV. Catering is priced on the fly
- * and never stored as totals; its tax uses the branch's F&B rules and is an
- * estimate — an event isn't billed through a folio yet.
+ * and never stored as totals; its tax uses the branch's F&B rules (the space
+ * hire, the branch's rules for other charges). Billing an event puts its
+ * hire and catering on a bill — a guest's, or a group's master bill — once.
  */
 @Injectable()
 export class EventSpacesService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly taxesService: TaxesService,
+    private readonly foliosService: FoliosService,
   ) {}
 
   async createSpace(tenantId: string, branchId: string, dto: CreateEventSpaceDto, actorId?: string): Promise<EventSpaceSummary> {
@@ -206,6 +219,7 @@ export class EventSpacesService {
           contactPhone: dto.contactPhone,
           catering: dto.catering ? this.cateringJson(dto.catering) : undefined,
           avRequirements: dto.avRequirements,
+          spaceHireFee: dto.spaceHireFee ? new Prisma.Decimal(dto.spaceHireFee) : null,
           createdBy: actorId,
         },
       });
@@ -231,6 +245,10 @@ export class EventSpacesService {
       assertRoleAtBranch(actor, space.branchId, EVENT_STAFF_ROLES);
       if (booking.status === 'cancelled') {
         throw new ConflictException({ code: ErrorCode.CONFLICT, message: 'This event was cancelled — book it again rather than editing the cancelled one' });
+      }
+      // What it costs is on a bill now: changing it here would make the two disagree.
+      if (booking.billedAt && (dto.catering !== undefined || dto.spaceHireFee !== undefined)) {
+        throw new ConflictException({ code: ErrorCode.CONFLICT, message: 'This event has been billed — correct the charges on the bill instead of changing them here' });
       }
 
       const startsAt = dto.startsAt ? new Date(dto.startsAt) : booking.startsAt;
@@ -259,6 +277,7 @@ export class EventSpacesService {
           catering: dto.catering !== undefined ? this.cateringJson(dto.catering ?? []) : undefined,
           avRequirements: optionalText(dto.avRequirements),
           notes: optionalText(dto.notes),
+          spaceHireFee: dto.spaceHireFee !== undefined ? (dto.spaceHireFee ? new Prisma.Decimal(dto.spaceHireFee) : null) : undefined,
         },
       });
       await tx.auditLog.create({
@@ -293,7 +312,7 @@ export class EventSpacesService {
       const timezone = branch?.timezone ?? 'UTC';
       const currency = branch?.currency ?? '';
       const lines = parseCatering(booking.catering);
-      const totals = await this.cateringTotals(tx, space.branchId, lines);
+      const totals = await this.eventTotals(tx, space.branchId, booking.spaceHireFee, lines);
 
       const day = new Intl.DateTimeFormat('en-GB', { timeZone: timezone, weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
       const clock = new Intl.DateTimeFormat('en-GB', { timeZone: timezone, hour: '2-digit', minute: '2-digit' });
@@ -323,6 +342,7 @@ export class EventSpacesService {
             unitPrice: money(new Prisma.Decimal(line.unitPrice)),
             amount: money(new Prisma.Decimal(line.unitPrice).mul(line.quantity)),
           })),
+          spaceHire: booking.spaceHireFee && booking.spaceHireFee.greaterThan(0) ? money(booking.spaceHireFee) : null,
           subtotal: money(totals.subtotal),
           tax: money(totals.taxTotal),
           taxIncluded: totals.taxIncluded.isZero() ? null : money(totals.taxIncluded),
@@ -358,6 +378,67 @@ export class EventSpacesService {
           after: { title: booking.title, space: booking.eventSpace.name, startsAt: booking.startsAt.toISOString() },
         },
       });
+    });
+  }
+
+  /**
+   * Puts the event's space hire and catering on a bill — a guest's, or a
+   * group's master bill — at the same property, taxed by the branch's rules
+   * like any charge. Once: billed is billed, and a correction is made on the
+   * bill.
+   */
+  async billBooking(tenantId: string, bookingId: string, folioId: string, actor: JwtPayload): Promise<EventBookingDetail> {
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      // Two clicks at once would bill it twice.
+      await tx.$queryRaw`SELECT id FROM event_bookings WHERE id = ${bookingId}::uuid FOR UPDATE`;
+      const { booking, space } = await this.loadBooking(tx, bookingId);
+      assertRoleAtBranch(actor, space.branchId, EVENT_STAFF_ROLES);
+      if (booking.status === 'cancelled') throw new ConflictException({ code: ErrorCode.CONFLICT, message: 'This event was cancelled — there is nothing to bill' });
+      if (booking.billedAt) throw new ConflictException({ code: ErrorCode.CONFLICT, message: 'This event has already been billed' });
+      const folio = await tx.folio.findFirst({ where: { id: folioId, deletedAt: null } });
+      if (!folio || folio.branchId !== space.branchId) {
+        throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'No such bill at this property' });
+      }
+      if (folio.status === 'settled' || folio.status === 'pending') {
+        throw new ConflictException({
+          code: ErrorCode.CONFLICT,
+          message: folio.status === 'settled' ? 'That bill is settled — reopen it, or pick an open one' : 'That bill opens when its guest arrives — pick an open one',
+        });
+      }
+      const lines = parseCatering(booking.catering);
+      const hire = booking.spaceHireFee && booking.spaceHireFee.greaterThan(0) ? booking.spaceHireFee : null;
+      if (!hire && lines.every((line) => !(line.quantity > 0 && line.unitPrice > 0))) {
+        throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: 'This event has no space hire or catering to bill' });
+      }
+
+      const branch = await tx.branch.findFirst({ where: { id: space.branchId }, select: { timezone: true } });
+      const serviceDate = new Date(`${booking.startsAt.toLocaleDateString('en-CA', { timeZone: branch?.timezone ?? 'UTC' })}T00:00:00.000Z`);
+      if (hire) {
+        await this.foliosService.postChargeInTx(tx, folio, { description: `${booking.title} — hire of ${space.name}`.slice(0, 300), amount: hire, chargeType: 'misc', serviceDate }, actor.sub);
+      }
+      for (const line of lines) {
+        const amount = new Prisma.Decimal(line.unitPrice).mul(line.quantity);
+        if (!amount.greaterThan(0)) continue;
+        await this.foliosService.postChargeInTx(
+          tx,
+          folio,
+          { description: `${booking.title} — ${line.description} × ${line.quantity}`.slice(0, 300), amount, chargeType: 'fnb', serviceDate },
+          actor.sub,
+        );
+      }
+      const billed = await tx.eventBooking.update({ where: { id: booking.id }, data: { folioId: folio.id, billedAt: new Date(), billedBy: actor.sub } });
+      await tx.auditLog.create({
+        data: {
+          tenantId,
+          branchId: space.branchId,
+          userId: actor.sub,
+          action: 'event_booking.billed',
+          entityType: 'event_booking',
+          entityId: booking.id,
+          after: { folioId: folio.id, title: booking.title, spaceHire: hire?.toFixed(2) ?? null, cateringLines: lines.length },
+        },
+      });
+      return this.detail(tx, billed, space);
     });
   }
 
@@ -398,28 +479,60 @@ export class EventSpacesService {
     return lines.map((line) => ({ description: line.description.trim(), quantity: line.quantity, unitPrice: line.unitPrice }));
   }
 
-  /** A quote, like the Rate Resolver's: `subtotal` is the menu prices added up, `taxTotal` what's added on top, `taxIncluded` what's already inside them. */
-  private async cateringTotals(tx: TenantTx, branchId: string, lines: CateringLine[]) {
-    const subtotal = lines.reduce((sum, line) => sum.plus(new Prisma.Decimal(line.unitPrice).mul(line.quantity)), ZERO);
-    const priced = await this.taxesService.priceCharge(tx, branchId, 'fnb', subtotal);
-    return { subtotal, taxTotal: priced.addedTax, taxIncluded: priced.includedTax, total: priced.total };
+  /**
+   * A quote, like the Rate Resolver's: the space hire (taxed as a charge of
+   * its own) and the catering (by the F&B rules). `subtotal` is the prices
+   * added up, `taxTotal` what's added on top, `taxIncluded` what's already
+   * inside them — what billing it will post.
+   */
+  private async eventTotals(tx: TenantTx, branchId: string, spaceHireFee: Prisma.Decimal | null, lines: CateringLine[]) {
+    const catering = lines.reduce((sum, line) => sum.plus(new Prisma.Decimal(line.unitPrice).mul(line.quantity)), ZERO);
+    const hire = spaceHireFee ?? ZERO;
+    const [cateringPriced, hirePriced] = await Promise.all([
+      this.taxesService.priceCharge(tx, branchId, 'fnb', catering),
+      this.taxesService.priceCharge(tx, branchId, 'misc', hire),
+    ]);
+    return {
+      hire,
+      catering,
+      subtotal: catering.plus(hire),
+      taxTotal: cateringPriced.addedTax.plus(hirePriced.addedTax),
+      taxIncluded: cateringPriced.includedTax.plus(hirePriced.includedTax),
+      total: cateringPriced.total.plus(hirePriced.total),
+    };
   }
 
   private async detail(tx: TenantTx, booking: EventBooking, space: EventSpace): Promise<EventBookingDetail> {
     const branch = await tx.branch.findFirst({ where: { id: space.branchId }, select: { currency: true } });
     const lines = parseCatering(booking.catering);
-    const totals = await this.cateringTotals(tx, space.branchId, lines);
+    const totals = await this.eventTotals(tx, space.branchId, booking.spaceHireFee, lines);
+    const billedFolio = booking.folioId
+      ? await tx.folio.findFirst({
+          where: { id: booking.folioId },
+          select: { id: true, guest: { select: { name: true } }, reservation: { select: { confirmationNumber: true, room: { select: { number: true } } } } },
+        })
+      : null;
     return {
       ...toBookingSummary(booking),
       space: toSpaceSummary(space),
       currency: branch?.currency ?? '',
       cateringLines: lines.map((line) => ({ ...line, amount: new Prisma.Decimal(line.unitPrice).mul(line.quantity).toFixed(2) })),
       totals: {
+        hire: totals.hire.toFixed(2),
+        catering: totals.catering.toFixed(2),
         subtotal: totals.subtotal.toFixed(2),
         taxTotal: totals.taxTotal.toFixed(2),
         taxIncluded: totals.taxIncluded.toFixed(2),
         total: totals.total.toFixed(2),
       },
+      billedTo: billedFolio
+        ? {
+            folioId: billedFolio.id,
+            guestName: billedFolio.guest.name,
+            roomNumber: billedFolio.reservation?.room?.number ?? null,
+            confirmationNumber: billedFolio.reservation?.confirmationNumber ?? null,
+          }
+        : null,
     };
   }
 }

@@ -1,7 +1,7 @@
 import { INestApplication } from '@nestjs/common';
 import { App } from 'supertest/types';
 import { PrismaService } from '../src/prisma/prisma.service';
-import { addBranch, book, BranchLayout, Client, deleteOrganisation, headBrand, inTenant, lagosDay, Session, signUp, startApp } from './support/e2e';
+import { addBranch, book, BranchLayout, Client, deleteOrganisation, headBrand, inTenant, lagosDay, Session, sessionToken, signUp, startApp } from './support/e2e';
 
 /**
  * Selling rooms, and the rules around it — from the second audit's live repros.
@@ -107,7 +107,7 @@ describe('Selling rooms (e2e)', () => {
       const login = await client.post('/auth/login', null, { email: owner.email, password: owner.password });
       expect(login.status).toBe(403);
       expect(login.body.code).toBe('TENANT_SUSPENDED');
-      const renew = await client.post('/auth/refresh', null, { refreshToken: fresh.body.refreshToken });
+      const renew = await client.post('/auth/refresh', null, { refreshToken: sessionToken(fresh) });
       expect(renew.status).toBe(403);
     } finally {
       await prisma.tenant.update({ where: { id: owner.tenantId }, data: { status } });

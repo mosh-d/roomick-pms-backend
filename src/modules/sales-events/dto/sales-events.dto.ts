@@ -16,6 +16,7 @@ import {
   MaxLength,
   Min,
   MinLength,
+  ValidateIf,
   ValidateNested,
 } from 'class-validator';
 import { IsDateOnly } from '../../../common/validation/is-date-only.decorator';
@@ -346,9 +347,24 @@ export class CreateEventBookingDto {
   @IsString()
   @MaxLength(2000)
   avRequirements?: string;
+
+  @ApiPropertyOptional({ example: 150000, description: 'What the space costs for the event, before tax. Null or left out = no hire charge.', nullable: true })
+  @IsOptional()
+  @ValidateIf((_o, value) => value !== null)
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  @Max(1_000_000_000)
+  spaceHireFee?: number | null;
 }
 
 export class UpdateEventBookingDto extends PartialType(CreateEventBookingDto) {}
+
+/** Billing an event: its space hire and catering go on this bill. */
+export class BillEventBookingDto {
+  @ApiProperty({ description: 'An open bill at the same property — a guest’s, or a group’s master bill' })
+  @IsUUID()
+  folioId!: string;
+}
 
 /** The calendar window — both ends are instants, since events have times of day. */
 export class EventBookingsQueryDto {

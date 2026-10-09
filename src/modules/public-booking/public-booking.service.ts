@@ -2,6 +2,7 @@ import { BadRequestException, ConflictException, Injectable, NotFoundException }
 import { CommunicationLog, Prisma, Reservation } from '@prisma/client';
 import { ErrorCode } from '../../common/errors/error-codes';
 import { todayInTimezone, toBranchDate } from '../../common/utils/branch-date';
+import { PackagesQuote, PackagesService, PackageView } from '../rate-resolver/packages.service';
 import { PrismaService, TenantTx } from '../../prisma/prisma.service';
 import { CommsLogService } from '../comms-log/comms-log.service';
 import { FoliosService } from '../folios/folios.service';
@@ -73,8 +74,14 @@ export interface PublicQuote {
   taxIncluded: string;
   totalWithTax: string;
   nights: number;
+  /** What the extra adults and children add to each night — already inside `nightlyRate` and `subtotal`. */
+  occupancySurcharge: string;
   /** The cancellation terms this stay would book under — including when it starts so soon that the free window has already closed. */
   cancellation: { summary: string; freeCancellationUntil: Date; freeCancellationAvailable: boolean };
+  /** Packages added to the quote, each priced for the stay; their total is in `grandTotal`, not `totalWithTax` (the room). */
+  packages: PackagesQuote | null;
+  /** The room and the packages, tax included — what the stay comes to. */
+  grandTotal: string;
 }
 
 export interface PublicRoomType {
@@ -114,7 +121,16 @@ export interface PublicBookingDetail {
   houseRules: string | null;
   /** The cancellation terms this booking was made under, as one sentence. */
   cancellationPolicySummary: string;
+  /** The deposit the booking was asked for, when, and what has been paid of it. Null = none asked. */
+  deposit: PublicDeposit | null;
   property: PublicPropertyInfo;
+}
+
+/** A booking's deposit as its guest sees it. */
+export interface PublicDeposit {
+  amount: string;
+  dueDate: Date | null;
+  paid: string;
 }
 
 /** A charge as a guest sees it — no staff ids, outlet, tax-rule ids, or the parent's denormalised `taxAmount` (tax appears as its own lines). */
@@ -161,6 +177,8 @@ export interface PublicBookingConfirmation {
   guestName: string;
   totalRate: string;
   currency: string;
+  /** The deposit the property asks, and by when — the property arranges payment (there's no online payment yet). */
+  deposit: PublicDeposit | null;
 }
 
 /** What a guest sees before cancelling: the terms and the charge — no ids, no folio internals. */
@@ -239,6 +257,7 @@ export class PublicBookingService {
     private readonly foliosService: FoliosService,
     private readonly commsLogService: CommsLogService,
     private readonly housekeepingService: HousekeepingService,
+    private readonly packagesService: PackagesService,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -413,10 +432,19 @@ export class PublicBookingService {
     const resolution = await this.rateResolverService.calculateQuote(
       tenantId,
       branchId,
-      { roomTypeId: dto.roomTypeId, checkInDate: dto.checkInDate, checkOutDate: dto.checkOutDate, promoCode: dto.promoCode },
+      { roomTypeId: dto.roomTypeId, checkInDate: dto.checkInDate, checkOutDate: dto.checkOutDate, promoCode: dto.promoCode, adults: dto.adults, children: dto.children },
       null,
       { persistAudit: false },
     );
+    const nightsForPackages = Math.round((Date.parse(dto.checkOutDate) - Date.parse(dto.checkInDate)) / 86_400_000);
+    const packages = dto.packageIds?.length
+      ? await this.packagesService.quoteForStay(
+          tenantId,
+          branchId,
+          { roomTypeId: dto.roomTypeId, packageIds: dto.packageIds, nights: nightsForPackages, guests: (dto.adults ?? 1) + (dto.children ?? 0) },
+          { online: true },
+        )
+      : null;
     const branch = await this.prisma.withTenant(tenantId, (tx) =>
       tx.branch.findFirstOrThrow({
         where: { id: branchId },
@@ -448,12 +476,22 @@ export class PublicBookingService {
       taxIncluded: resolution.taxIncluded.toFixed(2),
       totalWithTax: resolution.totalWithTax.toFixed(2),
       nights,
+      occupancySurcharge: resolution.occupancySurcharge.toFixed(2),
       cancellation: {
         summary: describeCancellationPolicy(policy, branch.checkInTime.toISOString().slice(11, 16), branch.currency),
         freeCancellationUntil: terms.freeUntil,
         freeCancellationAvailable: terms.withinFreeWindow,
       },
+      packages,
+      grandTotal: resolution.totalWithTax.plus(packages?.total ?? 0).toFixed(2),
     };
+  }
+
+  /** Packages offered online with a room type — what a guest can add to their stay. */
+  async listPackages(slug: string, roomTypeId?: string): Promise<Array<Pick<PackageView, 'id' | 'name' | 'description' | 'price' | 'basis'>>> {
+    const { tenantId, branchId } = await this.resolveBookableBranch(slug);
+    const packages = await this.packagesService.list(tenantId, branchId, { roomTypeId, online: true });
+    return packages.map(({ id, name, description, price, basis }) => ({ id, name, description, price, basis }));
   }
 
   // ---------------------------------------------------------------------------
@@ -469,7 +507,7 @@ export class PublicBookingService {
    * here unchanged, because this IS that path.
    *
    * Four values are forced server-side and can never come from the client:
-   * `channel: 'direct'` (a public booking is direct by definition),
+   * `channel: 'website'` (the property's own booking page),
    * `joinWaitlist: false`, no `guestId`, and no `corporateAccountId`. See
    * `PublicCreateReservationDto`'s own comment for why each matters.
    *
@@ -505,8 +543,11 @@ export class PublicBookingService {
         specialRequests: dto.specialRequests,
         promoCode: dto.promoCode,
         guest: { name: dto.guestName, email: dto.guestEmail, phone: dto.guestPhone },
-        channel: 'direct',
+        // The property's own booking page: its own channel, so its bookings
+        // can be told apart from the desk's (and given an allotment).
+        channel: 'website',
         joinWaitlist: false,
+        packageIds: dto.packageIds,
       },
       null,
       { publicBooking: true },
@@ -570,6 +611,8 @@ export class PublicBookingService {
           checkInDate: true,
           checkOutDate: true,
           confirmedRate: true,
+          depositAmount: true,
+          depositDueDate: true,
           roomType: { select: { name: true } },
           guest: { select: { name: true } },
           branch: { select: { currency: true } },
@@ -583,6 +626,7 @@ export class PublicBookingService {
         guestName: full.guest.name,
         totalRate: full.confirmedRate.toFixed(2),
         currency: full.branch.currency,
+        deposit: full.depositAmount ? { amount: full.depositAmount.toFixed(2), dueDate: full.depositDueDate, paid: '0.00' } : null,
       };
     });
   }
@@ -645,14 +689,19 @@ export class PublicBookingService {
           preArrivalCompletedAt: true,
           estimatedArrivalTime: true,
           cancellationPolicy: true,
+          depositAmount: true,
+          depositDueDate: true,
           roomType: { select: { name: true } },
           guest: { select: { name: true, email: true, phone: true } },
           branch: { select: { currency: true, regCardTemplate: true } },
+          // Deposits paid so far, on the stay's bills.
+          folios: { where: { deletedAt: null }, select: { payments: { where: { paymentPurpose: 'deposit', isVoid: false, deletedAt: null }, select: { amount: true } } } },
         },
       }),
     );
 
     if (!reservation) throw this.bookingNotFound();
+    const depositPaid = (reservation.folios ?? []).flatMap((f) => f.payments).reduce((sum, p) => sum.plus(p.amount), new Prisma.Decimal(0));
 
     const property = await this.getProperty(slug);
 
@@ -686,6 +735,7 @@ export class PublicBookingService {
       cancellationPolicySummary: reservation.cancellationPolicy
         ? describeCancellationPolicy(resolveCancellationPolicy(reservation.cancellationPolicy), property.checkInTime, reservation.branch.currency)
         : property.cancellationPolicy.summary,
+      deposit: reservation.depositAmount ? { amount: reservation.depositAmount.toFixed(2), dueDate: reservation.depositDueDate, paid: depositPaid.toFixed(2) } : null,
       property,
     };
   }

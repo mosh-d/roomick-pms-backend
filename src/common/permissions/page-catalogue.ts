@@ -53,7 +53,7 @@ export const PAGE_CATALOGUE: readonly PageDefinition[] = [
   // --- Operations -------------------------------------------------------------------------------------------------
   { key: '/dashboard/alerts', label: 'Alerts', group: 'Operations', feature: 'Alerts', module: 'alerts', roles: [FD, AC], uses: ['alerts'] },
 
-  { key: '/dashboard/arrivals', label: 'Arrivals Dashboard', group: 'Operations', feature: 'Front Desk', module: 'reservations', roles: EVERY_STAFF_ROLE, uses: ['reservations', 'property'] },
+  { key: '/dashboard/arrivals', label: 'Arrivals Dashboard', group: 'Operations', feature: 'Front Desk', module: 'reservations', roles: EVERY_STAFF_ROLE, uses: ['reservations', 'property', 'folios'] },
   { key: '/dashboard/check-in', label: 'Check-In Flow', group: 'Operations', feature: 'Front Desk', module: 'reservations', roles: EVERY_STAFF_ROLE, actRoles: [FD], uses: ['reservations', 'guests', 'property'] },
   { key: '/dashboard/group-check-in', label: 'Group Check-In', group: 'Operations', feature: 'Front Desk', module: 'reservations', roles: EVERY_STAFF_ROLE, actRoles: [FD], uses: ['reservations', 'property'] },
   { key: '/dashboard/walk-in-booking', label: 'Walk-In Booking', group: 'Operations', feature: 'Front Desk', module: 'reservations', roles: [FD, AC], actRoles: [FD], uses: ['reservations', 'guests', 'property'] },
@@ -65,7 +65,7 @@ export const PAGE_CATALOGUE: readonly PageDefinition[] = [
 
   { key: '/dashboard/reservations/availability-calendar', label: 'Availability Calendar', group: 'Operations', feature: 'Reservations', module: 'reservations', roles: EVERY_STAFF_ROLE, uses: ['reservations'] },
   { key: '/dashboard/reservations/create', label: 'Create Reservation', group: 'Operations', feature: 'Reservations', module: 'reservations', roles: [FD, AC], actRoles: [FD], uses: ['reservations', 'guests', 'property'] },
-  { key: '/dashboard/reservations/modify', label: 'Modify Reservation', group: 'Operations', feature: 'Reservations', module: 'reservations', roles: EVERY_STAFF_ROLE, actRoles: [FD], uses: ['reservations', 'property'] },
+  { key: '/dashboard/reservations/modify', label: 'Modify Reservation', group: 'Operations', feature: 'Reservations', module: 'reservations', roles: EVERY_STAFF_ROLE, actRoles: [FD], uses: ['reservations', 'property', 'folios'] },
   { key: '/dashboard/reservations/cancel', label: 'Cancel Reservation', group: 'Operations', feature: 'Reservations', module: 'reservations', roles: [FD], actRoles: [FD], uses: ['reservations'] },
   { key: '/dashboard/reservations/waitlist', label: 'Waitlist Management', group: 'Operations', feature: 'Reservations', module: 'reservations', roles: EVERY_STAFF_ROLE, actRoles: [FD], uses: ['reservations'] },
 
@@ -97,7 +97,7 @@ export const PAGE_CATALOGUE: readonly PageDefinition[] = [
   { key: '/dashboard/reservations/rate-plans', label: 'Rate Resolver', group: 'Management', feature: 'Rate Resolver', module: 'reservations', roles: EVERY_STAFF_ROLE, actRoles: [], uses: ['reservations', 'property'] },
   { key: '/dashboard/guests/profiles', label: 'Guest Profiles', group: 'Management', feature: 'Guest Profiles & CRM', module: 'guests', roles: [FD], actRoles: [FD], uses: ['guests', 'loyalty'] },
   { key: '/dashboard/guests/corporate', label: 'Corporate Accounts', group: 'Management', feature: 'Guest Profiles & CRM', module: 'guests', roles: [FD, AC], actRoles: [], uses: ['guests', 'reservations'] },
-  { key: '/dashboard/sales-events', label: 'Sales & Events', group: 'Management', feature: 'Sales & Events', module: 'sales_events', roles: [FD], actRoles: [FD], uses: ['sales_events', 'property'] },
+  { key: '/dashboard/sales-events', label: 'Sales & Events', group: 'Management', feature: 'Sales & Events', module: 'sales_events', roles: [FD], actRoles: [FD], uses: ['sales_events', 'property', 'folios'] },
   { key: '/dashboard/maintenance', label: 'Maintenance', group: 'Management', feature: 'Maintenance', module: 'maintenance', roles: EVERY_STAFF_ROLE, actRoles: EVERY_STAFF_ROLE, uses: ['maintenance', 'property'] },
   { key: '/dashboard/reports/operational', label: 'Operational Reports', group: 'Management', feature: 'Reports & Analytics', module: 'reports', roles: [FD, AC], uses: ['reports', 'property'] },
   { key: '/dashboard/reports/financial', label: 'Financial Reports', group: 'Management', feature: 'Reports & Analytics', module: 'reports', roles: [AC], uses: ['reports'] },

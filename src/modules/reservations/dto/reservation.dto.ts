@@ -16,6 +16,7 @@ import {
   MaxLength,
   Min,
   MinLength,
+  ValidateIf,
   ValidateNested,
 } from 'class-validator';
 import { IsDateOnly } from '../../../common/validation/is-date-only.decorator';
@@ -97,6 +98,18 @@ export class CreateReservationDto {
   @IsOptional()
   @IsUUID()
   corporateAccountId?: string;
+
+  @ApiPropertyOptional({ description: 'A room for the day, not a night — checkOutDate is then the same day. The property must offer day use, and the room type have a day-use rate.' })
+  @IsOptional()
+  @IsBoolean()
+  dayUse?: boolean;
+
+  @ApiPropertyOptional({ type: [String], description: 'Packages added to the stay — breakfast, a transfer — priced as they stand now' })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(20)
+  @IsUUID('4', { each: true })
+  packageIds?: string[];
 }
 
 export class WalkInReservationDto {
@@ -128,12 +141,25 @@ export class WalkInReservationDto {
   @IsUUID()
   roomId!: string;
 
-  @ApiProperty({
+  @ApiPropertyOptional({
     example: '2026-09-04',
-    description: 'checkInDate is NOT accepted — the server forces it to today in the branch timezone',
+    description: 'checkInDate is NOT accepted — the server forces it to today in the branch timezone. Required unless dayUse.',
   })
+  @ValidateIf((o: WalkInReservationDto) => o.dayUse !== true)
   @IsDateOnly()
-  checkOutDate!: string;
+  checkOutDate?: string;
+
+  @ApiPropertyOptional({ description: 'The room for the day only — leaves today, at the end of the day-use hours' })
+  @IsOptional()
+  @IsBoolean()
+  dayUse?: boolean;
+
+  @ApiPropertyOptional({ type: [String] })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(20)
+  @IsUUID('4', { each: true })
+  packageIds?: string[];
 
   @ApiProperty({ example: 2 })
   @Type(() => Number)
@@ -453,4 +479,18 @@ export class DateOnlyQueryDto {
   @IsOptional()
   @IsDateOnly()
   date?: string;
+}
+
+/** Checking out: the branch's late check-out / early departure fees apply unless a manager waives them, saying why. */
+export class CheckOutDto {
+  @ApiPropertyOptional({ description: "Don't charge the late check-out or early departure fee (managers only)" })
+  @IsOptional()
+  @IsBoolean()
+  waiveFees?: boolean;
+
+  @ApiPropertyOptional({ example: 'Flight delayed — goodwill' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(300)
+  waiverReason?: string;
 }

@@ -19,6 +19,8 @@ import { DemandForecastService, ForecastDay } from './demand-forecast.service';
 import { RateRecommendationsService, RateRecommendation } from './rate-recommendations.service';
 import { CompSetAnalysis, CompSetService } from './comp-set.service';
 import { BranchOf } from '../../common/decorators/branch-of.decorator';
+import { ChannelAllotmentsService, ChannelAllotmentView } from './channel-allotments.service';
+import { CreateChannelAllotmentDto, UpdateChannelAllotmentDto } from './dto/channel-allotment.dto';
 
 @ApiTags('revenue-management')
 @ApiBearerAuth()
@@ -33,6 +35,7 @@ export class RevenueManagementController {
     private readonly demandForecastService: DemandForecastService,
     private readonly rateRecommendationsService: RateRecommendationsService,
     private readonly compSetService: CompSetService,
+    private readonly channelAllotmentsService: ChannelAllotmentsService,
   ) {}
 
   // --- Restrictions Management --------------------------------------------------
@@ -60,6 +63,44 @@ export class RevenueManagementController {
   async deleteRestriction(@CurrentTenant() tenantId: string, @CurrentUser() user: JwtPayload, @Param('restrictionId', ParseUUIDPipe) restrictionId: string): Promise<{ ok: true }> {
     await this.restrictionsService.deleteRestriction(tenantId, restrictionId, user.sub);
     return { ok: true };
+  }
+
+  // --- Channel Allotments -------------------------------------------------------
+
+  @Get('branches/:branchId/channel-allotments')
+  @ApiOperation({ summary: 'Channel allotments — how many of each room type a channel may sell a night, by date range' })
+  listChannelAllotments(@CurrentTenant() tenantId: string, @Param('branchId', ParseUUIDPipe) branchId: string): Promise<ChannelAllotmentView[]> {
+    return this.channelAllotmentsService.list(tenantId, branchId);
+  }
+
+  @Post('branches/:branchId/channel-allotments')
+  @ApiOperation({ summary: 'Cap what a channel may sell of a room type a night over a date range — 0 closes the channel for it' })
+  createChannelAllotment(
+    @CurrentTenant() tenantId: string,
+    @CurrentUser() user: JwtPayload,
+    @Param('branchId', ParseUUIDPipe) branchId: string,
+    @Body() dto: CreateChannelAllotmentDto,
+  ): Promise<ChannelAllotmentView> {
+    return this.channelAllotmentsService.create(tenantId, branchId, dto, user.sub);
+  }
+
+  @Patch('channel-allotments/:allotmentId')
+  @BranchOf('channelAllotment', 'allotmentId')
+  @ApiOperation({ summary: 'Change an allotment’s dates or rooms' })
+  updateChannelAllotment(
+    @CurrentTenant() tenantId: string,
+    @CurrentUser() user: JwtPayload,
+    @Param('allotmentId', ParseUUIDPipe) allotmentId: string,
+    @Body() dto: UpdateChannelAllotmentDto,
+  ): Promise<ChannelAllotmentView> {
+    return this.channelAllotmentsService.update(tenantId, allotmentId, dto, user.sub);
+  }
+
+  @Delete('channel-allotments/:allotmentId')
+  @BranchOf('channelAllotment', 'allotmentId')
+  @ApiOperation({ summary: 'Remove an allotment — the channel sells from the whole house again' })
+  removeChannelAllotment(@CurrentTenant() tenantId: string, @CurrentUser() user: JwtPayload, @Param('allotmentId', ParseUUIDPipe) allotmentId: string): Promise<{ removed: true }> {
+    return this.channelAllotmentsService.remove(tenantId, allotmentId, user.sub);
   }
 
   // --- Demand Forecast -----------------------------------------------------------

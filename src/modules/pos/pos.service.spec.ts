@@ -193,6 +193,44 @@ describe('PosService', () => {
     });
   });
 
+  describe('createOrder — discounts and split payments', () => {
+    const tenOff = { type: 'percentage' as const, value: 10, reason: 'Regular guest' };
+
+    it('takes a discount off the items before tax, and keeps the reason', async () => {
+      await order({ settlement: 'card', discount: tenOff }, actor('manager'));
+      // 5,000 of items, 10% off = 4,500, then 7.5% tax = 4,837.50
+      expect((createdOrder().discountTotal as Prisma.Decimal).toFixed(2)).toBe('500.00');
+      expect(createdOrder().discountReason).toBe('Regular guest');
+      expect((createdOrder().subtotal as Prisma.Decimal).toFixed(2)).toBe('4500.00');
+      expect((createdOrder().total as Prisma.Decimal).toFixed(2)).toBe('4837.50');
+      expect((createdOrder().cardAmount as Prisma.Decimal).toFixed(2)).toBe('4837.50');
+    });
+
+    it('lets till staff discount only up to the outlet’s limit — none at all when it sets none', async () => {
+      await expect(order({ settlement: 'card', discount: tenOff })).rejects.toThrow(/Only a manager/);
+      tx.outlet.findFirst.mockResolvedValue({ ...OUTLET, staffDiscountLimitPct: new Prisma.Decimal('5') });
+      await expect(order({ settlement: 'card', discount: tenOff })).rejects.toThrow(/at most 5%/);
+      await order({ settlement: 'card', discount: { type: 'fixed', value: 250, reason: 'Spilt drink' } });
+      expect((createdOrder().discountTotal as Prisma.Decimal).toFixed(2)).toBe('250.00');
+    });
+
+    it('never takes off more than the order comes to', async () => {
+      await expect(order({ settlement: 'card', discount: { type: 'fixed', value: 6000, reason: 'Too much' } }, actor('manager'))).rejects.toThrow(BadRequestException);
+    });
+
+    it('splits a sale between cash into the drawer and card for the rest', async () => {
+      await order({ settlement: 'split', cashAmount: 2000 });
+      expect(createdOrder()).toMatchObject({ settlement: 'split', shiftId: SHIFT_ID });
+      expect((createdOrder().cashAmount as Prisma.Decimal).toFixed(2)).toBe('2000.00');
+      expect((createdOrder().cardAmount as Prisma.Decimal).toFixed(2)).toBe('3375.00');
+    });
+
+    it('refuses a split whose cash part is the whole sale, or a cash part on any other sale', async () => {
+      await expect(order({ settlement: 'split', cashAmount: 5375 })).rejects.toThrow(/less than/);
+      await expect(order({ settlement: 'card', cashAmount: 100 })).rejects.toThrow(BadRequestException);
+    });
+  });
+
   describe('outlet access', () => {
     it("keeps POS staff to the outlets they're assigned to", async () => {
       await expect(order({}, actor('pos_staff'))).rejects.toThrow(ForbiddenException);
@@ -210,7 +248,17 @@ describe('PosService', () => {
   });
 
   describe('voidOrder', () => {
-    const roomOrder = { id: ORDER_ID, branchId: BRANCH_ID, orderNo: 42, settlement: 'room', lineItemId: LINE_ITEM_ID, shiftId: null, total: new Prisma.Decimal('5375') };
+    const roomOrder = {
+      id: ORDER_ID,
+      branchId: BRANCH_ID,
+      orderNo: 42,
+      settlement: 'room',
+      lineItemId: LINE_ITEM_ID,
+      shiftId: null,
+      total: new Prisma.Decimal('5375'),
+      cashAmount: new Prisma.Decimal('0'),
+      cardAmount: new Prisma.Decimal('0'),
+    };
 
     it("claims the void, then takes the charge off the guest's bill through the folio's correction", async () => {
       tx.posOrder.findFirst.mockResolvedValue(roomOrder);
@@ -236,7 +284,7 @@ describe('PosService', () => {
     });
 
     it("leaves a closed shift's cash alone", async () => {
-      tx.posOrder.findFirst.mockResolvedValue({ ...roomOrder, settlement: 'cash', lineItemId: null, shiftId: SHIFT_ID });
+      tx.posOrder.findFirst.mockResolvedValue({ ...roomOrder, settlement: 'cash', cashAmount: new Prisma.Decimal('5375'), lineItemId: null, shiftId: SHIFT_ID });
       tx.shift.findFirst.mockResolvedValue({ closedAt: new Date() });
       await expect(service.voidOrder(TENANT_ID, ORDER_ID, { reason: 'Rang it twice' }, actor('manager'))).rejects.toThrow(ConflictException);
       expect(tx.posOrder.updateMany).not.toHaveBeenCalled();

@@ -1,7 +1,8 @@
-import { INestApplication, ValidationPipe, VersioningType } from '@nestjs/common';
+import { INestApplication, Logger, ValidationPipe, VersioningType } from '@nestjs/common';
 import { json, urlencoded, type Express } from 'express';
 import helmet from 'helmet';
 import { ProblemJsonExceptionFilter } from './common/filters/problem-json.filter';
+import { visitorBehindWebProxy, WEB_PROXY_SECRET_MIN_LENGTH } from './common/utils/web-proxy';
 
 /**
  * Express's own default is 100 KB, which refused every real ID-document
@@ -29,6 +30,15 @@ export function configureApp(app: INestApplication): void {
   // without it every user shared one bucket (10 sign-ins a minute for the
   // whole company, 10 public bookings an hour for the whole internet).
   (app.getHttpAdapter().getInstance() as Express).set('trust proxy', 1);
+  // The sign-in routes come through the web app's own proxy; it vouches for
+  // the visitor's address with WEB_PROXY_SECRET (see web-proxy.ts).
+  const proxySecret = process.env.WEB_PROXY_SECRET;
+  app.use(visitorBehindWebProxy(proxySecret));
+  if (process.env.NODE_ENV === 'production' && (proxySecret ?? '').length < WEB_PROXY_SECRET_MIN_LENGTH) {
+    new Logger('WebProxy').warn(
+      'WEB_PROXY_SECRET is not set: sign-ins through the web app share one rate limit. Set the same value on the API and the web app.',
+    );
+  }
 
   app.setGlobalPrefix('api');
   app.enableVersioning({ type: VersioningType.URI, defaultVersion: '1' });

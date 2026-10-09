@@ -127,6 +127,15 @@ export class ChangeRoomStatusDto {
   @IsIn(Object.values(HeldStatus))
   heldStatus?: HeldStatus | null;
 
+  @ApiPropertyOptional({
+    example: '2026-11-03',
+    nullable: true,
+    description: 'The hotel date a held room comes back into service — sold from that night, and released that day. null = held until released by hand. Manager only.',
+  })
+  @ValidateIf((o: ChangeRoomStatusDto) => o.heldUntil !== undefined && o.heldUntil !== null)
+  @IsDateOnly()
+  heldUntil?: string | null;
+
   @ApiPropertyOptional({ example: 'Deep clean after water leak' })
   @IsOptional()
   @IsString()

@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, ParseUUIDPipe, Patch, Post, Query } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Patch, Post, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentTenant, CurrentUser } from '../../common/decorators';
 import { Permission } from '../../common/decorators/permission.decorator';
@@ -6,6 +6,8 @@ import { ALL_SYSTEM_ROLES, Roles, SystemRole } from '../../common/decorators/rol
 import { JwtPayload } from '../../common/types/request-context';
 import { CalculateRateDto, CreateRatePlanDto, UpdateRatePlanDto } from './dto/rate-resolver.dto';
 import { RateResolverService } from './rate-resolver.service';
+import { CreatePackageDto, UpdatePackageDto } from './dto/package.dto';
+import { PackagesQuote, PackagesService, PackageView } from './packages.service';
 import { BranchOf } from '../../common/decorators/branch-of.decorator';
 
 @ApiTags('rate-resolver')
@@ -13,19 +15,71 @@ import { BranchOf } from '../../common/decorators/branch-of.decorator';
 @Controller()
 @Permission('reservations')
 export class RateResolverController {
-  constructor(private readonly rateResolverService: RateResolverService) {}
+  constructor(
+    private readonly rateResolverService: RateResolverService,
+    private readonly packagesService: PackagesService,
+  ) {}
+
+  @Get('branches/:branchId/packages')
+  @Roles(...ALL_SYSTEM_ROLES)
+  @ApiOperation({ summary: 'Packages sold with a stay at this property — breakfast, transfers — with what each costs and the room types it comes with' })
+  listPackages(@CurrentTenant() tenantId: string, @Param('branchId', ParseUUIDPipe) branchId: string, @Query('roomTypeId') roomTypeId?: string): Promise<PackageView[]> {
+    return this.packagesService.list(tenantId, branchId, { roomTypeId: roomTypeId || undefined });
+  }
+
+  @Post('branches/:branchId/packages')
+  @Roles(SystemRole.Owner, SystemRole.Manager)
+  @ApiOperation({ summary: 'Add a package — its price, whether by the night, by the stay or by guest by the night, and what it posts as' })
+  createPackage(
+    @CurrentTenant() tenantId: string,
+    @CurrentUser() user: JwtPayload,
+    @Param('branchId', ParseUUIDPipe) branchId: string,
+    @Body() dto: CreatePackageDto,
+  ): Promise<PackageView> {
+    return this.packagesService.create(tenantId, branchId, dto, user.sub);
+  }
+
+  @Patch('packages/:packageId')
+  @BranchOf('package', 'packageId')
+  @Roles(SystemRole.Owner, SystemRole.Manager)
+  @ApiOperation({ summary: 'Change a package, or take it off sale — stays that have it keep it as priced' })
+  updatePackage(
+    @CurrentTenant() tenantId: string,
+    @CurrentUser() user: JwtPayload,
+    @Param('packageId', ParseUUIDPipe) packageId: string,
+    @Body() dto: UpdatePackageDto,
+  ): Promise<PackageView> {
+    return this.packagesService.update(tenantId, packageId, dto, user.sub);
+  }
+
+  @Delete('packages/:packageId')
+  @BranchOf('package', 'packageId')
+  @Roles(SystemRole.Owner, SystemRole.Manager)
+  @ApiOperation({ summary: 'Remove a package from the list' })
+  removePackage(@CurrentTenant() tenantId: string, @CurrentUser() user: JwtPayload, @Param('packageId', ParseUUIDPipe) packageId: string): Promise<{ removed: true }> {
+    return this.packagesService.remove(tenantId, packageId, user.sub);
+  }
 
   @Post('branches/:branchId/rate-resolver/calculate')
   @Roles(...ALL_SYSTEM_ROLES)
   @Permission('reservations', 'read')
   @ApiOperation({ summary: 'Resolve a nightly rate for a stay through the plan cascade — the same logic every booking screen uses, never re-derived client-side' })
-  calculate(
+  async calculate(
     @CurrentTenant() tenantId: string,
     @CurrentUser() user: JwtPayload,
     @Param('branchId', ParseUUIDPipe) branchId: string,
     @Body() dto: CalculateRateDto,
-  ): ReturnType<RateResolverService['calculateQuote']> {
-    return this.rateResolverService.calculateQuote(tenantId, branchId, dto, user.sub);
+  ): Promise<Awaited<ReturnType<RateResolverService['calculateQuote']>> & { packages: PackagesQuote | null; grandTotal: string }> {
+    const quote = await this.rateResolverService.calculateQuote(tenantId, branchId, dto, user.sub);
+    const packages = dto.packageIds?.length
+      ? await this.packagesService.quoteForStay(tenantId, branchId, {
+          roomTypeId: dto.roomTypeId,
+          packageIds: dto.packageIds,
+          nights: quote.perNight.length,
+          guests: (dto.adults ?? 1) + (dto.children ?? 0),
+        })
+      : null;
+    return { ...quote, packages, grandTotal: quote.totalWithTax.plus(packages?.total ?? 0).toFixed(2) };
   }
 
   @Get('rate-resolver/audit')

@@ -27,6 +27,50 @@ function round2(n: number): number {
   return Math.round(n * 100) / 100;
 }
 
+/** How old a receivable is, by days since it was billed. */
+export const AGEING_BUCKETS = ['0-30', '31-60', '61-90', '90+'] as const;
+export type AgeingBucket = (typeof AGEING_BUCKETS)[number];
+
+export function ageingBucket(days: number): AgeingBucket {
+  if (days <= 30) return '0-30';
+  if (days <= 60) return '31-60';
+  if (days <= 90) return '61-90';
+  return '90+';
+}
+
+export interface ArAgeingBill {
+  folioId: string;
+  label: string | null;
+  guestName: string;
+  confirmationNumber: string | null;
+  /** The newest invoice for the bill, if it has been invoiced. */
+  invoice: { number: string; issuedOn: string; dueDate: string | null } | null;
+  /** The day the age counts from: the invoice, else the day the stay ended, else the day the bill was opened. */
+  since: string;
+  ageDays: number;
+  bucket: AgeingBucket;
+  /** Past the invoice's due date. */
+  overdue: boolean;
+  balance: string;
+}
+
+export interface ArAgeingDebtor {
+  key: string;
+  type: 'company' | 'guest';
+  name: string;
+  buckets: Record<AgeingBucket, string>;
+  total: string;
+  bills: ArAgeingBill[];
+}
+
+export interface ArAgeingReport {
+  asOf: string;
+  currency: string;
+  buckets: readonly AgeingBucket[];
+  debtors: ArAgeingDebtor[];
+  totals: Record<AgeingBucket, string> & { total: string };
+}
+
 interface RoomNightBucket {
   available: number;
   sold: number;
@@ -42,6 +86,92 @@ export class ReportsService {
 
   private isoDate(d: Date): string {
     return d.toISOString().slice(0, 10);
+  }
+
+  /**
+   * Accounts receivable ageing: every bill at the property that a guest who
+   * has left — or a company — still owes on, grouped by who owes it, and
+   * aged into 0–30, 31–60, 61–90 and 90+ days. A bill's age counts from its
+   * latest invoice, else the day the stay ended (check-out), else the day the
+   * bill was opened (a no-show or cancellation charge). Guests still in the
+   * house aren't receivables yet; deposits and credits aren't either.
+   */
+  async getArAgeing(tenantId: string, branchId: string, asOfDay?: string): Promise<ArAgeingReport> {
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const branch = await this.propertyService.assertBranch(tx, branchId);
+      const asOf = asOfDay ?? todayInTimezone(branch.timezone);
+      const asOfDate = toBranchDate(asOf);
+      const folios = await tx.folio.findMany({
+        where: { branchId, deletedAt: null, status: { not: 'settled' }, reservation: { is: { status: { in: ['checked_out', 'no_show', 'cancelled'] } } } },
+        select: {
+          id: true,
+          label: true,
+          payerName: true,
+          createdAt: true,
+          guest: { select: { id: true, name: true } },
+          corporateAccount: { select: { id: true, name: true } },
+          reservation: { select: { confirmationNumber: true, actualCheckOut: true } },
+          invoices: { where: { supersededAt: null }, orderBy: { issuedAt: 'desc' }, take: 1, select: { number: true, issuedAt: true, dueDate: true } },
+        },
+      });
+      const ids = folios.map((f) => f.id);
+      const [charges, payments] = ids.length
+        ? await Promise.all([
+            tx.lineItem.groupBy({ by: ['folioId'], where: { folioId: { in: ids }, isVoid: false, deletedAt: null }, _sum: { amount: true } }),
+            tx.payment.groupBy({ by: ['folioId'], where: { folioId: { in: ids }, isVoid: false, deletedAt: null }, _sum: { amount: true } }),
+          ])
+        : [[], []];
+      const balance = new Map<string, Prisma.Decimal>();
+      for (const row of charges) balance.set(row.folioId, (balance.get(row.folioId) ?? ZERO).plus(row._sum.amount ?? ZERO));
+      for (const row of payments) balance.set(row.folioId, (balance.get(row.folioId) ?? ZERO).minus(row._sum.amount ?? ZERO));
+
+      const emptyBuckets = (): Record<AgeingBucket, Prisma.Decimal> => ({ '0-30': ZERO, '31-60': ZERO, '61-90': ZERO, '90+': ZERO });
+      const debtors = new Map<string, { type: 'company' | 'guest'; name: string; buckets: Record<AgeingBucket, Prisma.Decimal>; total: Prisma.Decimal; bills: ArAgeingBill[] }>();
+      const totals = emptyBuckets();
+      for (const folio of folios) {
+        const owed = balance.get(folio.id) ?? ZERO;
+        if (!owed.greaterThan(0)) continue;
+        const invoice = folio.invoices[0] ?? null;
+        const since = invoice
+          ? localDateOf(invoice.issuedAt, branch.timezone)
+          : localDateOf(folio.reservation?.actualCheckOut ?? folio.createdAt, branch.timezone);
+        const ageDays = Math.max(0, Math.round((asOfDate.getTime() - toBranchDate(since).getTime()) / 86_400_000));
+        const bucket = ageingBucket(ageDays);
+        const company = folio.corporateAccount;
+        const key = company ? `company:${company.id}` : `guest:${folio.guest.id}`;
+        const debtor = debtors.get(key) ?? { type: company ? ('company' as const) : ('guest' as const), name: company?.name ?? folio.payerName ?? folio.guest.name, buckets: emptyBuckets(), total: ZERO, bills: [] };
+        debtor.buckets[bucket] = debtor.buckets[bucket].plus(owed);
+        debtor.total = debtor.total.plus(owed);
+        totals[bucket] = totals[bucket].plus(owed);
+        const dueDate = invoice?.dueDate ? this.isoDate(invoice.dueDate) : null;
+        debtor.bills.push({
+          folioId: folio.id,
+          label: folio.label,
+          guestName: folio.guest.name,
+          confirmationNumber: folio.reservation?.confirmationNumber ?? null,
+          invoice: invoice ? { number: invoice.number, issuedOn: localDateOf(invoice.issuedAt, branch.timezone), dueDate } : null,
+          since,
+          ageDays,
+          bucket,
+          overdue: dueDate !== null && dueDate < asOf,
+          balance: owed.toFixed(2),
+        });
+        debtors.set(key, debtor);
+      }
+
+      const fixed = (buckets: Record<AgeingBucket, Prisma.Decimal>) =>
+        Object.fromEntries(AGEING_BUCKETS.map((b) => [b, buckets[b].toFixed(2)])) as Record<AgeingBucket, string>;
+      const grand = AGEING_BUCKETS.reduce((sum, b) => sum.plus(totals[b]), ZERO);
+      return {
+        asOf,
+        currency: branch.currency,
+        buckets: AGEING_BUCKETS,
+        debtors: [...debtors.entries()]
+          .sort(([, a], [, b]) => b.total.comparedTo(a.total))
+          .map(([key, d]) => ({ key, type: d.type, name: d.name, buckets: fixed(d.buckets), total: d.total.toFixed(2), bills: d.bills.sort((x, y) => y.ageDays - x.ageDays) })),
+        totals: { ...fixed(totals), total: grand.toFixed(2) },
+      };
+    });
   }
 
   /**
@@ -101,33 +231,59 @@ export class ReportsService {
       poolByType.set(rt.id, await tx.room.count({ where: { branchId, roomTypeId: rt.id, deletedAt: null } }));
     }
 
+    // Day use sells the room for the day, not a night: it is neither a night
+    // sold nor room-night revenue (it's in the revenue reports as room revenue).
     const reservations = await tx.reservation.findMany({
       where: {
         branchId,
         deletedAt: null,
+        isDayUse: false,
         status: { in: [...SOLD_STATUSES] },
         checkInDate: { lt: to },
         // A guest still in, or who left after their date, can hold nights
-        // past the departure they booked.
+        // past the departure they booked. Filtered by room type below, night
+        // by night: a stay moved between types counts under each in turn.
         OR: [{ checkOutDate: { gt: from } }, { status: 'checked_in' }, { status: 'checked_out', actualCheckOut: { gte: from } }],
-        ...(roomTypeId ? { roomTypeId } : {}),
       },
-      select: { roomTypeId: true, checkInDate: true, checkOutDate: true, status: true, actualCheckOut: true },
+      select: { id: true, roomTypeId: true, checkInDate: true, checkOutDate: true, status: true, actualCheckOut: true },
     });
 
+    // Each night billed knows the room type it was sold as (`LineItem.roomTypeId`;
+    // older nights, the stay's own type). A room move or a transfer to another
+    // guest's bill no longer re-files a night under someone else's type.
     const roomRevenueRows = await tx.lineItem.findMany({
       where: {
-        folio: { branchId, ...(roomTypeId ? { reservation: { roomTypeId } } : {}) },
+        folio: { branchId },
         // A night's correction counts against it — otherwise a reversed night
         // would still be room revenue (the correction row is `correction`,
         // not `room`).
-        OR: [{ chargeType: 'room' }, { chargeType: 'correction', correctsLineItem: { chargeType: 'room' } }],
+        OR: [{ chargeType: 'room', dayUse: false }, { chargeType: 'correction', correctsLineItem: { chargeType: 'room', dayUse: false } }],
         isVoid: false,
         deletedAt: null,
         serviceDate: { gte: from, lt: to },
       },
-      select: { amount: true, serviceDate: true, folio: { select: { reservation: { select: { roomTypeId: true } } } } },
+      select: {
+        amount: true,
+        serviceDate: true,
+        chargeType: true,
+        roomTypeId: true,
+        stayReservationId: true,
+        stayReservation: { select: { roomTypeId: true } },
+        folio: { select: { reservation: { select: { roomTypeId: true } } } },
+        correctsLineItem: { select: { roomTypeId: true, stayReservationId: true, stayReservation: { select: { roomTypeId: true } } } },
+      },
     });
+    type RevenueRow = (typeof roomRevenueRows)[number];
+    const soldAs = (row: RevenueRow): string | null => {
+      const night = row.correctsLineItem ?? row;
+      return night.roomTypeId ?? night.stayReservation?.roomTypeId ?? row.folio.reservation?.roomTypeId ?? null;
+    };
+    // The room type each billed night of each stay was sold as.
+    const nightType = new Map<string, string>();
+    for (const row of roomRevenueRows) {
+      if (row.chargeType !== 'room' || !row.stayReservationId || !row.serviceDate || !row.roomTypeId) continue;
+      nightType.set(`${row.stayReservationId}|${this.isoDate(row.serviceDate)}`, row.roomTypeId);
+    }
 
     const days = this.enumerateDays(from, to);
     const buckets = new Map<string, RoomNightBucket>(); // key: `${isoDate}|${roomTypeId}`
@@ -156,7 +312,9 @@ export class ReportsService {
       }
       for (const day of days) {
         if (day >= r.checkInDate && day < until) {
-          const bucket = buckets.get(`${this.isoDate(day)}|${r.roomTypeId}`);
+          const type = nightType.get(`${r.id}|${this.isoDate(day)}`) ?? r.roomTypeId;
+          if (roomTypeId && type !== roomTypeId) continue;
+          const bucket = buckets.get(`${this.isoDate(day)}|${type}`);
           if (bucket) bucket.sold += 1;
         }
       }
@@ -190,8 +348,9 @@ export class ReportsService {
       }
     }
     for (const row of roomRevenueRows) {
-      const rtId = row.folio.reservation?.roomTypeId;
+      const rtId = soldAs(row);
       if (!rtId || !row.serviceDate) continue;
+      if (roomTypeId && rtId !== roomTypeId) continue;
       const bucket = buckets.get(`${this.isoDate(row.serviceDate)}|${rtId}`);
       if (bucket) bucket.revenue = bucket.revenue.plus(row.amount);
     }
@@ -375,9 +534,10 @@ export class ReportsService {
         where: { folio: { branchId }, isVoid: false, deletedAt: null, recordedAt: { gte: momentsFrom, lt: momentsTo } },
         select: { amount: true, method: true },
       });
+      // Sales paid at the outlet (cash, card or both) — a room charge is on the folio, counted above.
       const posSales = await tx.posOrder.findMany({
-        where: { branchId, settlement: { in: ['cash', 'card'] }, voidedAt: null, createdAt: { gte: momentsFrom, lt: momentsTo } },
-        select: { subtotal: true, total: true, settlement: true, createdAt: true, outlet: { select: { chargeType: true } } },
+        where: { branchId, settlement: { not: 'room' }, voidedAt: null, createdAt: { gte: momentsFrom, lt: momentsTo } },
+        select: { subtotal: true, total: true, cashAmount: true, cardAmount: true, createdAt: true, outlet: { select: { chargeType: true } } },
       });
 
       const add = (map: Map<string, Prisma.Decimal>, key: string, amount: Prisma.Decimal) => map.set(key, (map.get(key) ?? ZERO).plus(amount));
@@ -392,7 +552,8 @@ export class ReportsService {
       for (const p of payments) add(byPaymentMethod, p.method, p.amount);
       for (const sale of posSales) {
         add(byDepartment, sale.outlet.chargeType, sale.subtotal);
-        add(byPaymentMethod, sale.settlement, sale.total);
+        if (sale.cashAmount.greaterThan(0)) add(byPaymentMethod, 'cash', sale.cashAmount);
+        if (sale.cardAmount.greaterThan(0)) add(byPaymentMethod, 'card', sale.cardAmount);
         add(trendMap, localDateOf(sale.createdAt, branch.timezone), sale.subtotal);
       }
       const totalRevenue = [...byDepartment.values()].reduce((s, v) => s.plus(v), ZERO);
@@ -446,8 +607,8 @@ export class ReportsService {
           select: { amount: true, method: true, recordedAt: true },
         }),
         tx.posOrder.findMany({
-          where: { branchId, settlement: { in: ['cash', 'card'] }, voidedAt: null, createdAt: { gte: momentsFrom, lt: momentsTo } },
-          select: { subtotal: true, taxTotal: true, total: true, settlement: true, createdAt: true, outlet: { select: { chargeType: true } } },
+          where: { branchId, settlement: { not: 'room' }, voidedAt: null, createdAt: { gte: momentsFrom, lt: momentsTo } },
+          select: { subtotal: true, taxTotal: true, total: true, cashAmount: true, cardAmount: true, createdAt: true, outlet: { select: { chargeType: true } } },
         }),
         tx.taxRule.findMany({ where: { branchId } }),
       ]);
@@ -504,7 +665,8 @@ export class ReportsService {
         period.tax = period.tax.plus(sale.taxTotal);
         posTax = posTax.plus(sale.taxTotal);
         period.moneyIn = period.moneyIn.plus(sale.total);
-        method(sale.settlement).moneyIn = method(sale.settlement).moneyIn.plus(sale.total);
+        if (sale.cashAmount.greaterThan(0)) method('cash').moneyIn = method('cash').moneyIn.plus(sale.cashAmount);
+        if (sale.cardAmount.greaterThan(0)) method('card').moneyIn = method('card').moneyIn.plus(sale.cardAmount);
       }
       for (const payment of payments) {
         const period = periodOf(toBranchDate(localDateOf(payment.recordedAt, branch.timezone)));

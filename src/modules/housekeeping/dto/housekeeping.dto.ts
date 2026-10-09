@@ -22,6 +22,11 @@ export class CreateTaskDto {
   @IsString()
   @MaxLength(500)
   notes?: string;
+
+  @ApiPropertyOptional({ enum: ['clean', 'turndown'], description: 'A clean (the default), or an evening turndown — which leaves the room as clean as it is' })
+  @IsOptional()
+  @IsIn(['clean', 'turndown'])
+  kind?: 'clean' | 'turndown';
 }
 
 export class ListTasksQueryDto {

@@ -3,10 +3,12 @@ import { PropertyController } from './property.controller';
 import { PropertyService } from './property.service';
 import { RoomsController } from './rooms.controller';
 import { RoomsService } from './rooms.service';
+import { RoomHoldsScheduler } from './room-holds.scheduler';
+import { RoomPhotosController } from './room-photos.controller';
 
 @Module({
-  controllers: [PropertyController, RoomsController],
-  providers: [PropertyService, RoomsService],
+  controllers: [PropertyController, RoomsController, RoomPhotosController],
+  providers: [PropertyService, RoomsService, RoomHoldsScheduler],
   exports: [PropertyService, RoomsService],
 })
 export class PropertyModule {}

@@ -4,6 +4,7 @@ import { JwtPayload } from '../../common/types/request-context';
 import { PrismaService } from '../../prisma/prisma.service';
 import { PropertyService } from './property.service';
 import { RoomsService } from './rooms.service';
+import { ObjectStorageService } from '../../common/storage/object-storage.service';
 
 const TENANT_ID = '11111111-1111-4111-8111-111111111111';
 const BRANCH_ID = '33333333-3333-4333-8333-333333333333';
@@ -71,9 +72,11 @@ describe('RoomsService', () => {
   let service: RoomsService;
   let tx: ReturnType<typeof makeTx>;
   let propertyService: { assertBranch: jest.Mock; findOrCreateDefaultFloor: jest.Mock };
+  let objectStorage: { configured: boolean; put: jest.Mock; get: jest.Mock; removeQuietly: jest.Mock };
 
   beforeEach(async () => {
     tx = makeTx();
+    objectStorage = { configured: false, put: jest.fn(), get: jest.fn(), removeQuietly: jest.fn() };
     propertyService = {
       assertBranch: jest.fn().mockResolvedValue({ id: BRANCH_ID, timezone: 'Africa/Lagos' }),
       findOrCreateDefaultFloor: jest.fn().mockResolvedValue({ id: FLOOR_ID }),
@@ -86,6 +89,7 @@ describe('RoomsService', () => {
           useValue: { withTenant: jest.fn((_t: string, fn: (x: unknown) => unknown) => fn(tx)) },
         },
         { provide: PropertyService, useValue: propertyService },
+        { provide: ObjectStorageService, useValue: objectStorage },
       ],
     }).compile();
     service = moduleRef.get(RoomsService);
@@ -503,6 +507,29 @@ describe('RoomsService', () => {
       await expect(
         service.applyReservationOccupancy(tx as never, TENANT_ID, ROOM_ID, { occupancyStatus: 'occupied' }, housekeeper.sub),
       ).rejects.toThrow(NotFoundException);
+    });
+  });
+
+  describe('room photo uploads', () => {
+    const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0x10, 0x4a, 0x46, 0x49, 0x46]);
+
+    it('refuses while no storage is set up — photos stay pasted links', async () => {
+      await expect(service.uploadRoomTypePhoto(TENANT_ID, TYPE_ID, { buffer: JPEG, size: JPEG.length }, manager.sub)).rejects.toThrow(/aren’t set up/);
+      expect(service.photoUploadsEnabled()).toEqual({ enabled: false, maxBytes: 5 * 1024 * 1024 });
+    });
+
+    it('takes only a real JPEG, PNG or WebP, whatever the file claims to be', async () => {
+      objectStorage.configured = true;
+      const html = Buffer.from('<html><script>alert(1)</script></html>');
+      await expect(service.uploadRoomTypePhoto(TENANT_ID, TYPE_ID, { buffer: html, size: html.length }, manager.sub)).rejects.toThrow(/JPEG, PNG or WebP/);
+      await expect(service.uploadRoomTypePhoto(TENANT_ID, TYPE_ID, { buffer: JPEG, size: 6 * 1024 * 1024 }, manager.sub)).rejects.toThrow(/at most 5 MB/);
+      expect(objectStorage.put).not.toHaveBeenCalled();
+    });
+
+    it('serves only a photo name it gave out', async () => {
+      objectStorage.configured = true;
+      expect(await service.readRoomPhoto(TENANT_ID, TYPE_ID, '../../documents/id.bin')).toBeNull();
+      expect(objectStorage.get).not.toHaveBeenCalled();
     });
   });
 });

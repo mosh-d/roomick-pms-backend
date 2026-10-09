@@ -1,4 +1,4 @@
-import { ApiProperty } from '@nestjs/swagger';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
   ArrayMaxSize,
@@ -7,6 +7,7 @@ import {
   IsIn,
   IsInt,
   IsNumber,
+  IsOptional,
   IsString,
   Matches,
   Max,
@@ -14,6 +15,7 @@ import {
   Min,
   MinLength,
   NotEquals,
+  ValidateIf,
   ValidateNested,
 } from 'class-validator';
 import { LOYALTY_BENEFITS } from '../loyalty-rules';
@@ -68,6 +70,15 @@ export class SaveLoyaltyProgramDto {
   @ValidateNested({ each: true })
   @Type(() => LoyaltyTierDto)
   tiers!: LoyaltyTierDto[];
+
+  @ApiPropertyOptional({ example: 24, nullable: true, description: 'Points earned from now on lapse this many months later if unspent; null = they never lapse' })
+  @IsOptional()
+  @ValidateIf((_o, value) => value !== null)
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(120)
+  pointsExpireAfterMonths?: number | null;
 }
 
 export class AdjustPointsDto {

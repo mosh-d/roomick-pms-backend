@@ -11,6 +11,9 @@ databases:
     databaseName: roomick
     user: roomick
     plan: starter # `free` expires after 90 days; starter is the smallest durable tier
+    # Render's nearest region to West Africa. The database and the API must
+    # share a region — change both together, and only before the first deploy.
+    region: frankfurt
 
 services:
   - type: web
@@ -18,6 +21,7 @@ services:
     runtime: docker
     dockerfilePath: ./Dockerfile
     plan: starter
+    region: frankfurt # the database's region — see above
     healthCheckPath: /api/v1/system/health # @Public(), no auth needed — see SystemController
     # Migrations run as a release step, BEFORE the new instance takes traffic.
     # Deliberately `migrate deploy` (applies committed migrations only) and never
@@ -33,9 +37,9 @@ services:
     #
     # A container filesystem WITHOUT a disk is reset on each deploy, so this
     # mount is what keeps those four durable. Note a service with a disk cannot
-    # run more than one instance — fine now, and the point at which to move to
-    # S3/R2 via the existing DocumentStorageAdapter / BackupStorageAdapter
-    # interfaces (both already exist; only a local implementation is written).
+    # run more than one instance. Once the STORAGE_S3_* bucket below is set,
+    # new documents and backups go to the bucket instead (files already on the
+    # disk still open from it), and room photos can be uploaded.
     disk:
       name: roomick-data
       mountPath: /var/roomick
@@ -94,4 +98,24 @@ services:
       - key: SMTP_PASS
         sync: false
       - key: MAIL_FROM
+        sync: false
+      # The same long random value on the web app (Vercel) — sign-ins reach this
+      # API through the web app's own address, and this is how the API trusts it
+      # to say which visitor each one is from (so rate limits are per visitor).
+      # Generate: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+      - key: WEB_PROXY_SECRET
+        sync: false
+      # Optional — an S3-compatible bucket (Cloudflare R2, Amazon S3, Backblaze B2,
+      # Spaces). Room photo uploads, and guest documents and backups kept in the
+      # bucket rather than on the disk. Off until bucket, key id and secret are set.
+      # For R2: endpoint https://<account id>.r2.cloudflarestorage.com, region auto.
+      - key: STORAGE_S3_ENDPOINT
+        sync: false
+      - key: STORAGE_S3_REGION
+        value: auto
+      - key: STORAGE_S3_BUCKET
+        sync: false
+      - key: STORAGE_S3_ACCESS_KEY_ID
+        sync: false
+      - key: STORAGE_S3_SECRET_ACCESS_KEY
         sync: false

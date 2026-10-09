@@ -1,7 +1,8 @@
-import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { Branch, NoShowRecord, PenaltyType, Prisma, Reservation, Room, RoomType } from '@prisma/client';
 import { ErrorCode } from '../../common/errors/error-codes';
 import { JwtPayload } from '../../common/types/request-context';
+import { isSupervisorAt } from '../../common/utils/branch-roles';
 import { hasPassedBranchCutoff, timeOfDay, todayInTimezone, toBranchDate } from '../../common/utils/branch-date';
 import { PrismaService, TenantTx } from '../../prisma/prisma.service';
 import { PropertyService } from '../property/property.service';
@@ -12,7 +13,7 @@ import { FoliosService } from '../folios/folios.service';
 import { RefundsService } from '../folios/refunds.service';
 import { TaxesService } from '../taxes/taxes.service';
 import { HousekeepingService } from '../housekeeping/housekeeping.service';
-import { MAX_STAY_NIGHTS, RateResolverService, StayResolution } from '../rate-resolver/rate-resolver.service';
+import { MAX_STAY_NIGHTS, Occupancy, RateResolverService, StayResolution } from '../rate-resolver/rate-resolver.service';
 import { outsideGroupBlock } from '../sales-events/group-block-window';
 import { RegistrationCardsService } from '../registration-cards/registration-cards.service';
 import { CommsLogService } from '../comms-log/comms-log.service';
@@ -30,12 +31,20 @@ import {
 } from './policies';
 import { manageBookingLine } from './guest-links';
 import { bookingConfirmationBody } from './guest-messages';
+import { depositFor, describeDeposit, resolveDepositPolicy } from './deposits';
+import { nightlyRateFor } from './nightly-rates';
+import { resolveStayFeePolicy, StayFee, stayFeesFor } from './stay-fees';
+import { dayUseHoursFor, DayUseHours } from './day-use';
+import { PackagesService } from '../rate-resolver/packages.service';
+import { PackageSnapshot, parsePackageSnapshots } from '../rate-resolver/package-pricing';
+import { ChannelAllotmentsService } from '../revenue-management/channel-allotments.service';
 import {
   AvailabilityCalendarQueryDto,
   AvailabilityQueryDto,
   CancelReservationDto,
   CancelWithWaiverDto,
   CheckInDto,
+  CheckOutDto,
   CreateReservationDto,
   ExtendStayDto,
   GroupCheckInDto,
@@ -46,9 +55,13 @@ import {
   WalkInReservationDto,
   WalkReservationDto,
 } from './dto/reservation.dto';
+import { turndownScopeFor, wantsTurndown } from '../housekeeping/turndown';
 
 /** Each night's own price as resolved — kept on the stay so every night is billed at what it was quoted, not the total split evenly. */
 const nightlyRatesOf = (resolved: StayResolution): Prisma.InputJsonValue => resolved.perNight.map((night) => ({ date: night.date, rate: night.finalRate }));
+
+/** A room that is in service, or held with a date it comes back — see `sellableRooms`. */
+const SELLABLE_ROOM = { OR: [{ heldStatus: null }, { heldUntil: { not: null } }] } satisfies Prisma.RoomWhereInput;
 
 const RESERVATION_INCLUDE = {
   // VIP level for the badge on Arrivals and the In-House list (ref: "VIP / group badge").
@@ -102,6 +115,8 @@ export class ReservationsService {
     private readonly restrictionsService: RestrictionsService,
     private readonly loyaltyService: LoyaltyService,
     private readonly webhookEvents: WebhookEventsService,
+    private readonly packagesService: PackagesService,
+    private readonly channelAllotmentsService: ChannelAllotmentsService,
     private readonly taxesService: TaxesService,
     private readonly refundsService: RefundsService,
   ) {}
@@ -202,9 +217,9 @@ export class ReservationsService {
 
       const roomTypesWithExposure = await Promise.all(
         roomTypes.map(async (roomType) => {
-          const physicalPool = await tx.room.count({ where: { branchId, roomTypeId: roomType.id, deletedAt: null, heldStatus: null } });
+          const pool = await this.sellableRooms(tx, branchId, roomType.id);
           const blocks = await tx.roomBlock.findMany({
-            where: { room: { branchId, roomTypeId: roomType.id, deletedAt: null, heldStatus: null }, fromDate: { lt: to }, toDate: { gte: from } },
+            where: { room: { branchId, roomTypeId: roomType.id, deletedAt: null, ...SELLABLE_ROOM }, fromDate: { lt: to }, toDate: { gte: from } },
             select: { roomId: true, fromDate: true, toDate: true },
           });
           const reservations = await this.holdingStays(tx, branchId, roomType.id, from, to);
@@ -213,7 +228,9 @@ export class ReservationsService {
           const branchConfig = overbookingConfigs.find((c) => c.roomTypeId === null);
 
           const nights = this.enumerateNights(from, to).map((night) => {
-            const blockedCount = blocks.filter((b) => b.fromDate <= night && b.toDate >= night).length;
+            const inService = this.inServiceOn(pool, night);
+            const physicalPool = inService.size;
+            const blockedCount = new Set(blocks.filter((b) => inService.has(b.roomId) && b.fromDate <= night && b.toDate >= night).map((b) => b.roomId)).size;
             const reservedCount = reservations.filter((r) => r.checkInDate <= night && r.checkOutDate > night).length;
             const netCapacity = physicalPool - blockedCount;
             const governingConfig = this.overbookingConfigFor(roomTypeConfig, branchConfig, night);
@@ -235,6 +252,21 @@ export class ReservationsService {
 
       return { year: dto.year, month: dto.month, roomTypes: roomTypesWithExposure };
     });
+  }
+
+  /**
+   * A room type's rooms that can be sold on some night: every room not held,
+   * and a held one with a release date — it's back from that night on.
+   * `backFrom` is that date (null: in service now).
+   */
+  private async sellableRooms(tx: TenantTx, branchId: string, roomTypeId: string): Promise<Array<{ id: string; backFrom: Date | null }>> {
+    const rooms = await tx.room.findMany({ where: { branchId, roomTypeId, deletedAt: null, ...SELLABLE_ROOM }, select: { id: true, heldStatus: true, heldUntil: true } });
+    return rooms.map((room) => ({ id: room.id, backFrom: room.heldStatus ? room.heldUntil : null }));
+  }
+
+  /** The rooms of `sellableRooms` in service on one night. */
+  private inServiceOn(pool: Array<{ id: string; backFrom: Date | null }>, night: Date): Set<string> {
+    return new Set(pool.filter((room) => !room.backFrom || room.backFrom <= night).map((room) => room.id));
   }
 
   /**
@@ -274,13 +306,11 @@ export class ReservationsService {
     excludeReservationId?: string,
     bookingIntoBlockId?: string,
   ): Promise<Array<{ date: string; available: number }>> {
-    const physicalPool = await tx.room.count({
-      where: { branchId, roomTypeId, deletedAt: null, heldStatus: null },
-    });
+    const pool = await this.sellableRooms(tx, branchId, roomTypeId);
 
     const blocks = await tx.roomBlock.findMany({
       where: {
-        room: { branchId, roomTypeId, deletedAt: null, heldStatus: null },
+        room: { branchId, roomTypeId, deletedAt: null, ...SELLABLE_ROOM },
         fromDate: { lt: to },
         toDate: { gte: from },
       },
@@ -299,11 +329,12 @@ export class ReservationsService {
     const heldForGroups = await this.groupBlockHolds(tx, branchId, roomTypeId, from, to, bookingIntoBlockId);
 
     return this.enumerateNights(from, to).map((night) => {
+      const inService = this.inServiceOn(pool, night);
       const blockedRoomIds = new Set(
-        blocks.filter((b) => b.fromDate <= night && b.toDate >= night).map((b) => b.roomId),
+        blocks.filter((b) => inService.has(b.roomId) && b.fromDate <= night && b.toDate >= night).map((b) => b.roomId),
       );
       const reservedCount = reservations.filter((r) => r.checkInDate <= night && r.checkOutDate > night).length;
-      const netCapacity = physicalPool - blockedRoomIds.size;
+      const netCapacity = inService.size - blockedRoomIds.size;
       const governingConfig = this.overbookingConfigFor(roomTypeConfig, branchConfig, night);
       const capacity = governingConfig
         ? Math.floor(netCapacity * (1 + Number(governingConfig.maxOverbookPct ?? 0) / 100))
@@ -573,9 +604,15 @@ export class ReservationsService {
     /** `publicBooking`: made on the public booking page — the guest is matched as `GuestsService.publicBookingGuest` says. */
     options: { groupBlockId?: string; publicBooking?: boolean } = {},
   ) {
+    const dayUse = dto.dayUse === true;
     const checkInDate = toBranchDate(dto.checkInDate);
-    const checkOutDate = toBranchDate(dto.checkOutDate);
-    this.assertValidRange(checkInDate, checkOutDate);
+    // Day use is the day itself: it leaves the day it arrives.
+    const checkOutDate = dayUse ? checkInDate : toBranchDate(dto.checkOutDate);
+    if (!dayUse) this.assertValidRange(checkInDate, checkOutDate);
+    if (dayUse && (dto.joinWaitlist || options.groupBlockId)) {
+      throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: 'Day use is booked on its own — not onto the waitlist or a group block' });
+    }
+    const channel = dto.channel ?? 'direct';
     const guestInput = this.resolveGuestInput(dto);
 
     return this.prisma.withTenant(tenantId, async (tx) => {
@@ -584,8 +621,10 @@ export class ReservationsService {
       this.assertWithinCapacity(roomType, dto.adults, dto.children ?? 0);
       // Additive — a tenant with no configured restriction sees zero
       // behavior change; a match throws the SAME RESERVATION_NOT_AVAILABLE
-      // conflict the plain availability check below already uses.
-      await this.restrictionsService.assertNoViolation(tx, branchId, dto.roomTypeId, checkInDate, checkOutDate);
+      // conflict the plain availability check below already uses. They're
+      // rules about nights, which day use has none of.
+      if (!dayUse) await this.restrictionsService.assertNoViolation(tx, branchId, dto.roomTypeId, checkInDate, checkOutDate);
+      const packages = await this.packagesService.snapshotsFor(tx, branchId, dto.roomTypeId, dto.packageIds ?? [], { online: options.publicBooking });
       const guest = await this.guestsService.findOrCreateGuestInTx(tx, tenantId, guestInput, { publicBooking: options.publicBooking });
 
       // Serializes concurrent creates for the SAME room type only — closes
@@ -596,45 +635,61 @@ export class ReservationsService {
       // check, not an automatic fallback — a plain booking that finds no
       // rooms still throws `RESERVATION_NOT_AVAILABLE`, same as before.
       const block = options.groupBlockId ? await this.assertGroupBlockOpen(tx, options.groupBlockId, branchId, dto.roomTypeId) : null;
-      if (!dto.joinWaitlist) {
+      if (dayUse) {
+        await this.assertDayUseAvailable(tx, branchId, dto.roomTypeId, checkInDate);
+      } else if (!dto.joinWaitlist) {
         await this.assertAvailableForStay(tx, branchId, dto.roomTypeId, checkInDate, checkOutDate, undefined, block?.id);
+        // A channel with an allotment sells no more of the room type than it.
+        await this.channelAllotmentsService.assertWithinAllotment(tx, branchId, dto.roomTypeId, channel, checkInDate, checkOutDate);
       }
 
       const deal = await this.dealTerms(tx, dto);
-      const resolved = await this.rateResolverService.resolveStay(
-        tx,
-        tenantId,
-        branchId,
-        roomType,
-        checkInDate,
-        checkOutDate,
-        deal,
-        { triggeredBy: 'booking_create', userId: actorId ?? undefined },
-      );
+      const resolved = dayUse
+        ? null
+        : await this.rateResolverService.resolveStay(
+            tx,
+            tenantId,
+            branchId,
+            roomType,
+            checkInDate,
+            checkOutDate,
+            { ...deal, occupancy: { adults: dto.adults, children: dto.children ?? 0 } },
+            { triggeredBy: 'booking_create', userId: actorId ?? undefined },
+          );
       // A group booking is priced at its block's rate for every night — that is
       // what the folio posts (`overrideRate`), so it is also what the record
       // says. `confirmedRate` and `nightlyRates` used to keep the public quote,
       // and stay history, custom reports and the registration card showed a
       // price the guest was never charged. Tax follows the branch's rules
       // either way; the confirmation used to say "tax 0" for a group booking.
-      const pricing = block
-        ? await this.blockPricing(tx, branchId, block.blockRate, checkInDate, checkOutDate)
-        : { subtotal: resolved.subtotal, taxTotal: resolved.taxTotal, totalWithTax: resolved.totalWithTax, nightlyRates: nightlyRatesOf(resolved) };
+      const pricing = dayUse
+        ? await this.dayUsePricing(tx, branch, roomType)
+        : block
+          ? await this.blockPricing(tx, branchId, block.blockRate, checkInDate, checkOutDate)
+          : { subtotal: resolved!.subtotal, taxTotal: resolved!.taxTotal, totalWithTax: resolved!.totalWithTax, nightlyRates: nightlyRatesOf(resolved!) };
       const confirmationNumber = await this.generateConfirmationNumber(tx, tenantId);
+      // The deposit the branch asks for, worked out now and kept with the
+      // booking. A waitlisted request holds no room, so it's asked for none
+      // until it becomes a booking.
+      const deposit = dto.joinWaitlist ? null : this.depositAskedFor(branch, checkInDate, pricing);
 
       const reservation = await this.createReservationRow(tx, {
         tenantId,
         branchId,
         guestId: guest.id,
         roomTypeId: dto.roomTypeId,
-        ratePlanId: resolved.ratePlanId,
+        ratePlanId: resolved?.ratePlanId ?? null,
+        depositAmount: deposit?.amount,
+        depositDueDate: deposit?.dueDate,
+        isDayUse: dayUse,
+        packages: packages.length ? (packages as unknown as Prisma.InputJsonValue) : undefined,
         corporateAccountId: deal.corporateAccountId,
         promoCode: deal.promoCode,
         confirmationNumber,
         confirmedRate: pricing.subtotal,
         nightlyRates: pricing.nightlyRates,
         status: dto.joinWaitlist ? 'waitlisted' : 'confirmed',
-        channel: dto.channel ?? 'direct',
+        channel,
         checkInDate,
         checkOutDate,
         adults: dto.adults,
@@ -652,11 +707,13 @@ export class ReservationsService {
         // doesn't reach back into bookings already taken.
         cancellationPolicy: { ...resolveCancellationPolicy(branch.cancellationPolicy) },
       });
-      await this.rateResolverService.linkAuditLogsToReservation(tx, resolved.auditLogIds, reservation.id);
+      if (resolved) await this.rateResolverService.linkAuditLogsToReservation(tx, resolved.auditLogIds, reservation.id);
 
       await this.audit(tx, tenantId, branchId, actorId, 'reservation.created', reservation.id, {
         confirmationNumber,
         roomTypeId: dto.roomTypeId,
+        ...(dayUse ? { dayUse: true } : {}),
+        ...(packages.length ? { packages: packages.map((p) => p.name) } : {}),
       });
       if (!dto.joinWaitlist) {
         await this.commsLogService.logAutomatedInTx(tx, tenantId, branchId, {
@@ -677,6 +734,9 @@ export class ReservationsService {
             subtotal: pricing.subtotal,
             taxTotal: pricing.taxTotal,
             total: pricing.totalWithTax,
+            deposit: deposit ? describeDeposit(deposit.amount, deposit.dueDate, branch.currency) : null,
+            dayUse: dayUse ? this.dayUseHours(branch) : null,
+            packages: packages.map((p) => p.name),
           }),
           trigger: 'booking_confirmation',
         });
@@ -690,9 +750,10 @@ export class ReservationsService {
 
     return this.prisma.withTenant(tenantId, async (tx) => {
       const branch = await this.propertyService.assertBranch(tx, branchId);
+      const dayUse = dto.dayUse === true;
       const checkInDate = toBranchDate(todayInTimezone(branch.timezone));
-      const checkOutDate = toBranchDate(dto.checkOutDate);
-      this.assertValidRange(checkInDate, checkOutDate);
+      const checkOutDate = dayUse ? checkInDate : toBranchDate(dto.checkOutDate ?? '');
+      if (!dayUse) this.assertValidRange(checkInDate, checkOutDate);
 
       const roomType = await this.assertRoomType(tx, branchId, dto.roomTypeId);
       this.assertWithinCapacity(roomType, dto.adults, dto.children ?? 0);
@@ -700,7 +761,8 @@ export class ReservationsService {
       // restrictions, and the room-type pool for the WHOLE stay. A room that is
       // physically free tonight may already be promised to tomorrow's
       // arrivals — walking a guest into it for three nights overbooked them.
-      await this.restrictionsService.assertNoViolation(tx, branchId, dto.roomTypeId, checkInDate, checkOutDate);
+      if (!dayUse) await this.restrictionsService.assertNoViolation(tx, branchId, dto.roomTypeId, checkInDate, checkOutDate);
+      const packages = await this.packagesService.snapshotsFor(tx, branchId, dto.roomTypeId, dto.packageIds ?? []);
       const guest = await this.guestsService.findOrCreateGuestInTx(tx, tenantId, guestInput);
 
       await this.lockRoomType(tx, dto.roomTypeId);
@@ -710,19 +772,26 @@ export class ReservationsService {
         throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Room not found' });
       }
       await this.assertRoomCheckInReady(tx, room, branchId, dto.roomTypeId, checkInDate, checkOutDate);
-      await this.assertAvailableForStay(tx, branchId, dto.roomTypeId, checkInDate, checkOutDate);
+      if (dayUse) await this.assertDayUseAvailable(tx, branchId, dto.roomTypeId, checkInDate);
+      else {
+        await this.assertAvailableForStay(tx, branchId, dto.roomTypeId, checkInDate, checkOutDate);
+        await this.channelAllotmentsService.assertWithinAllotment(tx, branchId, dto.roomTypeId, 'walk_in', checkInDate, checkOutDate);
+      }
 
       const deal = await this.dealTerms(tx, dto);
-      const resolved = await this.rateResolverService.resolveStay(
-        tx,
-        tenantId,
-        branchId,
-        roomType,
-        checkInDate,
-        checkOutDate,
-        deal,
-        { triggeredBy: 'walkin', userId: actorId },
-      );
+      const resolved = dayUse
+        ? null
+        : await this.rateResolverService.resolveStay(
+            tx,
+            tenantId,
+            branchId,
+            roomType,
+            checkInDate,
+            checkOutDate,
+            { ...deal, occupancy: { adults: dto.adults, children: dto.children ?? 0 } },
+            { triggeredBy: 'walkin', userId: actorId },
+          );
+      const dayUsePrice = dayUse ? await this.dayUsePricing(tx, branch, roomType) : null;
       const confirmationNumber = await this.generateConfirmationNumber(tx, tenantId);
 
       const reservation = await this.createReservationRow(tx, {
@@ -731,12 +800,14 @@ export class ReservationsService {
         guestId: guest.id,
         roomTypeId: dto.roomTypeId,
         roomId: dto.roomId,
-        ratePlanId: resolved.ratePlanId,
+        ratePlanId: resolved?.ratePlanId ?? null,
         corporateAccountId: deal.corporateAccountId,
         promoCode: deal.promoCode,
         confirmationNumber,
-        confirmedRate: resolved.subtotal,
-        nightlyRates: nightlyRatesOf(resolved),
+        confirmedRate: resolved ? resolved.subtotal : dayUsePrice!.subtotal,
+        nightlyRates: resolved ? nightlyRatesOf(resolved) : dayUsePrice!.nightlyRates,
+        isDayUse: dayUse,
+        packages: packages.length ? (packages as unknown as Prisma.InputJsonValue) : undefined,
         status: 'checked_in',
         channel: 'walk_in',
         checkInDate,
@@ -747,13 +818,14 @@ export class ReservationsService {
         specialRequests: dto.specialRequests,
         createdBy: actorId,
       });
-      await this.rateResolverService.linkAuditLogsToReservation(tx, resolved.auditLogIds, reservation.id);
+      if (resolved) await this.rateResolverService.linkAuditLogsToReservation(tx, resolved.auditLogIds, reservation.id);
 
       await this.roomsService.applyReservationOccupancy(tx, tenantId, dto.roomId, { occupancyStatus: 'occupied' }, actorId);
 
       // Same arrival-night-only accrual as `checkIn` — see its comment.
       const folio = await this.foliosService.ensurePrimaryFolio(tx, reservation, actorId);
       await this.foliosService.postRoomChargeForDate(tx, reservation, folio, checkInDate, 'Walk-in', actorId);
+      await this.turndownTonight(tx, tenantId, branch, reservation);
 
       if (dto.idDocument) {
         await this.guestsService.recordIdDocumentInTx(tx, tenantId, branchId, guest.id, dto.idDocument, actorId);
@@ -775,7 +847,7 @@ export class ReservationsService {
         guestId: guest.id,
         channel: 'email',
         subject: `Welcome — ${confirmationNumber}`,
-        body: `Welcome! You're checked in to room ${room.number} (${roomType.name}). Check-out is ${dto.checkOutDate}.${manageBookingLine(branch, confirmationNumber)}`,
+        body: `Welcome! You're checked in to room ${room.number} (${roomType.name}). ${dayUse ? `It's yours for the day, until ${this.dayUseHours(branch).until}.` : `Check-out is ${dto.checkOutDate}.`}${manageBookingLine(branch, confirmationNumber)}`,
         trigger: 'checkin_receipt',
       });
       return reservation;
@@ -871,6 +943,7 @@ export class ReservationsService {
     // off the reservation rather than the room type.
     const folio = await this.foliosService.ensurePrimaryFolio(tx, updated, actorId);
     await this.foliosService.postRoomChargeForDate(tx, updated, folio, updated.checkInDate, 'Check-in', actorId);
+    await this.turndownTonight(tx, tenantId, branch, updated);
 
     if (dto.idDocument) {
       await this.guestsService.recordIdDocumentInTx(tx, tenantId, reservation.branchId, updated.guestId, dto.idDocument, actorId);
@@ -962,7 +1035,141 @@ export class ReservationsService {
     });
   }
 
-  async checkOut(tenantId: string, reservationId: string, actorId: string) {
+  /** What checking out now would add to the bill: the late check-out and early departure fees the branch charges. */
+  async getCheckOutQuote(tenantId: string, reservationId: string): Promise<{ currency: string; fees: Array<{ kind: StayFee['kind']; description: string; amount: string; tax: string; total: string }> }> {
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const reservation = await this.findReservationOrThrow(tx, reservationId);
+      const branch = await this.propertyService.assertBranch(tx, reservation.branchId);
+      const fees = reservation.status === 'checked_in' ? this.stayFeesNow(reservation, branch) : [];
+      const priced = await Promise.all(fees.map((fee) => this.foliosService.previewCharge(tx, branch.id, 'penalty', fee.amount)));
+      return {
+        currency: branch.currency,
+        fees: fees.map((fee, i) => ({
+          kind: fee.kind,
+          description: fee.description,
+          amount: fee.amount.toFixed(2),
+          tax: priced[i].addedTax.toFixed(2),
+          total: priced[i].total.toFixed(2),
+        })),
+      };
+    });
+  }
+
+  private stayFeesNow(reservation: Reservation, branch: Branch): StayFee[] {
+    // Day use leaves at the end of its hours, not at the branch's check-out time.
+    const leaveBy = reservation.isDayUse ? { timezone: branch.timezone, checkOutTime: new Date(`1970-01-01T${this.dayUseHours(branch).until}:00.000Z`) } : branch;
+    return stayFeesFor(resolveStayFeePolicy(branch.stayFeePolicy), reservation, leaveBy, toBranchDate(todayInTimezone(branch.timezone)), new Date());
+  }
+
+  /** The branch's day-use hours — refused when it doesn't sell day use. */
+  /**
+   * Tonight's evening turndown for a stay just placed in a room — at check-in
+   * or after a move — when the branch turns its guest's room down. The night
+   * audit raises it for every night after. Not for a day-use stay, or a guest
+   * leaving today.
+   */
+  private async turndownTonight(
+    tx: TenantTx,
+    tenantId: string,
+    branch: Branch,
+    stay: { id: string; roomId: string | null; isDayUse: boolean; checkOutDate: Date; guest: { vipLevel: number | null } },
+  ): Promise<void> {
+    const today = toBranchDate(todayInTimezone(branch.timezone));
+    if (!stay.roomId || stay.isDayUse || stay.checkOutDate <= today) return;
+    if (!wantsTurndown(turndownScopeFor(branch.turndownPolicy), stay.guest.vipLevel)) return;
+    await this.housekeepingService.ensureTurndownTaskInTx(tx, tenantId, branch.id, stay.roomId, stay.id, today);
+  }
+
+  /** The booking screens' own read of the branch: Property Config is for managers, the day-use hours are for whoever books. */
+  async bookingOptions(tenantId: string, branchId: string): Promise<{ dayUseHours: DayUseHours | null; currency: string }> {
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const branch = await this.propertyService.assertBranch(tx, branchId);
+      return { dayUseHours: dayUseHoursFor(branch.dayUsePolicy), currency: branch.currency };
+    });
+  }
+
+  private dayUseHours(branch: Branch): DayUseHours {
+    const hours = dayUseHoursFor(branch.dayUsePolicy);
+    if (!hours) throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: 'This property doesn’t offer day use — switch it on under Property Config' });
+    return hours;
+  }
+
+  /** A day-use stay's price: the room type's day-use rate, taxed as a room charge. */
+  private async dayUsePricing(tx: TenantTx, branch: Branch, roomType: RoomType) {
+    this.dayUseHours(branch);
+    if (!roomType.dayUseRate) {
+      throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: `${roomType.name} isn't sold for day use — give it a day-use rate under Property Config` });
+    }
+    const priced = await this.taxesService.priceCharge(tx, branch.id, 'room', roomType.dayUseRate, 1);
+    return { subtotal: roomType.dayUseRate, taxTotal: priced.addedTax, totalWithTax: priced.total, nightlyRates: [] as Prisma.InputJsonValue };
+  }
+
+  /**
+   * Day use takes a room for the day, so it needs one free then: the room
+   * type's rooms less those in use through the day (stays there both the
+   * night before and the night after), the day's arrivals (in from the
+   * afternoon) and the day's other day-use stays. Rooms held out of order
+   * that day, or blocked for it, don't count. The nights either side stay on
+   * sale as before.
+   */
+  private async assertDayUseAvailable(tx: TenantTx, branchId: string, roomTypeId: string, day: Date): Promise<void> {
+    const nextDay = new Date(day.getTime() + 86_400_000);
+    const inService = this.inServiceOn(await this.sellableRooms(tx, branchId, roomTypeId), day);
+    const blocked = await tx.roomBlock.findMany({ where: { roomId: { in: [...inService] }, fromDate: { lte: day }, toDate: { gte: day } }, select: { roomId: true } });
+    const rooms = inService.size - new Set(blocked.map((block) => block.roomId)).size;
+    const [throughTheDay, arriving, dayUses] = await Promise.all([
+      tx.reservation.count({ where: { branchId, roomTypeId, deletedAt: null, isDayUse: false, status: { in: ['confirmed', 'checked_in'] }, checkInDate: { lt: day }, checkOutDate: { gt: day } } }),
+      tx.reservation.count({ where: { branchId, roomTypeId, deletedAt: null, isDayUse: false, status: { in: ['confirmed', 'checked_in'] }, checkInDate: day } }),
+      tx.reservation.count({ where: { branchId, roomTypeId, deletedAt: null, isDayUse: true, status: { in: ['confirmed', 'checked_in'] }, checkInDate: { gte: day, lt: nextDay } } }),
+    ]);
+    if (rooms - throughTheDay - arriving - dayUses <= 0) {
+      throw new ConflictException({ code: ErrorCode.RESERVATION_NOT_AVAILABLE, message: 'No room of that type is free for day use that day' });
+    }
+  }
+
+  /**
+   * Sets a stay's packages — these, and only these, from now on. One already
+   * on the stay keeps the price it was added at; a new one is priced today.
+   * Charges already posted stay on the bill (a package taken off is
+   * corrected there). A package added to a stay under way starts today: it
+   * is charged for tonight on, at once, never for the nights already past.
+   */
+  async setPackages(tenantId: string, reservationId: string, packageIds: string[], actorId: string) {
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const reservation = await this.findReservationOrThrow(tx, reservationId);
+      if (!['waitlisted', 'confirmed', 'checked_in'].includes(reservation.status)) {
+        throw new ConflictException({ code: ErrorCode.INVALID_STATUS_TRANSITION, message: `A ${reservation.status.replace('_', ' ')} stay's packages can't change` });
+      }
+      const underWay = reservation.status === 'checked_in';
+      const branch = await this.propertyService.assertBranch(tx, reservation.branchId);
+      const today = todayInTimezone(branch.timezone);
+      const kept = parsePackageSnapshots(reservation.packages).filter((p) => packageIds.includes(p.packageId));
+      const added = await this.packagesService.snapshotsFor(
+        tx,
+        reservation.branchId,
+        reservation.roomTypeId,
+        packageIds.filter((id) => !kept.some((p) => p.packageId === id)),
+      );
+      const packages: PackageSnapshot[] = [...kept, ...added.map((p) => (underWay ? { ...p, addedOn: today } : p))];
+      const updated = await tx.reservation.update({
+        where: { id: reservationId },
+        data: { packages: packages.length ? (packages as unknown as Prisma.InputJsonValue) : Prisma.JsonNull },
+        include: RESERVATION_INCLUDE,
+      });
+      if (underWay && added.length > 0) {
+        const folio = await this.foliosService.ensurePrimaryFolio(tx, updated, actorId);
+        await this.foliosService.postPackagesForDate(tx, updated, folio, toBranchDate(today), actorId);
+      }
+      await this.audit(tx, tenantId, reservation.branchId, actorId, 'reservation.packages_changed', reservationId, {
+        before: parsePackageSnapshots(reservation.packages).map((p) => p.name),
+        after: packages.map((p) => p.name),
+      });
+      return updated;
+    });
+  }
+
+  async checkOut(tenantId: string, reservationId: string, actor: JwtPayload, dto: CheckOutDto = {}) {
+    const actorId = actor.sub;
     return this.prisma.withTenant(tenantId, async (tx) => {
       const reservation = await this.findReservationOrThrow(tx, reservationId);
       if (reservation.status !== 'checked_in') {
@@ -970,6 +1177,13 @@ export class ReservationsService {
           code: ErrorCode.INVALID_STATUS_TRANSITION,
           message: `Cannot check out a reservation with status "${reservation.status}"`,
         });
+      }
+      // Waiving the branch's fees is a supervisor's call, with the reason on record.
+      if (dto.waiveFees && !isSupervisorAt(actor, reservation.branchId)) {
+        throw new ForbiddenException({ code: ErrorCode.FORBIDDEN, message: 'Only a manager can waive the check-out fees' });
+      }
+      if (dto.waiveFees && !dto.waiverReason?.trim()) {
+        throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: 'Say why the fees are waived' });
       }
       // A `checked_in` reservation always has a room (set at check-in, the
       // only place this design ever sets it) — a real runtime check here
@@ -1031,6 +1245,25 @@ export class ReservationsService {
         'Check-out',
         actorId,
       );
+      // Leaving late, or before the booked last night, costs what the branch
+      // says it does — unless a manager waived it.
+      const fees = this.stayFeesNow(reservation, branch);
+      if (fees.length > 0 && !dto.waiveFees) {
+        for (const fee of fees) {
+          await this.foliosService.postChargeInTx(
+            tx,
+            folio,
+            { description: fee.description, amount: fee.amount, chargeType: 'penalty', serviceDate: toBranchDate(todayInTimezone(branch.timezone)) },
+            actorId,
+          );
+        }
+      }
+      if (fees.length > 0 && dto.waiveFees) {
+        await this.audit(tx, tenantId, reservation.branchId, actorId, 'reservation.check_out_fees_waived', reservationId, {
+          fees: fees.map((fee) => ({ kind: fee.kind, amount: fee.amount.toFixed(2) })),
+          reason: dto.waiverReason?.trim() ?? null,
+        });
+      }
       await this.foliosService.settleIfFullyPaid(tx, folio, actorId, 'checkOut');
       // The stay's points, once every night is on the bill — and in this
       // transaction, so a check-out that fails earns nothing.
@@ -1520,6 +1753,9 @@ export class ReservationsService {
           message: `Cannot modify a reservation with status "${reservation.status}" — only confirmed or waitlisted reservations can be changed here`,
         });
       }
+      if (reservation.isDayUse) {
+        throw new ConflictException({ code: ErrorCode.INVALID_STATUS_TRANSITION, message: 'A day-use booking can’t be changed — cancel it and book the new day' });
+      }
 
       const checkInDate = dto.checkInDate ? toBranchDate(dto.checkInDate) : reservation.checkInDate;
       const checkOutDate = dto.checkOutDate ? toBranchDate(dto.checkOutDate) : reservation.checkOutDate;
@@ -1545,6 +1781,7 @@ export class ReservationsService {
       if (datesOrRoomTypeChanged && reservation.status === 'confirmed') {
         await this.lockRoomType(tx, roomTypeId);
         await this.assertAvailableForStay(tx, reservation.branchId, roomTypeId, checkInDate, checkOutDate, reservationId, reservation.groupBlockId ?? undefined);
+        await this.channelAllotmentsService.assertWithinAllotment(tx, reservation.branchId, roomTypeId, reservation.channel, checkInDate, checkOutDate, reservationId);
       }
 
       // Re-prices under the deal the stay was booked with — its company
@@ -1560,7 +1797,7 @@ export class ReservationsService {
         roomType,
         checkInDate,
         checkOutDate,
-        this.storedDeal(reservation),
+        this.storedDeal(reservation, { adults: dto.adults ?? reservation.adults, children: dto.children ?? reservation.children }),
         { triggeredBy: 'modify', userId: actorId, reservationId },
       );
       const pricing = await this.repricedStay(tx, reservation, resolved, checkInDate, checkOutDate);
@@ -1638,7 +1875,14 @@ export class ReservationsService {
       // isn't already fully committed to other guests for those nights.
       await this.restrictionsService.assertExtensionAllowed(tx, reservation.branchId, reservation.roomTypeId, reservation.checkInDate, reservation.checkOutDate, newCheckOutDate);
       await this.lockRoomType(tx, reservation.roomTypeId);
+      if (reservation.isDayUse) {
+        throw new ConflictException({
+          code: ErrorCode.INVALID_STATUS_TRANSITION,
+          message: 'A day-use stay isn’t extended — if the guest stays the night, the night audit charges it at the room’s rate; or check them out and book the night',
+        });
+      }
       await this.assertAvailableForStay(tx, reservation.branchId, reservation.roomTypeId, reservation.checkOutDate, newCheckOutDate, reservationId, reservation.groupBlockId ?? undefined);
+      await this.channelAllotmentsService.assertWithinAllotment(tx, reservation.branchId, reservation.roomTypeId, reservation.channel, reservation.checkOutDate, newCheckOutDate, reservationId);
 
       // The SPECIFIC assigned room must also be free of any block for the
       // extension nights — the pool check above can't see this; it counts
@@ -1805,6 +2049,7 @@ export class ReservationsService {
         actorId,
       });
       await this.roomsService.applyReservationOccupancy(tx, tenantId, room.id, { occupancyStatus: 'occupied' }, actorId);
+      await this.turndownTonight(tx, tenantId, branch, updated);
 
       await this.audit(tx, tenantId, reservation.branchId, actorId, 'reservation.room_moved', reservationId, {
         fromRoomId,
@@ -1981,18 +2226,24 @@ export class ReservationsService {
       }
       await this.lockRoomType(tx, reservation.roomTypeId);
       await this.assertAvailableForStay(tx, reservation.branchId, reservation.roomTypeId, reservation.checkInDate, reservation.checkOutDate);
+      await this.channelAllotmentsService.assertWithinAllotment(tx, reservation.branchId, reservation.roomTypeId, reservation.channel, reservation.checkInDate, reservation.checkOutDate, reservationId);
+      // The guest hears that their waitlisted request is now a booking — the
+      // same confirmation an ordinary booking sends, priced from what the
+      // reservation already holds — and is asked for the deposit a booking is.
+      const branch = await this.propertyService.assertBranch(tx, reservation.branchId);
+      const priced = await this.taxesService.priceCharge(tx, reservation.branchId, 'room', reservation.confirmedRate, this.stayNights(reservation));
+      const deposit = this.depositAskedFor(branch, reservation.checkInDate, {
+        subtotal: reservation.confirmedRate,
+        totalWithTax: priced.total,
+        nightlyRates: reservation.nightlyRates,
+      });
       const updated = await tx.reservation.update({
         where: { id: reservationId },
-        data: { status: 'confirmed' },
+        data: { status: 'confirmed', depositAmount: deposit?.amount ?? null, depositDueDate: deposit?.dueDate ?? null },
         include: RESERVATION_INCLUDE,
       });
       await this.audit(tx, tenantId, reservation.branchId, actorId, 'reservation.promoted', reservationId);
 
-      // The guest hears that their waitlisted request is now a booking — the
-      // same confirmation an ordinary booking sends, priced from what the
-      // reservation already holds.
-      const branch = await this.propertyService.assertBranch(tx, reservation.branchId);
-      const priced = await this.taxesService.priceCharge(tx, reservation.branchId, 'room', updated.confirmedRate, this.stayNights(updated));
       await this.commsLogService.logAutomatedInTx(tx, tenantId, reservation.branchId, {
         reservationId,
         guestId: updated.guestId,
@@ -2010,11 +2261,29 @@ export class ReservationsService {
           subtotal: priced.price,
           taxTotal: priced.addedTax,
           total: priced.total,
+          deposit: deposit ? describeDeposit(deposit.amount, deposit.dueDate, branch.currency) : null,
         }),
         trigger: 'booking_confirmation',
       });
       return updated;
     });
+  }
+
+  /** The deposit the branch's policy asks of a stay priced like this — `null` when it asks none. */
+  private depositAskedFor(
+    branch: Branch,
+    checkInDate: Date,
+    pricing: { subtotal: Prisma.Decimal; totalWithTax: Prisma.Decimal; nightlyRates: Prisma.InputJsonValue | Prisma.JsonValue | null | undefined },
+  ): { amount: Prisma.Decimal; dueDate: Date } | null {
+    const nights = Array.isArray(pricing.nightlyRates) ? pricing.nightlyRates.length : 0;
+    const firstNight =
+      nightlyRateFor({ nightlyRates: (pricing.nightlyRates ?? null) as Prisma.JsonValue }, checkInDate) ??
+      (nights > 0 ? pricing.subtotal.div(nights).toDecimalPlaces(2) : pricing.subtotal);
+    return depositFor(
+      resolveDepositPolicy(branch.depositPolicy),
+      { checkInDate, subtotal: pricing.subtotal, totalWithTax: pricing.totalWithTax, firstNight },
+      toBranchDate(todayInTimezone(branch.timezone)),
+    );
   }
 
   /**
@@ -2104,18 +2373,45 @@ export class ReservationsService {
   // Reads
   // -------------------------------------------------------------------------
   async getById(tenantId: string, reservationId: string) {
-    return this.prisma.withTenant(tenantId, (tx) => this.findReservationOrThrow(tx, reservationId));
+    return this.prisma.withTenant(tenantId, async (tx) => (await this.withDepositsPaid(tx, [await this.findReservationOrThrow(tx, reservationId)]))[0]);
+  }
+
+  /**
+   * Each stay with what it has paid in deposits so far (`depositPaid`) — what
+   * the Arrivals list and the booking itself show against the deposit asked.
+   * One grouped sum for the lot.
+   */
+  private async withDepositsPaid<T extends { id: string }>(tx: TenantTx, reservations: T[]): Promise<Array<T & { depositPaid: string }>> {
+    const ids = reservations.map((r) => r.id);
+    const paid = new Map<string, Prisma.Decimal>();
+    if (ids.length > 0) {
+      const folios = await tx.folio.findMany({ where: { reservationId: { in: ids }, deletedAt: null }, select: { id: true, reservationId: true } });
+      const reservationOf = new Map(folios.map((f) => [f.id, f.reservationId]));
+      if (folios.length > 0) {
+        const sums = await tx.payment.groupBy({
+          by: ['folioId'],
+          where: { folioId: { in: folios.map((f) => f.id) }, paymentPurpose: 'deposit', isVoid: false, deletedAt: null },
+          _sum: { amount: true },
+        });
+        for (const row of sums) {
+          const reservationId = reservationOf.get(row.folioId);
+          if (reservationId) paid.set(reservationId, (paid.get(reservationId) ?? new Prisma.Decimal(0)).plus(row._sum.amount ?? 0));
+        }
+      }
+    }
+    return reservations.map((r) => ({ ...r, depositPaid: (paid.get(r.id) ?? new Prisma.Decimal(0)).toFixed(2) }));
   }
 
   async listArrivals(tenantId: string, branchId: string, date?: string) {
     return this.prisma.withTenant(tenantId, async (tx) => {
       const branch = await this.propertyService.assertBranch(tx, branchId);
       const day = toBranchDate(date ?? todayInTimezone(branch.timezone));
-      return tx.reservation.findMany({
+      const arrivals = await tx.reservation.findMany({
         where: { branchId, deletedAt: null, status: 'confirmed', checkInDate: day },
         include: RESERVATION_INCLUDE,
         orderBy: { createdAt: 'asc' },
       });
+      return this.withDepositsPaid(tx, arrivals);
     });
   }
 
@@ -2142,13 +2438,14 @@ export class ReservationsService {
   async listReservations(tenantId: string, branchId: string, dto: ListReservationsQueryDto) {
     return this.prisma.withTenant(tenantId, async (tx) => {
       await this.propertyService.assertBranch(tx, branchId);
-      return tx.reservation.findMany({
+      const reservations = await tx.reservation.findMany({
         where: this.listWhere(branchId, dto),
         include: RESERVATION_INCLUDE,
         orderBy: { createdAt: 'desc' },
         take: dto.limit ?? 100,
         skip: dto.offset ?? 0,
       });
+      return this.withDepositsPaid(tx, reservations);
     });
   }
 
@@ -2323,8 +2620,16 @@ export class ReservationsService {
   }
 
   /** The deal a stay was booked under, for re-pricing it: a modified or extended stay keeps its company rate and promo code. */
-  private storedDeal(reservation: { promoCode: string | null; corporateAccountId: string | null }): { promoCode?: string; corporateAccountId?: string } {
-    return { promoCode: reservation.promoCode ?? undefined, corporateAccountId: reservation.corporateAccountId ?? undefined };
+  /** The terms a stay re-prices under: its promo code, its company, and who is staying (extra-person charges) — the party as it stands, or as it's being changed to. */
+  private storedDeal(
+    reservation: { promoCode: string | null; corporateAccountId: string | null; adults: number; children: number },
+    occupancy?: Occupancy,
+  ): { promoCode?: string; corporateAccountId?: string; occupancy: Occupancy } {
+    return {
+      promoCode: reservation.promoCode ?? undefined,
+      corporateAccountId: reservation.corporateAccountId ?? undefined,
+      occupancy: occupancy ?? { adults: reservation.adults, children: reservation.children },
+    };
   }
 
   private async createReservationRow(tx: TenantTx, data: Prisma.ReservationUncheckedCreateInput) {

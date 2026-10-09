@@ -390,12 +390,20 @@ describe('AuthService', () => {
   });
 
   describe('logout', () => {
-    it('ends the session on the server and audits it', async () => {
+    it('ends the whole sign-in on the server — every token it issued — and audits it', async () => {
       jwt.verifyAsync.mockResolvedValue({ sub: USER_ID, tenantId: TENANT_ID, tokenType: 'refresh' });
+      (tx as unknown as { $queryRaw: jest.Mock }).$queryRaw = jest.fn().mockResolvedValue([{ id: 'token-1', sessionId: 'sign-in-1' }]);
       await service.logout('some.jwt');
       expect(jwt.verifyAsync).toHaveBeenCalledWith('some.jwt', expect.objectContaining({ ignoreExpiration: true }));
-      expect(tx.refreshToken.updateMany).toHaveBeenCalledWith({ where: { tokenHash: expect.stringMatching(/^[0-9a-f]{64}$/), revokedAt: null }, data: { revokedAt: expect.any(Date) } });
+      expect(tx.refreshToken.updateMany).toHaveBeenCalledWith({ where: { revokedAt: null, OR: [{ id: 'token-1' }, { sessionId: 'sign-in-1' }] }, data: { revokedAt: expect.any(Date) } });
       expect(tx.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: 'auth.logout' }) }));
+    });
+
+    it('a token from before sign-ins were recorded ends on its own', async () => {
+      jwt.verifyAsync.mockResolvedValue({ sub: USER_ID, tenantId: TENANT_ID, tokenType: 'refresh' });
+      (tx as unknown as { $queryRaw: jest.Mock }).$queryRaw = jest.fn().mockResolvedValue([{ id: 'token-1', sessionId: null }]);
+      await service.logout('some.jwt');
+      expect(tx.refreshToken.updateMany).toHaveBeenCalledWith({ where: { revokedAt: null, OR: [{ id: 'token-1' }] }, data: { revokedAt: expect.any(Date) } });
     });
 
     it('is silent about a token that is garbage or not a refresh token', async () => {

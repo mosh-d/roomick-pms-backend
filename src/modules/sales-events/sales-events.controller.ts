@@ -7,6 +7,7 @@ import { Permission } from '../../common/decorators/permission.decorator';
 import { Roles, SystemRole } from '../../common/decorators/roles.decorator';
 import { JwtPayload } from '../../common/types/request-context';
 import {
+  BillEventBookingDto,
   BookIntoGroupBlockDto,
   CreateEventBookingDto,
   CreateEventSpaceDto,
@@ -181,6 +182,19 @@ export class SalesEventsController {
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.send(pdf);
+  }
+
+  @Post('event-bookings/:bookingId/bill')
+  @BranchOf('eventBooking', 'bookingId')
+  @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk)
+  @ApiOperation({ summary: "Put the event's space hire and catering on an open bill at the property — once" })
+  billBooking(
+    @CurrentTenant() tenantId: string,
+    @CurrentUser() user: JwtPayload,
+    @Param('bookingId', ParseUUIDPipe) bookingId: string,
+    @Body() dto: BillEventBookingDto,
+  ): Promise<EventBookingDetail> {
+    return this.eventSpacesService.billBooking(tenantId, bookingId, dto.folioId, user);
   }
 
   @Delete('event-bookings/:bookingId')

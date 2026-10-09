@@ -5,6 +5,14 @@ import { IsDateOnly } from '../../../common/validation/is-date-only.decorator';
 const GROUP_BY_VALUES = ['day', 'week', 'month'] as const;
 export type ReportGroupBy = (typeof GROUP_BY_VALUES)[number];
 
+/** Accounts receivable ageing: what departed guests and companies still owe, as of a day. */
+export class ArAgeingQueryDto {
+  @ApiPropertyOptional({ example: '2026-10-31', description: 'Age the balances to this day — today at the property when left out' })
+  @IsOptional()
+  @IsDateOnly()
+  asOf?: string;
+}
+
 /** Shared by every report — `to` is exclusive, matching this codebase's date-range convention everywhere else (availability, exposure). */
 export class ReportQueryDto {
   @ApiProperty({ example: '2026-08-01' })

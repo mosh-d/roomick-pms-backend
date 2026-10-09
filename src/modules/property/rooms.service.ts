@@ -1,18 +1,22 @@
+import { randomUUID } from 'crypto';
 import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
   Injectable,
   NotFoundException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { CleanlinessStatus, OccupancyStatus, Prisma, Room, RoomBlock, RoomType } from '@prisma/client';
 import { ErrorCode } from '../../common/errors/error-codes';
 import { todayInTimezone, toBranchDate } from '../../common/utils/branch-date';
 import { JwtPayload } from '../../common/types/request-context';
 import { PrismaService, TenantTx } from '../../prisma/prisma.service';
-import { CreateRoomTypeDto, UpdateRoomTypeDto } from './dto/room-type.dto';
+import { CreateRoomTypeDto, MAX_ROOM_PHOTOS, UpdateRoomTypeDto } from './dto/room-type.dto';
 import { BulkCreateRoomsDto, ChangeRoomStatusDto, CreateRoomBlockDto, UpdateRoomDto } from './dto/rooms.dto';
 import { PropertyService } from './property.service';
+import { ObjectStorageService } from '../../common/storage/object-storage.service';
+import { isPhotoFile, MAX_PHOTO_BYTES, PHOTO_TYPES, photoKey, photoTypeOf, photoUrl, uploadedPhotoKey } from './room-photos';
 
 /** Roles that count as "supervisor" for §4.1 (may set `inspected`) and may
  *  touch occupancy/held axes manually. */
@@ -38,11 +42,17 @@ export const CLEANLINESS_TRANSITIONS: Record<CleanlinessStatus, CleanlinessStatu
   inspected: ['dirty'],
 };
 
+function moneyOrNull(value: number | null | undefined): Prisma.Decimal | null | undefined {
+  if (value === undefined) return undefined;
+  return value === null ? null : new Prisma.Decimal(value.toFixed(2));
+}
+
 @Injectable()
 export class RoomsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly propertyService: PropertyService,
+    private readonly objectStorage: ObjectStorageService,
   ) {}
 
   // -------------------------------------------------------------------------
@@ -68,6 +78,11 @@ export class RoomsService {
           amenities: dto.amenities ?? [],
           photoUrls: dto.photoUrls ?? [],
           sortOrder: dto.sortOrder,
+          adultsIncluded: dto.adultsIncluded ?? null,
+          extraAdultRate: moneyOrNull(dto.extraAdultRate),
+          childrenIncluded: dto.childrenIncluded ?? 0,
+          childRate: moneyOrNull(dto.childRate),
+          dayUseRate: moneyOrNull(dto.dayUseRate),
         },
       });
       await this.audit(
@@ -95,7 +110,7 @@ export class RoomsService {
    * `extendStay`), so this never retroactively reprices anything in flight.
    */
   async updateRoomType(tenantId: string, roomTypeId: string, dto: UpdateRoomTypeDto, actorId: string): Promise<RoomType> {
-    return this.prisma.withTenant(tenantId, async (tx) => {
+    const { updated, dropped } = await this.prisma.withTenant(tenantId, async (tx) => {
       const existing = await tx.roomType.findFirst({ where: { id: roomTypeId, deletedAt: null } });
       if (!existing) {
         throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Room type not found' });
@@ -111,11 +126,77 @@ export class RoomsService {
           amenities: dto.amenities,
           photoUrls: dto.photoUrls,
           sortOrder: dto.sortOrder,
+          adultsIncluded: dto.adultsIncluded,
+          extraAdultRate: moneyOrNull(dto.extraAdultRate),
+          childrenIncluded: dto.childrenIncluded,
+          childRate: moneyOrNull(dto.childRate),
+          dayUseRate: moneyOrNull(dto.dayUseRate),
         },
       });
       await this.audit(tx, tenantId, actorId, 'room_type.updated', 'room_type', roomTypeId, dto as unknown as Prisma.InputJsonValue, updated.branchId);
-      return updated;
+      // Photos uploaded here and taken off the room type — deleted from storage once this is saved.
+      const dropped = dto.photoUrls ? existing.photoUrls.filter((url) => !dto.photoUrls!.includes(url)) : [];
+      return { updated, dropped };
     });
+    for (const url of dropped) {
+      const key = uploadedPhotoKey(url);
+      if (key && key.startsWith(photoKey(tenantId, roomTypeId, '')) && this.objectStorage.configured) await this.objectStorage.removeQuietly(key);
+    }
+    return updated;
+  }
+
+  /** Whether photos can be uploaded — a storage bucket is set up. Until then they're pasted links. */
+  photoUploadsEnabled(): { enabled: boolean; maxBytes: number } {
+    return { enabled: this.objectStorage.configured, maxBytes: MAX_PHOTO_BYTES };
+  }
+
+  /**
+   * Uploads one photo of a room type and adds it to the type's photos. Only a
+   * real JPEG, PNG or WebP of at most 5 MB, read from its own bytes. The
+   * bucket is private: the photo is shown at the API's own public address.
+   */
+  async uploadRoomTypePhoto(tenantId: string, roomTypeId: string, file: { buffer: Buffer; size: number } | undefined, actorId: string): Promise<RoomType> {
+    if (!this.objectStorage.configured) {
+      throw new ServiceUnavailableException({ code: ErrorCode.NOT_IMPLEMENTED, message: 'Photo uploads aren’t set up yet — paste a link to the photo instead' });
+    }
+    if (!file?.buffer?.length) throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: 'Choose a photo to upload' });
+    if (file.size > MAX_PHOTO_BYTES) throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: 'A photo can be at most 5 MB' });
+    const extension = photoTypeOf(file.buffer);
+    if (!extension) throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: 'Upload a JPEG, PNG or WebP photo' });
+
+    const existing = await this.prisma.withTenant(tenantId, (tx) => tx.roomType.findFirst({ where: { id: roomTypeId, deletedAt: null } }));
+    if (!existing) throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Room type not found' });
+    if (existing.photoUrls.length >= MAX_ROOM_PHOTOS) {
+      throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: `A room type shows at most ${MAX_ROOM_PHOTOS} photos — remove one first` });
+    }
+
+    const name = `${randomUUID()}.${extension}`;
+    const key = photoKey(tenantId, roomTypeId, name);
+    await this.objectStorage.put(key, file.buffer, PHOTO_TYPES[extension]);
+    try {
+      return await this.prisma.withTenant(tenantId, async (tx) => {
+        // Appended in the database itself, so two uploads at once both land.
+        const [updated] = await tx.$queryRaw<RoomType[]>`
+          UPDATE room_types SET "photoUrls" = array_append("photoUrls", ${photoUrl(tenantId, roomTypeId, name)}), "updatedAt" = now()
+          WHERE id = ${roomTypeId}::uuid AND "deletedAt" IS NULL AND cardinality("photoUrls") < ${MAX_ROOM_PHOTOS}
+          RETURNING *`;
+        if (!updated) throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: `A room type shows at most ${MAX_ROOM_PHOTOS} photos — remove one first` });
+        await this.audit(tx, tenantId, actorId, 'room_type.photo_uploaded', 'room_type', roomTypeId, { photo: name, bytes: file.size }, existing.branchId);
+        return updated;
+      });
+    } catch (error) {
+      await this.objectStorage.removeQuietly(key);
+      throw error;
+    }
+  }
+
+  /** One uploaded room photo, for the public address it's shown at. Null when there's no such photo. */
+  async readRoomPhoto(tenantId: string, roomTypeId: string, file: string): Promise<{ body: Buffer; contentType: string } | null> {
+    if (!this.objectStorage.configured || !isPhotoFile(file)) return null;
+    const object = await this.objectStorage.get(photoKey(tenantId, roomTypeId, file));
+    if (!object) return null;
+    const extension = file.slice(file.lastIndexOf('.') + 1) as keyof typeof PHOTO_TYPES;
+    return { body: object.body, contentType: PHOTO_TYPES[extension] };
   }
 
   async listRoomTypes(tenantId: string, branchId: string): Promise<RoomType[]> {
@@ -405,7 +486,8 @@ export class RoomsService {
     const wantsOccupancy = dto.occupancyStatus !== undefined;
     const wantsCleanliness = dto.cleanlinessStatus !== undefined;
     const wantsHeld = 'heldStatus' in dto && dto.heldStatus !== undefined;
-    if (!wantsOccupancy && !wantsCleanliness && !wantsHeld) {
+    const wantsHeldUntil = dto.heldUntil !== undefined;
+    if (!wantsOccupancy && !wantsCleanliness && !wantsHeld && !wantsHeldUntil) {
       throw new BadRequestException({
         code: ErrorCode.VALIDATION_FAILED,
         message: 'Provide at least one status axis to change',
@@ -446,17 +528,36 @@ export class RoomsService {
         }
       }
 
-      if (wantsHeld && !isSupervisor) {
+      if ((wantsHeld || wantsHeldUntil) && !isSupervisor) {
         throw new ForbiddenException({
           code: ErrorCode.FORBIDDEN,
           message: 'Only managers may hold or release rooms',
         });
       }
 
+      // The release date goes with the hold: released, it goes too; a new
+      // date has to be after today (a room due back today is released now).
+      const heldAfter = wantsHeld ? dto.heldStatus : room.heldStatus;
+      let heldUntil: Date | null | undefined;
+      if (!heldAfter) heldUntil = room.heldUntil ? null : undefined;
+      if (wantsHeldUntil && dto.heldUntil) {
+        if (!heldAfter) {
+          throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: 'A release date goes with a hold — put the room out of order or block it first' });
+        }
+        const branch = await this.propertyService.assertBranch(tx, room.branchId);
+        if (dto.heldUntil <= todayInTimezone(branch.timezone)) {
+          throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: 'The room comes back after today — to have it back today, release the hold now' });
+        }
+        heldUntil = toBranchDate(dto.heldUntil);
+      } else if (wantsHeldUntil) {
+        heldUntil = room.heldUntil ? null : undefined;
+      }
+
       const before = {
         occupancyStatus: room.occupancyStatus,
         cleanlinessStatus: room.cleanlinessStatus,
         heldStatus: room.heldStatus,
+        heldUntil: room.heldUntil?.toISOString().slice(0, 10) ?? null,
       };
 
       const updated = await tx.room.update({
@@ -465,6 +566,7 @@ export class RoomsService {
           ...(wantsOccupancy ? { occupancyStatus: dto.occupancyStatus } : {}),
           ...(wantsCleanliness ? { cleanlinessStatus: dto.cleanlinessStatus } : {}),
           ...(wantsHeld ? { heldStatus: dto.heldStatus } : {}),
+          ...(heldUntil !== undefined ? { heldUntil } : {}),
           statusChangedAt: new Date(),
           statusChangedBy: actor.sub, // NULL would mean system (§4.1)
         },
@@ -483,6 +585,7 @@ export class RoomsService {
             occupancyStatus: updated.occupancyStatus,
             cleanlinessStatus: updated.cleanlinessStatus,
             heldStatus: updated.heldStatus,
+            heldUntil: updated.heldUntil?.toISOString().slice(0, 10) ?? null,
             reason: dto.reason ?? null,
           },
         },
@@ -490,6 +593,49 @@ export class RoomsService {
 
       return updated;
     });
+  }
+
+  /**
+   * Puts held rooms whose release date has come back into service — the
+   * hourly sweep's work, per tenant (rooms are behind row-level security).
+   * Each branch's own "today" decides. Returns how many came back.
+   */
+  async releaseDueHolds(): Promise<number> {
+    const tenants = await this.prisma.tenant.findMany({ where: { status: { in: ['trial', 'active'] } }, select: { id: true } });
+    let released = 0;
+    for (const tenant of tenants) {
+      released += await this.prisma.withTenant(tenant.id, async (tx) => {
+        const due = await tx.room.findMany({
+          where: { deletedAt: null, heldStatus: { not: null }, heldUntil: { not: null } },
+          select: { id: true, branchId: true, heldStatus: true, heldUntil: true, branch: { select: { timezone: true } } },
+        });
+        let count = 0;
+        for (const room of due) {
+          if (room.heldUntil! > toBranchDate(todayInTimezone(room.branch.timezone))) continue;
+          // Only if it's still the hold the date was set for — a manager may have changed it since the read.
+          const claimed = await tx.room.updateMany({
+            where: { id: room.id, heldStatus: room.heldStatus, heldUntil: room.heldUntil },
+            data: { heldStatus: null, heldUntil: null, statusChangedAt: new Date(), statusChangedBy: null },
+          });
+          if (claimed.count === 0) continue;
+          await tx.auditLog.create({
+            data: {
+              tenantId: tenant.id,
+              branchId: room.branchId,
+              userId: null,
+              action: 'room.hold_released',
+              entityType: 'room',
+              entityId: room.id,
+              before: { heldStatus: room.heldStatus, heldUntil: room.heldUntil!.toISOString().slice(0, 10) },
+              after: { heldStatus: null, reason: 'Back in service on its release date' },
+            },
+          });
+          count++;
+        }
+        return count;
+      });
+    }
+    return released;
   }
 
   /**

@@ -73,15 +73,28 @@ export class ShiftsService {
       }
       const branch = await this.propertyService.assertBranch(tx, shift.branchId);
 
+      // Notes in another currency are counted apart: the drawer's own count is
+      // in the branch's currency, and a dollar bill isn't worth its naira
+      // equivalent in a naira count.
       const cashAgg = await tx.payment.aggregate({
         _sum: { amount: true },
-        where: { shiftId, method: 'cash', isVoid: false },
+        where: { shiftId, method: 'cash', isVoid: false, foreignCurrency: null },
       });
+      const foreignCash = await tx.payment.groupBy({
+        by: ['foreignCurrency'],
+        where: { shiftId, method: 'cash', isVoid: false, foreignCurrency: { not: null } },
+        _sum: { foreignAmount: true },
+        orderBy: { foreignCurrency: 'asc' },
+      });
+      const foreignCashTotals = foreignCash
+        .filter((row) => row.foreignCurrency && row._sum.foreignAmount)
+        .map((row) => ({ currency: row.foreignCurrency as string, amount: (row._sum.foreignAmount as Prisma.Decimal).toFixed(2) }));
+      // The cash the outlets took into this drawer — a split sale's cash part included.
       const posCashAgg = await tx.posOrder.aggregate({
-        _sum: { total: true },
-        where: { shiftId, settlement: 'cash', voidedAt: null },
+        _sum: { cashAmount: true },
+        where: { shiftId, voidedAt: null },
       });
-      const posCashTotal = posCashAgg._sum.total ?? new Prisma.Decimal(0);
+      const posCashTotal = posCashAgg._sum.cashAmount ?? new Prisma.Decimal(0);
       const cashMovement = (cashAgg._sum.amount ?? new Prisma.Decimal(0)).add(posCashTotal);
       const openingFloat = shift.openingFloat ?? new Prisma.Decimal(0);
       const systemCashTotal = openingFloat.add(cashMovement);
@@ -107,6 +120,7 @@ export class ShiftsService {
           closingCashCounted,
           closingBreakdown: dto.closingBreakdown as unknown as Prisma.InputJsonValue | undefined,
           variance,
+          foreignCashTotals: foreignCashTotals.length ? foreignCashTotals : Prisma.JsonNull,
           varianceExplanation: dto.varianceExplanation,
           handoverNotes: dto.handoverNotes,
         },
@@ -126,6 +140,7 @@ export class ShiftsService {
       await this.audit(tx, tenantId, shift.branchId, actorId, 'shift.closed', shift.id, {
         systemCashTotal: systemCashTotal.toFixed(2),
         posCashTotal: posCashTotal.toFixed(2),
+        ...(foreignCashTotals.length ? { foreignCashTotals } : {}),
         closingCashCounted: dto.closingCashCounted,
         variance: variance.toFixed(2),
       });
@@ -143,9 +158,9 @@ export class ShiftsService {
           issues: { orderBy: { createdAt: 'asc' } },
           payments: { where: { isVoid: false }, orderBy: { recordedAt: 'asc' } },
           posOrders: {
-            where: { settlement: 'cash', voidedAt: null },
+            where: { cashAmount: { gt: 0 }, voidedAt: null },
             orderBy: { createdAt: 'asc' },
-            select: { id: true, orderNo: true, total: true, createdAt: true, outlet: { select: { name: true } } },
+            select: { id: true, orderNo: true, total: true, cashAmount: true, createdAt: true, outlet: { select: { name: true } } },
           },
         },
       });

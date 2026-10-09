@@ -59,7 +59,7 @@ describe('accounting-export', () => {
         { date: '2026-09-15', method: 'cash', amount: d('20000') },
         { date: '2026-09-15', method: 'card', amount: d('10000') },
       ],
-      posSales: [{ date: '2026-09-15', department: 'fnb', subtotal: d('4000'), total: d('4300'), method: 'cash' }],
+      posSales: [{ date: '2026-09-15', department: 'fnb', subtotal: d('4000'), total: d('4300'), tenders: [{ method: 'cash', amount: d('4300') }] }],
     };
 
     it('produces one balanced journal a day, netting the guest ledger', () => {

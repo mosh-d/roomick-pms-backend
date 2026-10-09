@@ -4,7 +4,7 @@ import type { Response } from 'express';
 import { CurrentTenant } from '../../common/decorators';
 import { Permission } from '../../common/decorators/permission.decorator';
 import { Roles, SystemRole } from '../../common/decorators/roles.decorator';
-import { ReportQueryDto } from './dto/report-query.dto';
+import { ArAgeingQueryDto, ReportQueryDto } from './dto/report-query.dto';
 import { ReportsService } from './reports.service';
 
 @ApiTags('reports')
@@ -67,6 +67,17 @@ export class ReportsController {
     @Query() query: ReportQueryDto,
   ): ReturnType<ReportsService['getFinancial']> {
     return this.reportsService.getFinancial(tenantId, branchId, query);
+  }
+
+  @Get('ar-ageing')
+  @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.Accountant)
+  @ApiOperation({ summary: 'Accounts receivable ageing — what departed guests and companies still owe, by who and by how long (0–30, 31–60, 61–90, 90+ days)' })
+  getArAgeing(
+    @CurrentTenant() tenantId: string,
+    @Param('branchId', ParseUUIDPipe) branchId: string,
+    @Query() query: ArAgeingQueryDto,
+  ): ReturnType<ReportsService['getArAgeing']> {
+    return this.reportsService.getArAgeing(tenantId, branchId, query.asOf);
   }
 
   @Get('occupancy/pdf')

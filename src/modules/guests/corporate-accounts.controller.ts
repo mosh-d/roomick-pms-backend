@@ -1,11 +1,11 @@
-import { Body, Controller, Get, Param, ParseUUIDPipe, Patch, Post } from '@nestjs/common';
+import { Body, Controller, Get, Param, ParseUUIDPipe, Patch, Post, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentTenant, CurrentUser } from '../../common/decorators';
 import { Permission } from '../../common/decorators/permission.decorator';
 import { Roles, SystemRole } from '../../common/decorators/roles.decorator';
 import { JwtPayload } from '../../common/types/request-context';
 import { CorporateAccountsService } from './corporate-accounts.service';
-import { CreateCorporateAccountDto, UpdateCorporateAccountDto } from './dto/corporate-account.dto';
+import { CreateCorporateAccountDto, ListCorporateAccountsQueryDto, UpdateCorporateAccountDto } from './dto/corporate-account.dto';
 
 @ApiTags('corporate-accounts')
 @ApiBearerAuth()
@@ -17,9 +17,17 @@ export class CorporateAccountsController {
   // Front desk reads the list to book a guest under their company.
   @Get()
   @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk, SystemRole.Accountant)
-  @ApiOperation({ summary: 'Company accounts, active first — with their contracted rate plan and how many stays each has' })
-  list(@CurrentTenant() tenantId: string): ReturnType<CorporateAccountsService['list']> {
-    return this.corporateAccountsService.list(tenantId);
+  @ApiOperation({ summary: 'Company accounts, active first — with their contracted rate plan and how many stays each has. Search, and a page at a time.' })
+  list(@CurrentTenant() tenantId: string, @Query() query: ListCorporateAccountsQueryDto): ReturnType<CorporateAccountsService['list']> {
+    return this.corporateAccountsService.list(tenantId, query);
+  }
+
+  // Before `:accountId`, so "count" isn't taken for an id.
+  @Get('count')
+  @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk, SystemRole.Accountant)
+  @ApiOperation({ summary: 'How many company accounts match the same search — the total behind the list’s pages' })
+  count(@CurrentTenant() tenantId: string, @Query() query: ListCorporateAccountsQueryDto): ReturnType<CorporateAccountsService['count']> {
+    return this.corporateAccountsService.count(tenantId, query);
   }
 
   @Get(':accountId')

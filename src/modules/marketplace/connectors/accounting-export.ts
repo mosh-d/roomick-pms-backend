@@ -166,8 +166,8 @@ export interface JournalInputs {
   folioLines: Array<{ date: string; department: string; amount: Prisma.Decimal }>;
   /** Folio payments (refunds are negative), by the local day they were recorded. */
   payments: Array<{ date: string; method: string; amount: Prisma.Decimal }>;
-  /** Walk-in Point of Sale sales settled on the spot — never on a folio, so they don't touch the guest ledger. */
-  posSales: Array<{ date: string; department: string; subtotal: Prisma.Decimal; total: Prisma.Decimal; method: string }>;
+  /** Walk-in Point of Sale sales settled on the spot — never on a folio, so they don't touch the guest ledger. `tenders` add up to `total`. */
+  posSales: Array<{ date: string; department: string; subtotal: Prisma.Decimal; total: Prisma.Decimal; tenders: Array<{ method: string; amount: Prisma.Decimal }> }>;
 }
 
 export interface JournalLine {
@@ -233,7 +233,7 @@ export function buildJournals(inputs: JournalInputs, config: AccountingConfig, c
     post(payment.date, config.accounts.receivable, payment.amount.negated(), 'Guest payments');
   }
   for (const sale of inputs.posSales) {
-    post(sale.date, paymentAccount(sale.method), sale.total, `${paymentLabel(sale.method)} received (walk-in sales)`);
+    for (const tender of sale.tenders) post(sale.date, paymentAccount(tender.method), tender.amount, `${paymentLabel(tender.method)} received (walk-in sales)`);
     post(sale.date, revenueAccount(sale.department), sale.subtotal.negated(), `${revenueLabel(sale.department)} (walk-in sales)`);
     post(sale.date, config.accounts.taxPayable, sale.total.minus(sale.subtotal).negated(), 'Tax collected');
   }

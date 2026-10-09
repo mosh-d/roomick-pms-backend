@@ -31,7 +31,11 @@ export type BranchRecord =
   | 'taxRule'
   | 'reportTemplate'
   | 'housekeepingTask'
-  | 'marketingCampaign';
+  | 'marketingCampaign'
+  | 'payment'
+  | 'invoice'
+  | 'package'
+  | 'channelAllotment';
 
 export interface BranchOfMetadata {
   record: BranchRecord;

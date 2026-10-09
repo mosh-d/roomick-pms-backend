@@ -46,3 +46,50 @@ export function pointsForSpend(spend: Prisma.Decimal, pointsPerUnit: Prisma.Deci
 export function redemptionValue(points: number, pointValue: Prisma.Decimal): Prisma.Decimal {
   return pointValue.mul(points).toDecimalPlaces(2, Prisma.Decimal.ROUND_DOWN);
 }
+
+/** When points earned at `earnedAt` lapse under a programme that lets them, or null. Same day of the month, months later (clamped to the month's last day). */
+export function pointsExpireAt(earnedAt: Date, months: number | null | undefined): Date | null {
+  if (!months) return null;
+  const at = new Date(earnedAt);
+  const day = at.getUTCDate();
+  at.setUTCDate(1);
+  at.setUTCMonth(at.getUTCMonth() + months);
+  const lastDay = new Date(Date.UTC(at.getUTCFullYear(), at.getUTCMonth() + 1, 0)).getUTCDate();
+  at.setUTCDate(Math.min(day, lastDay));
+  return at;
+}
+
+export type LedgerRow = { type: 'earn' | 'redeem' | 'adjust' | 'expire' | 'reversal'; points: number; expiresAt: Date | null };
+
+/**
+ * What of a member's points has lapsed unspent as of `now`, and what lapses
+ * next. Spending is drawn from the earnings that lapse soonest — redeemed
+ * points, points taken off, and points already lapsed all come off them
+ * first (a voided redemption's points coming back puts them back) — so a
+ * member never loses points while ones that last longer would have done.
+ * Points that never lapse (an adjustment, or earned while the programme let
+ * points last for ever) are spent only once those are gone.
+ */
+export function lapsedPoints(rows: LedgerRow[], now: Date): { due: number; next: { points: number; on: Date } | null } {
+  let spent = 0;
+  for (const row of rows) {
+    if (row.type === 'redeem' || row.type === 'expire' || (row.type === 'adjust' && row.points < 0)) spent += -row.points;
+    if (row.type === 'reversal') spent -= row.points;
+  }
+  spent = Math.max(0, spent);
+  const lots = rows.filter((row) => row.type === 'earn' && row.expiresAt !== null).sort((a, b) => a.expiresAt!.getTime() - b.expiresAt!.getTime());
+  let due = 0;
+  let next: { points: number; on: Date } | null = null;
+  for (const lot of lots) {
+    const used = Math.min(lot.points, spent);
+    spent -= used;
+    const unspent = lot.points - used;
+    if (unspent <= 0) continue;
+    if (lot.expiresAt! <= now) due += unspent;
+    else if (!next) next = { points: unspent, on: lot.expiresAt! };
+    else if (next.on.getTime() === lot.expiresAt!.getTime()) next.points += unspent;
+  }
+  const balance = rows.reduce((sum, row) => sum + row.points, 0);
+  return { due: Math.max(0, Math.min(due, balance)), next };
+}
+

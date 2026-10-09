@@ -189,8 +189,8 @@ describe('ReportsService', () => {
 
     it('adds walk-in Point of Sale sales — pre-tax by outlet charge type, as paid by payment method', async () => {
       tx.posOrder.findMany.mockResolvedValue([
-        { subtotal: new Prisma.Decimal('5000'), total: new Prisma.Decimal('5375'), settlement: 'cash', createdAt: new Date('2026-09-01T12:00:00Z'), outlet: { chargeType: 'fnb' } },
-        { subtotal: new Prisma.Decimal('10000'), total: new Prisma.Decimal('10750'), settlement: 'card', createdAt: new Date('2026-09-01T13:00:00Z'), outlet: { chargeType: 'spa' } },
+        { subtotal: new Prisma.Decimal('5000'), total: new Prisma.Decimal('5375'), cashAmount: new Prisma.Decimal('5375'), cardAmount: new Prisma.Decimal('0'), settlement: 'cash', createdAt: new Date('2026-09-01T12:00:00Z'), outlet: { chargeType: 'fnb' } },
+        { subtotal: new Prisma.Decimal('10000'), total: new Prisma.Decimal('10750'), cashAmount: new Prisma.Decimal('0'), cardAmount: new Prisma.Decimal('10750'), settlement: 'card', createdAt: new Date('2026-09-01T13:00:00Z'), outlet: { chargeType: 'spa' } },
       ]);
       const result = await service.getRevenue(TENANT_ID, BRANCH_ID, { from: '2026-09-01', to: '2026-09-02' });
       expect(result.byDepartment).toEqual(expect.arrayContaining([{ chargeType: 'fnb', amount: '5000.00' }, { chargeType: 'spa', amount: '10000.00' }]));
@@ -199,7 +199,7 @@ describe('ReportsService', () => {
       expect(result.trend).toEqual([{ period: '2026-09-01', amount: '15000.00' }]);
       // Room-charged sales are already folio lines — only walk-in sales are read, and never voided ones.
       expect(tx.posOrder.findMany).toHaveBeenCalledWith(
-        expect.objectContaining({ where: expect.objectContaining({ settlement: { in: ['cash', 'card'] }, voidedAt: null }) }),
+        expect.objectContaining({ where: expect.objectContaining({ settlement: { not: 'room' }, voidedAt: null }) }),
       );
     });
 
@@ -216,7 +216,7 @@ describe('ReportsService', () => {
       propertyService.assertBranch.mockResolvedValue({ id: BRANCH_ID, currency: 'NGN', timezone: 'Africa/Lagos' });
       // 00:30 in Lagos on the 2nd is still the 1st in UTC.
       tx.posOrder.findMany.mockResolvedValue([
-        { subtotal: new Prisma.Decimal('1000'), total: new Prisma.Decimal('1075'), settlement: 'cash', createdAt: new Date('2026-09-01T23:30:00Z'), outlet: { chargeType: 'fnb' } },
+        { subtotal: new Prisma.Decimal('1000'), total: new Prisma.Decimal('1075'), cashAmount: new Prisma.Decimal('1075'), cardAmount: new Prisma.Decimal('0'), settlement: 'cash', createdAt: new Date('2026-09-01T23:30:00Z'), outlet: { chargeType: 'fnb' } },
       ]);
       const result = await service.getRevenue(TENANT_ID, BRANCH_ID, { from: '2026-09-02', to: '2026-09-03' });
       const lagosDay = { gte: new Date('2026-09-01T23:00:00Z'), lt: new Date('2026-09-02T23:00:00Z') };
@@ -260,7 +260,7 @@ describe('ReportsService', () => {
         { amount: d('-3000'), method: 'cash', recordedAt: new Date('2026-09-02T10:00:00.000Z') },
       ]);
       tx.posOrder.findMany.mockResolvedValue([
-        { subtotal: d('10000'), taxTotal: d('750'), total: d('10750'), settlement: 'cash', createdAt: new Date('2026-09-02T12:00:00.000Z'), outlet: { chargeType: 'fnb' } },
+        { subtotal: d('10000'), taxTotal: d('750'), total: d('10750'), cashAmount: d('10750'), cardAmount: new Prisma.Decimal('0'), settlement: 'cash', createdAt: new Date('2026-09-02T12:00:00.000Z'), outlet: { chargeType: 'fnb' } },
       ]);
     });
 

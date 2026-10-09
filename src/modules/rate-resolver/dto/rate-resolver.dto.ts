@@ -1,6 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
-import { IsBoolean, IsIn, IsInt, IsNumber, IsOptional, IsString, IsUUID, Max, MaxLength, Min, MinLength } from 'class-validator';
+import { ArrayMaxSize, IsArray, IsBoolean, IsIn, IsInt, IsNumber, IsOptional, IsString, IsUUID, Max, MaxLength, Min, MinLength } from 'class-validator';
 import { IsDateOnly } from '../../../common/validation/is-date-only.decorator';
 import { AdjustmentType, RateType } from '@prisma/client';
 
@@ -27,6 +27,29 @@ export class CalculateRateDto {
   @IsOptional()
   @IsUUID()
   corporateAccountId?: string;
+
+  @ApiPropertyOptional({ example: 2, description: "Who is staying — prices the room type's extra-adult and child charges. Left out: none." })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(20)
+  adults?: number;
+
+  @ApiPropertyOptional({ example: 1 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(20)
+  children?: number;
+
+  @ApiPropertyOptional({ type: [String], description: 'Packages to add to the stay — priced into the quote, with their tax' })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(20)
+  @IsUUID('4', { each: true })
+  packageIds?: string[];
 }
 
 /**

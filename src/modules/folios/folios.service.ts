@@ -4,10 +4,12 @@ import { ErrorCode } from '../../common/errors/error-codes';
 import { todayInTimezone, toBranchDate } from '../../common/utils/branch-date';
 import { PrismaService, TenantTx } from '../../prisma/prisma.service';
 import { nightlyRateFor } from '../reservations/nightly-rates';
+import { chargePerPosting, parsePackageSnapshots } from '../rate-resolver/package-pricing';
 import { PropertyService } from '../property/property.service';
 import { WebhookEventsService } from '../integrations/webhook-events.service';
 import { describeRule, PricedCharge, TaxesService } from '../taxes/taxes.service';
-import { CorrectLineItemDto, PostChargeDto, RecordPaymentDto } from './dto/folio.dto';
+import { applyLoyaltyPoints, lockLoyaltyGuest } from '../loyalty/loyalty-ledger';
+import { CorrectLineItemDto, PostChargeDto, RecordDepositDto, RecordPaymentDto } from './dto/folio.dto';
 
 const ZERO = new Prisma.Decimal(0);
 
@@ -57,8 +59,11 @@ export interface FolioTotals {
  * resolve before departure; a departed guest who still owes is a City
  * Ledger receivable, i.e. collections. Never blocks anything — it's a label.
  */
-/** `refund_due` — the bill holds a credit: the guest is owed money, and the bill can't close until it goes back. */
-export type FolioGuestStatus = 'in_house' | 'city_ledger' | 'refund_due' | null;
+/**
+ * `refund_due` — the bill holds a credit: the guest is owed money, and the bill can't close until it goes back.
+ * `deposit_held` — a credit on the bill of a stay that hasn't arrived yet: a deposit, which the stay will use.
+ */
+export type FolioGuestStatus = 'in_house' | 'city_ledger' | 'refund_due' | 'deposit_held' | null;
 
 /**
  * `in_house` — open bills of guests currently checked in (what the front-desk
@@ -66,6 +71,9 @@ export type FolioGuestStatus = 'in_house' | 'city_ledger' | 'refund_due' | null;
  * `refund_due` — bills with a credit owed to the guest.
  */
 export type FolioListFilter = 'all' | 'outstanding' | 'overdue' | 'in_house' | 'refund_due';
+
+/** A stay that hasn't begun: its bill, if it has one yet, only holds a deposit. */
+const BEFORE_ARRIVAL: ReadonlySet<string> = new Set(['confirmed', 'waitlisted']);
 
 /** The `all` list is paged; the others are already narrowed to open bills. */
 export const FOLIO_LIST_LIMIT = 200;
@@ -91,10 +99,16 @@ export class FoliosService {
    * resolves a folio (empty → balance 0) instead of 404-ing.
    */
   async ensurePrimaryFolio(tx: TenantTx, reservation: Reservation, actorId: string | null): Promise<Folio> {
+    // A bill opened before arrival (to hold a deposit) is `pending` until the
+    // stay begins — or ends some other way (a cancellation charge, a no-show).
+    const arrived = !BEFORE_ARRIVAL.has(reservation.status);
     const existing = await tx.folio.findFirst({
       where: { reservationId: reservation.id, label: null, deletedAt: null },
     });
-    if (existing) return existing;
+    if (existing) {
+      if (existing.status !== 'pending' || !arrived) return existing;
+      return tx.folio.update({ where: { id: existing.id }, data: { status: 'open', openedAt: new Date() } });
+    }
 
     const folio = await tx.folio.create({
       data: {
@@ -102,8 +116,8 @@ export class FoliosService {
         branchId: reservation.branchId,
         reservationId: reservation.id,
         guestId: reservation.guestId,
-        status: 'open',
-        openedAt: new Date(),
+        status: arrived ? 'open' : 'pending',
+        openedAt: arrived ? new Date() : null,
       },
     });
     await this.audit(tx, reservation.tenantId, reservation.branchId, actorId, 'folio.opened', folio.id, {
@@ -140,15 +154,127 @@ export class FoliosService {
     label: string,
     actorId: string | null,
   ): Promise<LineItem | null> {
+    const night = reservation.isDayUse && !(await this.dayUseCharged(tx, reservation.id))
+      ? await this.postDayUseCharge(tx, reservation, folio, label, actorId)
+      : await this.postRoomNight(tx, reservation, folio, serviceDate, label, actorId);
+    // The packages that go with this night — and, on the first day, the ones
+    // charged once for the stay.
+    await this.postPackageCharges(tx, reservation, folio, serviceDate, actorId);
+    return night;
+  }
+
+  /** A stay's packages for one date, outside the nightly posting — a package just added to a stay under way is charged now, not at the next night audit. */
+  async postPackagesForDate(tx: TenantTx, reservation: Reservation, folio: Folio, serviceDate: Date, actorId: string | null): Promise<void> {
+    await this.postPackageCharges(tx, reservation, folio, serviceDate, actorId);
+  }
+
+  /** Whether a day-use stay's day has been charged yet. */
+  private async dayUseCharged(tx: TenantTx, reservationId: string): Promise<boolean> {
+    return (await tx.lineItem.count({ where: { stayReservationId: reservationId, dayUse: true, isVoid: false, deletedAt: null } })) > 0;
+  }
+
+  /**
+   * A day-use stay's one charge: the room for the day at the rate it was
+   * booked at, as a room charge (taxed and reported as one) marked
+   * `dayUse` — it is not a night, and occupancy and the average rate don't
+   * count it as one.
+   */
+  private async postDayUseCharge(
+    tx: TenantTx,
+    reservation: Reservation & { roomType?: { name: string } | null },
+    folio: Folio,
+    label: string,
+    actorId: string | null,
+  ): Promise<LineItem | null> {
+    const billTo = await this.routedFolio(tx, reservation, folio);
+    const amount = reservation.overrideRate ? new Prisma.Decimal(reservation.overrideRate) : new Prisma.Decimal(reservation.confirmedRate);
+    if (!amount.greaterThan(0)) return null;
+    return this.writeChargeWithTaxes(tx, {
+      tenantId: reservation.tenantId,
+      branchId: reservation.branchId,
+      folioId: billTo.id,
+      description: `Day Use — ${label}, ${reservation.checkInDate.toISOString().slice(0, 10)} (${reservation.roomType?.name ?? 'Room'})`,
+      amount,
+      chargeType: 'room',
+      serviceDate: reservation.checkInDate,
+      stayReservationId: reservation.id,
+      roomTypeId: reservation.roomTypeId,
+      dayUse: true,
+      actorId,
+    });
+  }
+
+  /**
+   * The stay's packages for one date: each per-night package (per guest for a
+   * per-person one) for a night inside the booked stay, and on the arrival
+   * date the per-stay ones. Each package is charged once per night — or once
+   * — however many times this runs; a package taken off the bill by a
+   * correction isn't charged again. A day-use stay has no night: its day
+   * counts as one, so a per-night package is charged once. One added to a
+   * stay under way is charged from the day it was added — not for the
+   * nights before it — and a per-stay one added then is charged that day,
+   * even the day the guest leaves.
+   */
+  private async postPackageCharges(tx: TenantTx, reservation: Reservation, folio: Folio, serviceDate: Date, actorId: string | null): Promise<void> {
+    const packages = parsePackageSnapshots(reservation.packages);
+    if (packages.length === 0) return;
+    const arrival = serviceDate.getTime() === reservation.checkInDate.getTime();
+    const aNightOfTheStay = reservation.isDayUse ? arrival : serviceDate >= reservation.checkInDate && serviceDate < reservation.checkOutDate;
+    const aDayOfTheStay = serviceDate >= reservation.checkInDate && serviceDate <= reservation.checkOutDate;
+    const guests = reservation.adults + reservation.children;
+    let billTo: Folio | null = null;
+    for (const pkg of packages) {
+      if (pkg.addedOn && serviceDate < toBranchDate(pkg.addedOn)) continue;
+      const due = pkg.basis === 'per_stay' ? aDayOfTheStay : aNightOfTheStay;
+      if (!due) continue;
+      const already = await tx.lineItem.findFirst({
+        where: {
+          stayReservationId: reservation.id,
+          packageId: pkg.packageId,
+          ...(pkg.basis === 'per_stay' ? {} : { serviceDate }),
+          correctsLineItemId: null,
+          isVoid: false,
+          deletedAt: null,
+        },
+        select: { id: true },
+      });
+      if (already) continue;
+      billTo ??= await this.routedFolio(tx, reservation, folio);
+      const dateLabel = serviceDate.toISOString().slice(0, 10);
+      await this.writeChargeWithTaxes(tx, {
+        tenantId: reservation.tenantId,
+        branchId: reservation.branchId,
+        folioId: billTo.id,
+        description: `${pkg.name} — ${pkg.basis === 'per_stay' ? 'for the stay' : dateLabel}${pkg.basis === 'per_person_per_night' ? ` (${guests} ${guests === 1 ? 'guest' : 'guests'})` : ''}`.slice(0, 300),
+        amount: chargePerPosting(pkg, guests),
+        chargeType: pkg.chargeType,
+        serviceDate,
+        stayReservationId: reservation.id,
+        packageId: pkg.packageId,
+        actorId,
+      });
+    }
+  }
+
+  /** One room night, priced from the stay's own figures. */
+  private async postRoomNight(
+    tx: TenantTx,
+    reservation: Reservation & { roomType?: { name: string } | null },
+    folio: Folio,
+    serviceDate: Date,
+    label: string,
+    actorId: string | null,
+  ): Promise<LineItem | null> {
     // Looked up by the stay, not the bill: a night split onto a company
     // folio or transferred to another room's bill is still billed. Looking
     // on this folio alone billed every moved night again at check-out. A
     // room line with no stay recorded is one posted by hand, found where it
-    // sits, as before.
+    // sits, as before. A day-use stay's day is not a night.
     const already = await tx.lineItem.findFirst({
       where: {
         chargeType: 'room',
         serviceDate,
+        dayUse: false,
         isVoid: false,
         deletedAt: null,
         OR: [{ stayReservationId: reservation.id }, { stayReservationId: null, folioId: folio.id }],
@@ -165,9 +291,13 @@ export class FoliosService {
     // the night's own quoted price; the stay total split evenly only for a
     // stay booked before nights were kept — that split could leave the bill
     // a kobo off the quote and billed a 30,000 + 45,000 stay as 37,500 twice.
-    const perNight = reservation.overrideRate
-      ? new Prisma.Decimal(reservation.overrideRate)
-      : (nightlyRateFor(reservation, serviceDate) ?? new Prisma.Decimal(reservation.confirmedRate).div(nights).toDecimalPlaces(2));
+    // A day-use guest still in the room overnight is charged the night at
+    // the room type's own rate — the day-use price was for the day.
+    const perNight = reservation.isDayUse
+      ? ((await tx.roomType.findFirst({ where: { id: reservation.roomTypeId }, select: { baseRate: true } }))?.baseRate ?? new Prisma.Decimal(reservation.confirmedRate))
+      : reservation.overrideRate
+        ? new Prisma.Decimal(reservation.overrideRate)
+        : (nightlyRateFor(reservation, serviceDate) ?? new Prisma.Decimal(reservation.confirmedRate).div(nights).toDecimalPlaces(2));
 
     if (perNight.lessThanOrEqualTo(0)) return null; // nothing to charge; CHECK (amount <> 0) would reject it anyway
 
@@ -187,6 +317,7 @@ export class FoliosService {
       chargeType: 'room',
       serviceDate,
       stayReservationId: reservation.id,
+      roomTypeId: reservation.roomTypeId,
       actorId,
     });
   }
@@ -347,6 +478,40 @@ export class FoliosService {
   }
 
   async recordPayment(tenantId: string, folioId: string, dto: RecordPaymentDto, actorId: string): Promise<Payment> {
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const folio = await this.findFolioOrThrow(tx, folioId);
+      return this.recordPaymentInTx(tx, folio, dto, dto.paymentPurpose ?? 'payment', actorId);
+    });
+  }
+
+  /**
+   * A deposit taken before the guest arrives — at booking, by phone, by bank
+   * transfer. It goes on the stay's own bill, which is opened for it if it
+   * doesn't exist yet (and stays `pending` until check-in), so the deposit is
+   * there to pay for the stay, or to set against a cancellation charge.
+   */
+  async recordDeposit(tenantId: string, reservationId: string, dto: RecordDepositDto, actorId: string): Promise<Payment> {
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const reservation = await tx.reservation.findFirst({ where: { id: reservationId, deletedAt: null } });
+      if (!reservation) throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Reservation not found' });
+      if (!BEFORE_ARRIVAL.has(reservation.status)) {
+        throw new ConflictException({
+          code: ErrorCode.INVALID_STATUS_TRANSITION,
+          message: reservation.status === 'checked_in' ? 'The guest has arrived — take payment on their bill instead' : `A ${reservation.status.replace('_', ' ')} booking takes no deposit`,
+        });
+      }
+      const folio = await this.ensurePrimaryFolio(tx, reservation, actorId);
+      return this.recordPaymentInTx(tx, folio, dto, 'deposit', actorId);
+    });
+  }
+
+  private async recordPaymentInTx(
+    tx: TenantTx,
+    folio: Folio,
+    dto: { amount: number; method: Payment['method']; reference?: string; currency?: string },
+    purpose: Payment['paymentPurpose'],
+    actorId: string,
+  ): Promise<Payment> {
     // A points payment has to come off a points balance, and only the loyalty
     // redemption writes both halves together.
     if (dto.method === 'loyalty_points') {
@@ -355,44 +520,156 @@ export class FoliosService {
         message: "Loyalty points are redeemed from the guest's balance — use Redeem Points on the bill",
       });
     }
-    return this.prisma.withTenant(tenantId, async (tx) => {
-      const folio = await this.findFolioOrThrow(tx, folioId);
-      this.assertFolioOpen(folio);
-      const branch = await this.propertyService.assertBranch(tx, folio.branchId);
+    this.assertFolioOpen(folio);
+    const branch = await this.propertyService.assertBranch(tx, folio.branchId);
 
-      // Cash reconciliation (Shift Management) needs every cash payment
-      // attributed to the drawer it landed in — the recording agent's own
-      // currently open shift on this branch, if they have one. Non-cash
-      // methods never touch a shift; a card/bank/voucher payment isn't
-      // counted-cash at close, so linking it would just be noise.
-      const openShift =
-        dto.method === 'cash'
-          ? await tx.shift.findFirst({ where: { branchId: folio.branchId, agentId: actorId, closedAt: null } })
-          : null;
-      // Cash has to land in a drawer that's counted at close. Without an open
-      // shift it was recorded against nothing and never reconciled — a cash
-      // payment taken before the shift opened simply vanished from the count.
-      if (dto.method === 'cash' && !openShift) throw this.shiftRequired();
+    // Paid in another currency: what was handed over, turned into the
+    // branch's own at the rate a manager set — never a rate the request
+    // brings. The bill is in the branch's currency either way.
+    const currency = dto.currency?.toUpperCase();
+    let foreign: { foreignCurrency: string; foreignAmount: Prisma.Decimal; exchangeRate: Prisma.Decimal } | null = null;
+    let amount = new Prisma.Decimal(dto.amount);
+    if (currency && currency !== branch.currency) {
+      const rate = await tx.exchangeRate.findFirst({ where: { branchId: branch.id, currency }, select: { rate: true } });
+      if (!rate) {
+        throw new BadRequestException({
+          code: ErrorCode.VALIDATION_FAILED,
+          message: `No exchange rate is set for ${currency} — a manager sets one under Property Config → Currencies`,
+        });
+      }
+      foreign = { foreignCurrency: currency, foreignAmount: amount, exchangeRate: rate.rate };
+      amount = amount.mul(rate.rate).toDecimalPlaces(2);
+      if (!amount.greaterThan(0)) throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: `That is worth nothing in ${branch.currency}` });
+    }
 
-      const payment = await tx.payment.create({
-        data: {
-          tenantId,
-          folioId,
-          method: dto.method,
-          amount: new Prisma.Decimal(dto.amount),
-          currency: branch.currency,
-          reference: dto.reference,
-          shiftId: openShift?.id,
-          paymentPurpose: dto.paymentPurpose ?? 'payment',
-          recordedBy: actorId,
-        },
-      });
-      await this.audit(tx, tenantId, folio.branchId, actorId, 'payment.recorded', payment.id, {
-        folioId,
-        amount: dto.amount,
+    // Cash reconciliation (Shift Management) needs every cash payment
+    // attributed to the drawer it landed in — the recording agent's own
+    // currently open shift on this branch, if they have one. Non-cash
+    // methods never touch a shift; a card/bank/voucher payment isn't
+    // counted-cash at close, so linking it would just be noise.
+    const openShift =
+      dto.method === 'cash'
+        ? await tx.shift.findFirst({ where: { branchId: folio.branchId, agentId: actorId, closedAt: null } })
+        : null;
+    // Cash has to land in a drawer that's counted at close. Without an open
+    // shift it was recorded against nothing and never reconciled — a cash
+    // payment taken before the shift opened simply vanished from the count.
+    if (dto.method === 'cash' && !openShift) throw this.shiftRequired();
+
+    const payment = await tx.payment.create({
+      data: {
+        tenantId: folio.tenantId,
+        folioId: folio.id,
         method: dto.method,
+        amount,
+        currency: branch.currency,
+        ...(foreign ?? {}),
+        reference: dto.reference,
+        shiftId: openShift?.id,
+        paymentPurpose: purpose,
+        recordedBy: actorId,
+      },
+    });
+    await this.audit(tx, folio.tenantId, folio.branchId, actorId, 'payment.recorded', payment.id, {
+      folioId: folio.id,
+      amount: amount.toFixed(2),
+      method: dto.method,
+      ...(purpose === 'payment' ? {} : { purpose }),
+      ...(foreign ? { foreignCurrency: foreign.foreignCurrency, foreignAmount: foreign.foreignAmount.toFixed(2), exchangeRate: foreign.exchangeRate.toString() } : {}),
+    });
+    return payment;
+  }
+
+  /**
+   * Takes back a payment recorded in error — the wrong bill, the wrong
+   * amount, a card that was declined after all. The row stays in the ledger,
+   * marked void with who did it and why, and the bill owes it again. Money
+   * actually handed back to a guest is a refund, not this.
+   *
+   * Refused when it would unbalance something already counted: a refund
+   * asked for against it, a bill already settled, or cash that went into a
+   * drawer that has since been counted and closed. Points paid with go back
+   * to the guest's balance.
+   */
+  async voidPayment(tenantId: string, paymentId: string, reason: string, actorId: string): Promise<Payment> {
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      // Two voids of the same payment at once: one waits for the other, then sees it void.
+      await tx.$queryRaw`SELECT id FROM payments WHERE id = ${paymentId}::uuid FOR UPDATE`;
+      const payment = await tx.payment.findFirst({
+        where: { id: paymentId, deletedAt: null },
+        include: { refundPayout: { select: { id: true } }, loyaltyTransaction: { select: { guestId: true, points: true } } },
       });
-      return payment;
+      if (!payment) throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Payment not found' });
+      if (payment.isVoid) throw new ConflictException({ code: ErrorCode.CONFLICT, message: 'This payment is already void' });
+      if (payment.refundPayout || !payment.amount.greaterThan(0)) {
+        throw new ConflictException({ code: ErrorCode.CONFLICT, message: 'Money handed back to a guest can’t be voided — it left the till' });
+      }
+      const folio = await this.findFolioOrThrow(tx, payment.folioId);
+      if (folio.status === 'settled') {
+        throw new ConflictException({ code: ErrorCode.CONFLICT, message: 'This bill is settled — reopen it before voiding a payment on it' });
+      }
+      const refunds = await tx.refund.count({ where: { paymentId, status: { in: ['pending', 'approved', 'processed'] } } });
+      if (refunds > 0) {
+        throw new ConflictException({
+          code: ErrorCode.CONFLICT,
+          message: 'A refund has been asked for against this payment — turn it down first (a refund already paid out stands)',
+        });
+      }
+      if (payment.shiftId) {
+        const shift = await tx.shift.findFirst({ where: { id: payment.shiftId }, select: { closedAt: true } });
+        if (shift?.closedAt) {
+          throw new ConflictException({
+            code: ErrorCode.CONFLICT,
+            message: 'This cash went into a drawer that has been counted and closed since — record a refund instead',
+          });
+        }
+      }
+
+      const voided = await tx.payment.update({
+        where: { id: paymentId },
+        data: { isVoid: true, voidedAt: new Date(), voidedBy: actorId, voidReason: reason.trim() },
+      });
+      if (payment.method === 'loyalty_points' && payment.loyaltyTransaction) {
+        const guest = await lockLoyaltyGuest(tx, payment.loyaltyTransaction.guestId);
+        await applyLoyaltyPoints(tx, tenantId, guest, {
+          type: 'reversal',
+          points: -payment.loyaltyTransaction.points,
+          description: `Points given back — the payment they made was voided: ${reason.trim()}`,
+          branchId: folio.branchId,
+          actorId,
+        });
+      }
+      await this.audit(tx, tenantId, folio.branchId, actorId, 'payment.voided', paymentId, {
+        folioId: folio.id,
+        amount: payment.amount.toFixed(2),
+        method: payment.method,
+        reason: reason.trim(),
+      });
+      return voided;
+    });
+  }
+
+  /**
+   * A charge from elsewhere in the hotel — an event's space hire and
+   * catering, a late check-out fee — posted to a bill the caller has already
+   * found and checked, taxed by the branch's rules like any other charge.
+   */
+  async postChargeInTx(
+    tx: TenantTx,
+    folio: Folio,
+    input: { description: string; amount: Prisma.Decimal; chargeType: ChargeType; serviceDate: Date },
+    actorId: string | null,
+  ): Promise<LineItem | null> {
+    this.assertFolioOpen(folio);
+    return this.writeChargeWithTaxes(tx, {
+      tenantId: folio.tenantId,
+      branchId: folio.branchId,
+      folioId: folio.id,
+      description: input.description,
+      amount: input.amount,
+      chargeType: input.chargeType,
+      serviceDate: input.serviceDate,
+      actorId,
     });
   }
 
@@ -963,7 +1240,11 @@ export class FoliosService {
       }
       const [lineItems, payments, totals, branch] = await Promise.all([
         tx.lineItem.findMany({ where: { folioId, deletedAt: null }, orderBy: { postedAt: 'asc' } }),
-        tx.payment.findMany({ where: { folioId, deletedAt: null }, orderBy: { recordedAt: 'asc' } }),
+        tx.payment.findMany({
+          where: { folioId, deletedAt: null },
+          orderBy: { recordedAt: 'asc' },
+          include: { recordedByUser: { select: { name: true } }, voidedByUser: { select: { name: true } } },
+        }),
         this.computeTotals(tx, folioId),
         this.propertyService.assertBranch(tx, folio.branchId),
       ]);
@@ -1081,7 +1362,8 @@ export class FoliosService {
             select: { id: true, confirmationNumber: true, status: true, checkOutDate: true, room: { select: { number: true } } },
           },
         },
-        orderBy: { openedAt: 'desc' },
+        // A deposit's bill hasn't opened yet: after the open ones, not on top of them.
+        orderBy: { openedAt: { sort: 'desc', nulls: 'last' } },
         ...(filter === 'all' ? { take, skip: Math.max(page.offset ?? 0, 0) } : {}),
       });
 
@@ -1108,7 +1390,8 @@ export class FoliosService {
       });
 
       if (filter === 'outstanding') return rows.filter((r) => r.balanceDue.greaterThan(0));
-      if (filter === 'refund_due') return rows.filter((r) => r.balanceDue.lessThan(0));
+      // A deposit held for a stay still to come is not a refund owed.
+      if (filter === 'refund_due') return rows.filter((r) => r.guestStatus === 'refund_due');
       if (filter === 'overdue') {
         // `guestStatus === 'city_ledger'` (not just "balance>0 and checkOutDate
         // passed" alone) — a guest who's STILL checked in past their own
@@ -1153,6 +1436,12 @@ export class FoliosService {
       outletId?: string;
       /** Room nights only: the stay the night is for — see `LineItem.stayReservationId`. */
       stayReservationId?: string;
+      /** Room nights only: the room type the night is sold as — see `LineItem.roomTypeId`. */
+      roomTypeId?: string;
+      /** A package's charge: which package. */
+      packageId?: string;
+      /** A day-use stay's charge for the day. */
+      dayUse?: boolean;
       /** `null` = system-posted (the scheduled night audit) or a guest acting for themselves — `postedBy`'s own convention. */
       actorId: string | null;
     },
@@ -1178,6 +1467,9 @@ export class FoliosService {
         serviceDate: input.serviceDate,
         outletId: input.outletId,
         stayReservationId: input.stayReservationId,
+        roomTypeId: input.roomTypeId,
+        packageId: input.packageId,
+        dayUse: input.dayUse ?? false,
         postedBy: input.actorId,
       },
     });
@@ -1263,7 +1555,7 @@ export class FoliosService {
    * The same holds for an unpaid cancellation charge.
    */
   private deriveGuestStatus(reservationStatus: string | null, balanceDue: Prisma.Decimal): FolioGuestStatus {
-    if (balanceDue.lessThan(0)) return 'refund_due';
+    if (balanceDue.lessThan(0)) return reservationStatus !== null && BEFORE_ARRIVAL.has(reservationStatus) ? 'deposit_held' : 'refund_due';
     if (!balanceDue.greaterThan(0)) return null;
     if (reservationStatus === 'checked_out' || reservationStatus === 'no_show' || reservationStatus === 'cancelled') return 'city_ledger';
     if (reservationStatus === 'checked_in') return 'in_house';

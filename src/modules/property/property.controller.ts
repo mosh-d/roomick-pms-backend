@@ -8,6 +8,10 @@ import { CreateBrandDto, UpdateBrandDto } from './dto/brand.dto';
 import {
   CreateBranchDto,
   CancellationPolicyDto,
+  DayUsePolicyDto,
+  TurndownPolicyDto,
+  DepositPolicyDto,
+  StayFeePolicyDto,
   GuestTermsDto,
   NoShowPolicyDto,
   RegCardTemplateDto,
@@ -128,6 +132,54 @@ export class PropertyController {
     @Body() dto: CancellationPolicyDto,
   ): ReturnType<PropertyService['setCancellationPolicy']> {
     return this.propertyService.setCancellationPolicy(tenantId, branchId, dto, user.sub);
+  }
+
+  @Patch('branches/:branchId/policies/deposit')
+  @Roles(SystemRole.Owner, SystemRole.Manager)
+  @ApiOperation({ summary: 'Set the deposit new bookings are asked for — none, the first night, a percentage of the stay, or a fixed amount — and when it is due' })
+  setDepositPolicy(
+    @CurrentTenant() tenantId: string,
+    @CurrentUser() user: JwtPayload,
+    @Param('branchId', ParseUUIDPipe) branchId: string,
+    @Body() dto: DepositPolicyDto,
+  ): ReturnType<PropertyService['setDepositPolicy']> {
+    return this.propertyService.setDepositPolicy(tenantId, branchId, dto, user.sub);
+  }
+
+  @Patch('branches/:branchId/policies/day-use')
+  @Roles(SystemRole.Owner, SystemRole.Manager)
+  @ApiOperation({ summary: 'Sell rooms for the day — the hours a day-use room is the guest’s (each room type at its own day-use rate)' })
+  setDayUsePolicy(
+    @CurrentTenant() tenantId: string,
+    @CurrentUser() user: JwtPayload,
+    @Param('branchId', ParseUUIDPipe) branchId: string,
+    @Body() dto: DayUsePolicyDto,
+  ): ReturnType<PropertyService['setDayUsePolicy']> {
+    return this.propertyService.setDayUsePolicy(tenantId, branchId, dto, user.sub);
+  }
+
+  @Patch('branches/:branchId/policies/turndown')
+  @Roles(SystemRole.Owner, SystemRole.Manager)
+  @ApiOperation({ summary: 'Turn rooms down in the evening — every occupied room, or only VIP guests’ — as a housekeeping task each night' })
+  setTurndownPolicy(
+    @CurrentTenant() tenantId: string,
+    @CurrentUser() user: JwtPayload,
+    @Param('branchId', ParseUUIDPipe) branchId: string,
+    @Body() dto: TurndownPolicyDto,
+  ): ReturnType<PropertyService['setTurndownPolicy']> {
+    return this.propertyService.setTurndownPolicy(tenantId, branchId, dto, user.sub);
+  }
+
+  @Patch('branches/:branchId/policies/stay-fees')
+  @Roles(SystemRole.Owner, SystemRole.Manager)
+  @ApiOperation({ summary: 'Set the late check-out and early departure fees charged at check-out (a manager can waive them there)' })
+  setStayFeePolicy(
+    @CurrentTenant() tenantId: string,
+    @CurrentUser() user: JwtPayload,
+    @Param('branchId', ParseUUIDPipe) branchId: string,
+    @Body() dto: StayFeePolicyDto,
+  ): ReturnType<PropertyService['setStayFeePolicy']> {
+    return this.propertyService.setStayFeePolicy(tenantId, branchId, dto, user.sub);
   }
 
   @Patch('branches/:branchId/policies/guest-terms')

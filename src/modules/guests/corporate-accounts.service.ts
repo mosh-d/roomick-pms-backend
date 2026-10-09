@@ -2,7 +2,7 @@ import { BadRequestException, ConflictException, Injectable, NotFoundException }
 import { CorporateAccount, Prisma } from '@prisma/client';
 import { ErrorCode } from '../../common/errors/error-codes';
 import { PrismaService, TenantTx } from '../../prisma/prisma.service';
-import { CreateCorporateAccountDto, UpdateCorporateAccountDto } from './dto/corporate-account.dto';
+import { CreateCorporateAccountDto, ListCorporateAccountsQueryDto, UpdateCorporateAccountDto } from './dto/corporate-account.dto';
 
 const ACCOUNT_INCLUDE = {
   ratePlan: { select: { id: true, name: true, amount: true, branchId: true, isActive: true, branch: { select: { name: true, currency: true } } } },
@@ -31,10 +31,39 @@ function invalid(message: string): BadRequestException {
 export class CorporateAccountsService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async list(tenantId: string) {
+  /** Active first, by name — a page at a time (`limit`/`offset`, every account up to 500 unless asked); `count` says how many match in all. */
+  async list(tenantId: string, query: ListCorporateAccountsQueryDto = {}) {
     return this.prisma.withTenant(tenantId, (tx) =>
-      tx.corporateAccount.findMany({ include: ACCOUNT_INCLUDE, orderBy: [{ isActive: 'desc' }, { name: 'asc' }] }),
+      tx.corporateAccount.findMany({
+        where: this.listWhere(query),
+        include: ACCOUNT_INCLUDE,
+        orderBy: [{ isActive: 'desc' }, { name: 'asc' }],
+        take: query.limit ?? 500,
+        skip: query.offset ?? 0,
+      }),
     );
+  }
+
+  async count(tenantId: string, query: ListCorporateAccountsQueryDto = {}): Promise<{ count: number }> {
+    return this.prisma.withTenant(tenantId, async (tx) => ({ count: await tx.corporateAccount.count({ where: this.listWhere(query) }) }));
+  }
+
+  private listWhere(query: ListCorporateAccountsQueryDto): Prisma.CorporateAccountWhereInput {
+    const search = query.search?.trim();
+    const domain = search?.toLowerCase().replace(/^@+/, '');
+    return {
+      ...(query.active ? { isActive: query.active === 'true' } : {}),
+      ...(search
+        ? {
+            OR: [
+              { name: { contains: search, mode: 'insensitive' } },
+              { contactName: { contains: search, mode: 'insensitive' } },
+              { contactEmail: { contains: search, mode: 'insensitive' } },
+              ...(domain ? [{ emailDomains: { has: domain } }] : []),
+            ],
+          }
+        : {}),
+    };
   }
 
   /** The account with its travelers — everyone who has stayed under it — and its latest stays. */
@@ -82,6 +111,8 @@ export class CorporateAccountsService {
           ratePlanId,
           contactName: dto.contactName?.trim() || null,
           contactEmail: dto.contactEmail?.trim().toLowerCase() || null,
+          paymentTermsDays: dto.paymentTermsDays ?? null,
+          billingInfo: dto.billingAddress?.trim() ? { address: dto.billingAddress.trim() } : undefined,
         },
       });
       await this.audit(tx, tenantId, actorId, 'corporate_account.created', account.id, { name, ratePlanId });
@@ -104,6 +135,8 @@ export class CorporateAccountsService {
       if (dto.ratePlanId !== undefined) data.ratePlanId = dto.ratePlanId === null ? null : await this.assertContractPlan(tx, dto.ratePlanId);
       if (dto.contactName !== undefined) data.contactName = dto.contactName.trim() || null;
       if (dto.contactEmail !== undefined) data.contactEmail = dto.contactEmail.trim().toLowerCase() || null;
+      if (dto.paymentTermsDays !== undefined) data.paymentTermsDays = dto.paymentTermsDays;
+      if (dto.billingAddress !== undefined) data.billingInfo = dto.billingAddress.trim() ? { address: dto.billingAddress.trim() } : Prisma.JsonNull;
       if (dto.isActive !== undefined) data.isActive = dto.isActive;
       const updated = await tx.corporateAccount.update({ where: { id: accountId }, data });
       await this.audit(tx, tenantId, actorId, 'corporate_account.updated', accountId, this.changes(account, updated));
@@ -137,7 +170,7 @@ export class CorporateAccountsService {
   }
 
   private changes(before: CorporateAccount, after: CorporateAccount): Prisma.InputJsonValue {
-    const keys = ['name', 'emailDomains', 'ratePlanId', 'contactName', 'contactEmail', 'isActive'] as const;
+    const keys = ['name', 'emailDomains', 'ratePlanId', 'contactName', 'contactEmail', 'paymentTermsDays', 'billingInfo', 'isActive'] as const;
     const changed: Record<string, { from: unknown; to: unknown }> = {};
     for (const key of keys) {
       if (JSON.stringify(before[key]) !== JSON.stringify(after[key])) changed[key] = { from: before[key], to: after[key] };

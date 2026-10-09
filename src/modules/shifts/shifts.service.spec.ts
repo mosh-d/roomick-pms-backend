@@ -42,8 +42,8 @@ function makeTx() {
       findMany: jest.fn().mockResolvedValue([]),
       update: jest.fn().mockImplementation(({ data }: { data: Record<string, unknown> }) => Promise.resolve({ id: 'issue-1', ...data })),
     },
-    payment: { aggregate: jest.fn().mockResolvedValue({ _sum: { amount: null } }) },
-    posOrder: { aggregate: jest.fn().mockResolvedValue({ _sum: { total: null } }) },
+    payment: { aggregate: jest.fn().mockResolvedValue({ _sum: { amount: null } }), groupBy: jest.fn().mockResolvedValue([]) },
+    posOrder: { aggregate: jest.fn().mockResolvedValue({ _sum: { cashAmount: null } }) },
     auditLog: { create: jest.fn().mockResolvedValue({}) },
   };
 }
@@ -104,6 +104,19 @@ describe('ShiftsService', () => {
       expect(data.variance.toFixed(2)).toBe('0.00');
     });
 
+    it('counts cash in another currency apart: out of the naira count, kept per currency on the shift', async () => {
+      tx.shift.findFirst.mockResolvedValue(shift({ openingFloat: new Prisma.Decimal('50000') }));
+      tx.payment.aggregate.mockResolvedValue({ _sum: { amount: new Prisma.Decimal('20000') } });
+      tx.payment.groupBy.mockResolvedValue([{ foreignCurrency: 'USD', _sum: { foreignAmount: new Prisma.Decimal('100') } }]);
+
+      await service.closeShift(TENANT_ID, SHIFT_ID, { closingCashCounted: 70000 }, AGENT);
+
+      expect(tx.payment.aggregate).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ foreignCurrency: null }) }));
+      const data = tx.shift.update.mock.calls[0][0].data;
+      expect(data.systemCashTotal.toFixed(2)).toBe('70000.00');
+      expect(data.foreignCashTotals).toEqual([{ currency: 'USD', amount: '100.00' }]);
+    });
+
     it('nets refunds (negative cash payments) into the same total', async () => {
       tx.shift.findFirst.mockResolvedValue(shift({ openingFloat: new Prisma.Decimal('50000') }));
       tx.payment.aggregate.mockResolvedValue({ _sum: { amount: new Prisma.Decimal('15000') } }); // 20000 taken, 5000 refunded, already netted by the DB sum
@@ -118,11 +131,11 @@ describe('ShiftsService', () => {
     it('expects the Point of Sale cash rung up this shift in the drawer too, voided sales excluded', async () => {
       tx.shift.findFirst.mockResolvedValue(shift({ openingFloat: new Prisma.Decimal('50000') }));
       tx.payment.aggregate.mockResolvedValue({ _sum: { amount: new Prisma.Decimal('20000') } });
-      tx.posOrder.aggregate.mockResolvedValue({ _sum: { total: new Prisma.Decimal('5375') } });
+      tx.posOrder.aggregate.mockResolvedValue({ _sum: { cashAmount: new Prisma.Decimal('5375') } });
 
       await service.closeShift(TENANT_ID, SHIFT_ID, { closingCashCounted: 75375 }, AGENT);
 
-      expect(tx.posOrder.aggregate).toHaveBeenCalledWith({ _sum: { total: true }, where: { shiftId: SHIFT_ID, settlement: 'cash', voidedAt: null } });
+      expect(tx.posOrder.aggregate).toHaveBeenCalledWith({ _sum: { cashAmount: true }, where: { shiftId: SHIFT_ID, voidedAt: null } });
       const data = tx.shift.update.mock.calls[0][0].data;
       expect(data.systemCashTotal.toFixed(2)).toBe('75375.00');
       expect(data.variance.toFixed(2)).toBe('0.00');

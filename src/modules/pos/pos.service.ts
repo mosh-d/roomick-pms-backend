@@ -17,7 +17,7 @@ import {
   UpdateOutletDto,
   VoidPosOrderDto,
 } from './dto/pos.dto';
-import { normaliseModifierGroups, OUTLET_CHARGE_TYPES, priceOrder } from './pos-pricing';
+import { discountOff, discountPct, normaliseModifierGroups, OrderDiscount, OUTLET_CHARGE_TYPES, priceOrder } from './pos-pricing';
 
 const ZERO = new Prisma.Decimal(0);
 
@@ -116,7 +116,15 @@ export class PosService {
       const name = requireText(dto.name, 'outlet name');
       await this.assertOutletNameFree(tx, branchId, name);
       const outlet = await tx.outlet.create({
-        data: { tenantId, branchId, name, category: dto.category, chargeType: OUTLET_CHARGE_TYPES[dto.category], sortOrder: dto.sortOrder },
+        data: {
+          tenantId,
+          branchId,
+          name,
+          category: dto.category,
+          chargeType: OUTLET_CHARGE_TYPES[dto.category],
+          sortOrder: dto.sortOrder,
+          staffDiscountLimitPct: dto.staffDiscountLimitPct ?? null,
+        },
       });
       await this.audit(tx, tenantId, branchId, actorId, 'outlet.created', 'outlet', outlet.id, {
         name,
@@ -136,12 +144,13 @@ export class PosService {
 
       const updated = await tx.outlet.update({
         where: { id: outletId },
-        data: { name, isActive: dto.isActive, sortOrder: dto.sortOrder },
+        data: { name, isActive: dto.isActive, sortOrder: dto.sortOrder, staffDiscountLimitPct: dto.staffDiscountLimitPct },
       });
       await this.audit(tx, tenantId, outlet.branchId, actor.sub, 'outlet.updated', 'outlet', outletId, {
         name: updated.name,
         isActive: updated.isActive,
         sortOrder: updated.sortOrder,
+        staffDiscountLimitPct: updated.staffDiscountLimitPct?.toFixed(2) ?? null,
       });
       return updated;
     });
@@ -250,12 +259,15 @@ export class PosService {
       this.assertOutletActive(outlet);
       await this.assertCanRingUp(tx, actor, outlet);
       const branch = await this.propertyService.assertBranch(tx, outlet.branchId);
-      const { lines, priced } = await this.priceBasket(tx, outlet, dto.items);
-      // Reads like the menu: the items added up, then any tax on top. Tax the
-      // branch includes in its prices is shown, never added a second time.
+      const { lines, itemsTotal, discount, priced } = await this.priceBasket(tx, outlet, dto.items, dto.discount, actor);
+      // Reads like the menu: the items added up, less any discount, then any
+      // tax on top. Tax the branch includes in its prices is shown, never
+      // added a second time.
       return {
         currency: branch.currency,
         lines,
+        itemsTotal,
+        discount,
         subtotal: priced.price,
         taxTotal: priced.addedTax,
         taxIncluded: priced.includedTax,
@@ -308,6 +320,9 @@ export class PosService {
       if (dto.settlement !== 'room' && dto.reservationId) {
         throw invalid("A cash or card sale isn't charged to a room — leave the guest out");
       }
+      if (dto.settlement !== 'split' && dto.cashAmount !== undefined) {
+        throw invalid('Only a split sale names a cash part — the whole of any other goes one way');
+      }
 
       // Numbers orders per outlet. The row lock queues two tills at the same
       // bar, so they can't both take #42; the unique index backs it up.
@@ -315,8 +330,9 @@ export class PosService {
       const last = await tx.posOrder.aggregate({ _max: { orderNo: true }, where: { outletId: outlet.id } });
       const orderNo = (last._max.orderNo ?? 0) + 1;
 
-      const { lines, priced } = await this.priceBasket(tx, outlet, dto.items);
+      const { lines, discount, priced } = await this.priceBasket(tx, outlet, dto.items, dto.discount, actor);
       if (!priced.price.greaterThan(0)) throw invalid("This order comes to nothing — there's nothing to charge");
+      const discountReason = discount.greaterThan(0) ? requireText(dto.discount?.reason ?? '', 'reason for the discount') : null;
 
       // The order is the outlet's ledger, so it records what the outlet keeps
       // (`net`, any included tax taken out) and all the tax — what revenue
@@ -343,7 +359,7 @@ export class PosService {
             message: "This guest's bill has been settled and closed — ask the front desk to reopen it, or take cash or card",
           });
         }
-        const summary = lines.map((line) => `${line.qty}× ${line.name}`).join(', ');
+        const summary = `${lines.map((line) => `${line.qty}× ${line.name}`).join(', ')}${discount.greaterThan(0) ? ` (less ${discount.toFixed(2)} discount)` : ''}`;
         const lineItem = await this.foliosService.postOutletCharge(tx, {
           folio,
           outletId: outlet.id,
@@ -359,7 +375,7 @@ export class PosService {
         net = lineItem.amount;
         taxTotal = lineItem.taxAmount;
         room = { reservationId: reservation.id, folioId: folio.id, lineItemId: lineItem.id };
-      } else if (dto.settlement === 'cash') {
+      } else if (dto.settlement === 'cash' || dto.settlement === 'split') {
         // Into the drawer of the cashier's own open shift, the rule a cash
         // folio payment follows (FoliosService.recordPayment).
         const shift = await tx.shift.findFirst({
@@ -368,6 +384,21 @@ export class PosService {
         });
         if (!shift) throw this.foliosService.shiftRequired();
         shiftId = shift.id;
+      }
+
+      // What the outlet took, each way. A split sale's cash part goes into the
+      // drawer; the rest is by card.
+      const total = net.plus(taxTotal);
+      let cashAmount = ZERO;
+      let cardAmount = ZERO;
+      if (dto.settlement === 'cash') cashAmount = total;
+      if (dto.settlement === 'card') cardAmount = total;
+      if (dto.settlement === 'split') {
+        cashAmount = new Prisma.Decimal(dto.cashAmount ?? 0);
+        if (!cashAmount.lessThan(total)) {
+          throw invalid(`The cash part of a split has to be less than the ${total.toFixed(2)} total — the rest is by card`);
+        }
+        cardAmount = total.minus(cashAmount);
       }
 
       const tableNumber = dto.tableNumber?.trim();
@@ -382,7 +413,11 @@ export class PosService {
           items: lines,
           subtotal: net,
           taxTotal,
-          total: net.plus(taxTotal),
+          total,
+          discountTotal: discount,
+          discountReason,
+          cashAmount,
+          cardAmount,
           currency: branch.currency,
           reservationId: room?.reservationId,
           folioId: room?.folioId,
@@ -397,6 +432,8 @@ export class PosService {
         orderNo,
         settlement: dto.settlement,
         total: order.total.toFixed(2),
+        ...(discount.greaterThan(0) ? { discount: discount.toFixed(2), discountReason } : {}),
+        ...(dto.settlement === 'split' ? { cash: cashAmount.toFixed(2), card: cardAmount.toFixed(2) } : {}),
         lineItemId: room?.lineItemId ?? null,
         shiftId,
       });
@@ -420,7 +457,7 @@ export class PosService {
         include: ORDER_INCLUDE,
       });
 
-      const summary = { orderCount: 0, voidCount: 0, total: ZERO, room: ZERO, cash: ZERO, card: ZERO };
+      const summary = { orderCount: 0, voidCount: 0, total: ZERO, room: ZERO, cash: ZERO, card: ZERO, discounts: ZERO };
       for (const order of orders) {
         if (order.voidedAt) {
           summary.voidCount++;
@@ -428,7 +465,10 @@ export class PosService {
         }
         summary.orderCount++;
         summary.total = summary.total.plus(order.total);
-        summary[order.settlement] = summary[order.settlement].plus(order.total);
+        if (order.settlement === 'room') summary.room = summary.room.plus(order.total);
+        summary.cash = summary.cash.plus(order.cashAmount);
+        summary.card = summary.card.plus(order.cardAmount);
+        summary.discounts = summary.discounts.plus(order.discountTotal);
       }
       return { date: day, currency: branch.currency, summary, orders: await this.present(tx, orders) };
     });
@@ -456,7 +496,7 @@ export class PosService {
       if (!order) throw this.orderNotFound();
       this.assertSupervisorAt(actor, order.branchId);
 
-      if (order.settlement === 'cash' && order.shiftId) {
+      if (order.cashAmount.greaterThan(0) && order.shiftId) {
         const shift = await tx.shift.findFirst({ where: { id: order.shiftId }, select: { closedAt: true } });
         if (shift?.closedAt) {
           throw new ConflictException({
@@ -510,13 +550,28 @@ export class PosService {
   // Internals
   // -------------------------------------------------------------------------
 
-  private async priceBasket(tx: TenantTx, outlet: Outlet, items: OrderItemDto[]) {
+  /**
+   * The basket priced from the menu, less any discount, with its tax. A
+   * discount is a manager's to give, or the till staff's up to the outlet's
+   * own limit.
+   */
+  private async priceBasket(tx: TenantTx, outlet: Outlet, items: OrderItemDto[], discountAsked: OrderDiscount | undefined, actor: JwtPayload) {
     const menuItems = await tx.menuItem.findMany({
       where: { outletId: outlet.id, id: { in: items.map((item) => item.menuItemId) }, deletedAt: null },
     });
     const { lines, subtotal } = priceOrder(menuItems, items);
-    const priced = await this.foliosService.previewCharge(tx, outlet.branchId, outlet.chargeType, subtotal);
-    return { lines, priced };
+    const discount = discountOff(subtotal, discountAsked);
+    if (discount.greaterThan(0) && !this.hasRoleAt(actor, outlet.branchId, SUPERVISOR_ROLES)) {
+      const limit = outlet.staffDiscountLimitPct;
+      if (!limit || limit.isZero()) {
+        throw new ForbiddenException({ code: ErrorCode.FORBIDDEN, message: `Only a manager can give a discount at ${outlet.name}` });
+      }
+      if (discountPct(subtotal, discount).greaterThan(limit)) {
+        throw new ForbiddenException({ code: ErrorCode.FORBIDDEN, message: `You can take at most ${limit.toFixed(0)}% off an order at ${outlet.name} — ask a manager for more` });
+      }
+    }
+    const priced = await this.foliosService.previewCharge(tx, outlet.branchId, outlet.chargeType, subtotal.minus(discount));
+    return { lines, itemsTotal: subtotal.toFixed(2), discount, priced };
   }
 
   /** Adds who rang each sale up — the receipt's "Served by". */

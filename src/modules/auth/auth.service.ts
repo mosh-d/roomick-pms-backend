@@ -475,7 +475,8 @@ export class AuthService {
       if (!user) throw new UnauthorizedException(SESSION_ENDED);
       await this.assertTenantOpen(tx, payload.tenantId);
       const roles = await this.loadRolesClaim(tx, user.id);
-      return this.buildLoginResult(tx, user, roles);
+      // The renewed token carries on the same sign-in, so signing out ends it too.
+      return this.buildLoginResult(tx, user, roles, session.sessionId ?? session.id);
     });
   }
 
@@ -494,7 +495,11 @@ export class AuthService {
 
   /**
    * Signing out ends the session on the server too, not just in the
-   * browser. Best effort and silent: an unknown, expired or already-ended
+   * browser — the whole sign-in, every token it has issued. A renewal that
+   * crossed with the sign-out has already handed the browser this token's
+   * successor; that one ends too. Waiting on this token's row first means a
+   * renewal still writing its successor finishes before the sign-out looks
+   * for it. Best effort and silent: an unknown, expired or already-ended
    * token is simply nothing to do — the browser forgets it either way.
    */
   async logout(refreshToken: string): Promise<void> {
@@ -509,8 +514,11 @@ export class AuthService {
     }
     if (payload.tokenType !== 'refresh') return;
     await this.prisma.withTenant(payload.tenantId, async (tx) => {
+      const [token] = await tx.$queryRaw<Array<{ id: string; sessionId: string | null }>>`
+        SELECT id, "sessionId" FROM refresh_tokens WHERE "tokenHash" = ${hashToken(refreshToken)} FOR UPDATE`;
+      if (!token) return;
       const ended = await tx.refreshToken.updateMany({
-        where: { tokenHash: hashToken(refreshToken), revokedAt: null },
+        where: { revokedAt: null, OR: [{ id: token.id }, ...(token.sessionId ? [{ sessionId: token.sessionId }] : [])] },
         data: { revokedAt: new Date() },
       });
       if (ended.count > 0) await this.audit(tx, payload.tenantId, payload.sub, 'auth.logout', 'user', payload.sub);
@@ -548,13 +556,14 @@ export class AuthService {
   async listMyBranches(
     tenantId: string,
     roles: Array<{ branchId: string | null; role: string }>,
-  ): Promise<Array<{ id: string; name: string }>> {
+  ): Promise<Array<{ id: string; name: string; timezone: string }>> {
     const branchIds = [...new Set(roles.map((r) => r.branchId).filter((id): id is string => id !== null))];
     if (branchIds.length === 0) return [];
     return this.prisma.withTenant(tenantId, (tx) =>
       tx.branch.findMany({
         where: { id: { in: branchIds }, deletedAt: null },
-        select: { id: true, name: true },
+        // The timezone too: the web app shows times and "today" on the hotel's clock.
+        select: { id: true, name: true, timezone: true },
         orderBy: { name: 'asc' },
       }),
     );
@@ -864,10 +873,12 @@ export class AuthService {
    * and refused afterwards. Runs inside the caller's transaction, so a
    * sign-in that fails after this leaves no session behind.
    */
+  /** `sessionId`: the sign-in a renewal continues; a new sign-in starts its own. */
   private async buildLoginResult(
     tx: TenantTx,
     user: User,
     roles: Array<{ branchId: string | null; role: string }>,
+    sessionId: string = randomUUID(),
   ): Promise<LoginResult> {
     const accessPayload: JwtPayload = {
       sub: user.id,
@@ -901,7 +912,7 @@ export class AuthService {
     // The row expires with the token itself — read back from its own `exp`.
     const { exp } = this.jwt.decode<{ exp: number }>(refreshToken);
     await tx.refreshToken.create({
-      data: { tenantId: user.tenantId, userId: user.id, tokenHash: hashToken(refreshToken), expiresAt: new Date(exp * 1000) },
+      data: { tenantId: user.tenantId, userId: user.id, tokenHash: hashToken(refreshToken), sessionId, expiresAt: new Date(exp * 1000) },
     });
 
     return {

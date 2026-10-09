@@ -89,6 +89,7 @@ enum ReservationStatus {
 
 enum ReservationChannel {
   direct
+  website // the property's own booking page (the public booking engine)
   walk_in
   booking_com
   expedia
@@ -392,6 +393,10 @@ model Tenant {
   passwordResetTokens      PasswordResetToken[]
   reportTemplates          ReportTemplate[]
   branchPageAccess         BranchPageAccess[]
+  exchangeRates            ExchangeRate[]
+  invoices                 Invoice[]
+  packages                 Package[]
+  channelAllotments        ChannelAllotment[]
 
   @@index([isDemo, demoExpiresAt])
   @@map("tenants")
@@ -670,6 +675,20 @@ model Branch {
   // NULL = the standard default (free until 24h before check-in, first night after) — see reservations/policies.ts.
   cancellationPolicy Json?
   regCardTemplate    Json? // {logoUrl, houseRules, requiredFields, showRate, language}
+  // The deposit a booking is asked for: {type: none|first_night|percentage|fixed, value, dueDaysBeforeArrival}.
+  // NULL = none asked. Applied when a stay is booked and written onto it (see reservations/deposits.ts).
+  depositPolicy      Json?
+  // Late check-out and early departure fees: {lateCheckout: {...} | null, earlyDeparture: {...} | null}.
+  // NULL = neither is charged (see reservations/stay-fees.ts).
+  stayFeePolicy      Json?
+  // Day use — a room for the day, not the night: {from: "10:00", until: "17:00"}.
+  // NULL = not offered. A room type sells it at its own `dayUseRate`.
+  dayUsePolicy       Json?
+  // Evening turndown service: {scope: "all" | "vip"} — every occupied room, or
+  // only VIP guests'. NULL = no turndown (see housekeeping/turndown.ts).
+  turndownPolicy     Json?
+  // The last invoice number issued at this property — invoices are numbered per property, INV-2026-00001.
+  invoiceSeq         Int      @default(0)
 
   // --- Direct Booking Engine (Month 7) -------------------------------------
   // The public, guest-facing identity of this property. `Tenant.subdomain` is
@@ -732,6 +751,10 @@ model Branch {
   apiKeys                  ApiKey[]
   webhooks                 Webhook[]
   pageAccess               BranchPageAccess[]
+  exchangeRates            ExchangeRate[]
+  invoices                 Invoice[]
+  packages                 Package[]
+  channelAllotments        ChannelAllotment[]
 
   @@index([tenantId, brandId])
   @@index([tenantId, deletedAt])
@@ -772,25 +795,36 @@ model Floor {
 }
 
 model RoomType {
-  id        String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  tenantId  String    @db.Uuid
-  branchId  String    @db.Uuid
-  name      String    @db.VarChar(100)
-  baseRate  Decimal   @db.Decimal(12, 2) // starting point for the Rate Resolver — always > 0. NOT in rate_plans.
-  capacity  Json // {adults: int, children: int}
-  bedType   String?   @db.VarChar(50)
-  sizeM2    Decimal?  @db.Decimal(6, 1)
-  amenities String[]
-  photoUrls String[]
-  sortOrder Int?
-  createdAt DateTime  @default(now()) @db.Timestamptz(6)
-  updatedAt DateTime  @updatedAt @db.Timestamptz(6)
-  deletedAt DateTime? @db.Timestamptz(6)
+  id               String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId         String    @db.Uuid
+  branchId         String    @db.Uuid
+  name             String    @db.VarChar(100)
+  baseRate         Decimal   @db.Decimal(12, 2) // starting point for the Rate Resolver — always > 0. NOT in rate_plans.
+  capacity         Json // {adults: int, children: int}
+  bedType          String?   @db.VarChar(50)
+  sizeM2           Decimal?  @db.Decimal(6, 1)
+  amenities        String[]
+  photoUrls        String[]
+  sortOrder        Int?
+  // Who the nightly rate covers, and what each extra person adds a night.
+  // `adultsIncluded` NULL = every adult the room holds; `childRate` NULL =
+  // children stay free. `childrenIncluded` stay free whatever `childRate` is.
+  adultsIncluded   Int?      @db.SmallInt
+  extraAdultRate   Decimal?  @db.Decimal(12, 2)
+  childrenIncluded Int       @default(0) @db.SmallInt
+  childRate        Decimal?  @db.Decimal(12, 2)
+  // The price of the room for the day (no night). NULL = not sold for day use.
+  dayUseRate       Decimal?  @db.Decimal(12, 2)
+  createdAt        DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt        DateTime  @updatedAt @db.Timestamptz(6)
+  deletedAt        DateTime? @db.Timestamptz(6)
 
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict)
   branch Branch @relation(fields: [branchId], references: [id], onDelete: Restrict)
 
   rooms                    Room[]
+  roomNights               LineItem[]                @relation("NightOfRoomType")
+  channelAllotments        ChannelAllotment[]
   reservations             Reservation[]
   ratePlans                RatePlan[]
   overbookingConfig        OverbookingConfig[]
@@ -813,6 +847,10 @@ model Room {
   occupancyStatus   OccupancyStatus   @default(vacant)
   cleanlinessStatus CleanlinessStatus @default(clean)
   heldStatus        HeldStatus? // NULL = normal; non-NULL removes room from all availability
+  // The hotel date a held room comes back into service: availability counts
+  // it from that night, and the hourly sweep releases the hold that day.
+  // NULL = held until someone releases it.
+  heldUntil         DateTime?         @db.Date
   view              String?           @db.VarChar(50)
   notes             String?
   statusChangedAt   DateTime?         @db.Timestamptz(6)
@@ -1176,31 +1214,39 @@ model EventSpace {
 }
 
 model EventBooking {
-  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  tenantId       String   @db.Uuid
-  eventSpaceId   String   @db.Uuid
-  title          String   @db.VarChar(200)
-  startsAt       DateTime @db.Timestamptz(6)
-  endsAt         DateTime @db.Timestamptz(6)
-  contactName    String?  @db.VarChar(200)
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId       String    @db.Uuid
+  eventSpaceId   String    @db.Uuid
+  title          String    @db.VarChar(200)
+  startsAt       DateTime  @db.Timestamptz(6)
+  endsAt         DateTime  @db.Timestamptz(6)
+  contactName    String?   @db.VarChar(200)
   notes          String?
-  createdAt      DateTime @default(now()) @db.Timestamptz(6)
-  createdBy      String?  @db.Uuid
+  createdAt      DateTime  @default(now()) @db.Timestamptz(6)
+  createdBy      String?   @db.Uuid
   // `confirmed` | `cancelled` — a cancelled event stays on record (its BEO, its notes) rather than being deleted.
   status         String    @default("confirmed") @db.VarChar(20)
   cancelledAt    DateTime? @db.Timestamptz(6)
   // The Banquet Event Order's details.
-  setupStyle     String?  @db.VarChar(20) // theater | classroom | banquet | u_shape
+  setupStyle     String?   @db.VarChar(20) // theater | classroom | banquet | u_shape
   headcount      Int? // guaranteed numbers, checked against the space's capacity for the layout
-  contactEmail   String?  @db.VarChar(320)
-  contactPhone   String?  @db.VarChar(30)
+  contactEmail   String?   @db.VarChar(320)
+  contactPhone   String?   @db.VarChar(30)
   catering       Json? // [{ description, quantity, unitPrice }] — totals are computed, never stored
   avRequirements String?
+  // What the space itself costs for the event, before tax. NULL = no hire charge (catering only).
+  spaceHireFee   Decimal?  @db.Decimal(12, 2)
+  // Billed: the bill its hire and catering were posted to, when and by whom. Once only.
+  folioId        String?   @db.Uuid
+  billedAt       DateTime? @db.Timestamptz(6)
+  billedBy       String?   @db.Uuid
 
   tenant     Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   eventSpace EventSpace @relation(fields: [eventSpaceId], references: [id], onDelete: Cascade)
+  folio      Folio?     @relation(fields: [folioId], references: [id], onDelete: Restrict)
 
   @@index([eventSpaceId, startsAt])
+  @@index([folioId])
   @@map("event_bookings")
 }
 
@@ -1279,7 +1325,18 @@ model Reservation {
   adults                Int                @db.SmallInt
   children              Int                @default(0) @db.SmallInt
   specialRequests       String?
+  // The deposit this booking was asked for, from the branch's deposit policy
+  // when it was booked (or set by staff since). NULL = none asked. Paid as
+  // `deposit` payments on the stay's bill, which exists from booking for that.
   depositAmount         Decimal?           @db.Decimal(12, 2)
+  depositDueDate        DateTime?          @db.Date
+  // A room for the day, not a night: checkInDate = checkOutDate, billed once
+  // at the room type's day-use rate, and holding no night's inventory.
+  isDayUse              Boolean            @default(false)
+  // Packages added to the stay, as they were priced when added:
+  // [{packageId, name, price, basis, chargeType}]. Posted with each night
+  // (per night) or once at check-in (per stay).
+  packages              Json?
   createdBy             String?            @db.Uuid // NULL = online booking
   // --- Guest pre-arrival check-in (Month 9) --------------------------------
   // Filled by the guest themselves through the public booking engine's
@@ -1380,6 +1437,61 @@ model RatePlan {
   @@map("rate_plans")
 }
 
+// Something sold with a stay — breakfast, an airport transfer, a spa
+// treatment — at a set price. A stay adds packages when it's booked (staff,
+// or the guest online) and each one posts to the bill as its own charge.
+model Package {
+  id          String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId    String     @db.Uuid
+  branchId    String     @db.Uuid
+  name        String     @db.VarChar(100)
+  description String?
+  price       Decimal    @db.Decimal(12, 2) // before tax, per `basis`
+  basis       String     @db.VarChar(20) // per_night | per_stay | per_person_per_night
+  chargeType  ChargeType // what it posts as — fnb for breakfast, transport, spa…
+  // The room types it goes with. Empty = all of them.
+  roomTypeIds String[]   @db.Uuid
+  showOnline  Boolean    @default(true) // offered on the booking page
+  isActive    Boolean    @default(true)
+  sortOrder   Int?
+  createdAt   DateTime   @default(now()) @db.Timestamptz(6)
+  updatedAt   DateTime   @updatedAt @db.Timestamptz(6)
+  deletedAt   DateTime?  @db.Timestamptz(6)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  branch Branch @relation(fields: [branchId], references: [id], onDelete: Restrict)
+
+  lineItems LineItem[]
+
+  @@index([branchId, isActive])
+  @@map("packages")
+}
+
+// How many of a room type one channel may sell a night, over a date range —
+// the website, or an OTA once a channel manager is connected. A ceiling, not
+// a reservation of rooms: the other channels still sell what's left.
+model ChannelAllotment {
+  id         String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId   String             @db.Uuid
+  branchId   String             @db.Uuid
+  roomTypeId String             @db.Uuid
+  channel    ReservationChannel
+  fromDate   DateTime           @db.Date
+  toDate     DateTime           @db.Date // inclusive — the last night it covers
+  rooms      Int                @db.SmallInt
+  createdBy  String?            @db.Uuid
+  createdAt  DateTime           @default(now()) @db.Timestamptz(6)
+  updatedAt  DateTime           @updatedAt @db.Timestamptz(6)
+
+  tenant   Tenant   @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  branch   Branch   @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  roomType RoomType @relation(fields: [roomTypeId], references: [id], onDelete: Cascade)
+
+  @@index([branchId, roomTypeId, channel, fromDate])
+  @@index([roomTypeId])
+  @@map("channel_allotments")
+}
+
 model RateAuditLog {
   id            BigInt   @id @default(autoincrement())
   tenantId      String   @db.Uuid
@@ -1447,17 +1559,19 @@ model WalkRecord {
 // Not in the 39-table count but referenced by folios.corporateAccountId and the
 // corporate module (email-domain matcher feeding the corporate cascade tier).
 model CorporateAccount {
-  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  tenantId     String   @db.Uuid
-  name         String   @db.VarChar(200)
-  emailDomains String[] // guest email domain match auto-activates the corporate tier / negotiated override
-  ratePlanId   String?  @db.Uuid // negotiated agreement plan
-  contactName  String?  @db.VarChar(200)
-  contactEmail String?  @db.VarChar(320)
-  billingInfo  Json?
-  isActive     Boolean  @default(true)
-  createdAt    DateTime @default(now()) @db.Timestamptz(6)
-  updatedAt    DateTime @updatedAt @db.Timestamptz(6)
+  id               String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId         String   @db.Uuid
+  name             String   @db.VarChar(200)
+  emailDomains     String[] // guest email domain match auto-activates the corporate tier / negotiated override
+  ratePlanId       String?  @db.Uuid // negotiated agreement plan
+  contactName      String?  @db.VarChar(200)
+  contactEmail     String?  @db.VarChar(320)
+  billingInfo      Json?
+  // Days the company has to pay an invoice — its due date. NULL = due on receipt.
+  paymentTermsDays Int?     @db.SmallInt
+  isActive         Boolean  @default(true)
+  createdAt        DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt        DateTime @updatedAt @db.Timestamptz(6)
 
   tenant   Tenant    @relation(fields: [tenantId], references: [id], onDelete: Restrict)
   ratePlan RatePlan? @relation(fields: [ratePlanId], references: [id], onDelete: SetNull)
@@ -1504,6 +1618,8 @@ model Folio {
   payments           Payment[]
   refunds            Refund[]
   posOrders          PosOrder[]
+  invoices           Invoice[]
+  eventBookings      EventBooking[]
 
   @@index([reservationId])
   @@index([branchId, status])
@@ -1542,10 +1658,20 @@ model LineItem {
   // bill — the stay it was for can't, and it's what stops a moved night
   // being billed a second time at check-out.
   stayReservationId  String?    @db.Uuid
+  // Room nights only: the room type the night was sold as. A room move or a
+  // transfer to another guest's bill doesn't change what was sold that
+  // night — reports by room type read this, not the stay's type today.
+  roomTypeId         String?    @db.Uuid
+  // A package's charge: which package it was.
+  packageId          String?    @db.Uuid
+  // A day-use room charge — the room for the day, not a night.
+  dayUse             Boolean    @default(false)
 
   tenant          Tenant       @relation(fields: [tenantId], references: [id], onDelete: Restrict)
   folio           Folio        @relation(fields: [folioId], references: [id], onDelete: Restrict)
   stayReservation Reservation? @relation("RoomNightStay", fields: [stayReservationId], references: [id], onDelete: Restrict)
+  roomType        RoomType?    @relation("NightOfRoomType", fields: [roomTypeId], references: [id], onDelete: SetNull)
+  package         Package?     @relation(fields: [packageId], references: [id], onDelete: SetNull)
   outlet          Outlet?      @relation(fields: [outletId], references: [id], onDelete: Restrict)
   postedByUser    User?        @relation("LineItemPostedBy", fields: [postedBy], references: [id], onDelete: SetNull)
   voidedByUser    User?        @relation("LineItemVoidedBy", fields: [voidedBy], references: [id], onDelete: SetNull)
@@ -1559,6 +1685,8 @@ model LineItem {
 
   @@index([parentLineItemId])
   @@index([stayReservationId, serviceDate])
+  @@index([roomTypeId])
+  @@index([packageId])
   @@index([folioId, postedAt])
   @@index([folioId, chargeType])
   @@index([outletId])
@@ -1592,22 +1720,28 @@ model FolioTransfer {
 
 // Append-only: voided via isVoid, never removed.
 model Payment {
-  id             String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  tenantId       String         @db.Uuid
-  folioId        String         @db.Uuid
-  method         PaymentMethod
-  amount         Decimal        @db.Decimal(12, 2) // positive = payment, negative = refund
-  currency       String         @db.Char(3)
-  reference      String?        @db.VarChar(100) // card auth code, bank ref; deposit_application references original deposit
-  shiftId        String?        @db.Uuid // links payment to cash shift
-  paymentPurpose PaymentPurpose @default(payment)
-  isVoid         Boolean        @default(false)
-  voidedAt       DateTime?      @db.Timestamptz(6)
-  voidedBy       String?        @db.Uuid
-  voidReason     String?
-  recordedAt     DateTime       @default(now()) @db.Timestamptz(6)
-  recordedBy     String?        @db.Uuid
-  deletedAt      DateTime?      @db.Timestamptz(6)
+  id              String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId        String         @db.Uuid
+  folioId         String         @db.Uuid
+  method          PaymentMethod
+  amount          Decimal        @db.Decimal(12, 2) // positive = payment, negative = refund
+  currency        String         @db.Char(3)
+  // Paid in another currency: what was handed over, and the branch's rate
+  // that turned it into `amount` (branch currency per one unit). NULL = paid
+  // in the branch's own currency.
+  foreignCurrency String?        @db.Char(3)
+  foreignAmount   Decimal?       @db.Decimal(14, 2)
+  exchangeRate    Decimal?       @db.Decimal(18, 6)
+  reference       String?        @db.VarChar(100) // card auth code, bank ref; deposit_application references original deposit
+  shiftId         String?        @db.Uuid // links payment to cash shift
+  paymentPurpose  PaymentPurpose @default(payment)
+  isVoid          Boolean        @default(false)
+  voidedAt        DateTime?      @db.Timestamptz(6)
+  voidedBy        String?        @db.Uuid
+  voidReason      String?
+  recordedAt      DateTime       @default(now()) @db.Timestamptz(6)
+  recordedBy      String?        @db.Uuid
+  deletedAt       DateTime?      @db.Timestamptz(6)
 
   tenant         Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict)
   folio          Folio  @relation(fields: [folioId], references: [id], onDelete: Restrict)
@@ -1656,6 +1790,58 @@ model Refund {
   @@index([folioId])
   @@index([status])
   @@map("refunds")
+}
+
+// What one unit of another currency is worth in the branch's own, for taking
+// payment in it. Set by a manager; a payment keeps the rate it was taken at.
+model ExchangeRate {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String   @db.Uuid
+  branchId  String   @db.Uuid
+  currency  String   @db.Char(3)
+  rate      Decimal  @db.Decimal(18, 6) // branch currency per one unit of `currency`
+  updatedBy String?  @db.Uuid
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  branch Branch @relation(fields: [branchId], references: [id], onDelete: Cascade)
+
+  @@unique([branchId, currency])
+  @@map("exchange_rates")
+}
+
+// A numbered invoice for a bill, as the bill stood when it was issued: the
+// lines and totals are a snapshot, never read back from the bill. Issuing
+// again after the bill changed supersedes the earlier one, which stays on
+// record with its number.
+model Invoice {
+  id           String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId     String    @db.Uuid
+  branchId     String    @db.Uuid
+  folioId      String    @db.Uuid
+  number       String    @db.VarChar(30)
+  billTo       Json // {name, company, email, phone, address}
+  lines        Json // [{date, description, chargeType, amount, tax}]
+  totals       Json // {subTotal, taxTotal, total, paid, balanceDue}
+  currency     String    @db.Char(3)
+  dueDate      DateTime? @db.Date // NULL = due on receipt
+  issuedAt     DateTime  @default(now()) @db.Timestamptz(6)
+  issuedBy     String?   @db.Uuid
+  // The invoice this one replaced (issued again after the bill changed), and
+  // on the replaced one, when that happened. A replaced invoice is kept.
+  supersedesId String?   @unique @db.Uuid
+  supersededAt DateTime? @db.Timestamptz(6)
+
+  tenant       Tenant   @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  branch       Branch   @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  folio        Folio    @relation(fields: [folioId], references: [id], onDelete: Restrict)
+  supersedes   Invoice? @relation("InvoiceSupersedes", fields: [supersedesId], references: [id], onDelete: Restrict)
+  supersededBy Invoice? @relation("InvoiceSupersedes")
+
+  @@unique([branchId, number])
+  @@index([folioId])
+  @@map("invoices")
 }
 
 model TaxRule {
@@ -1728,6 +1914,9 @@ model Shift {
   closingCashCounted  Decimal?  @db.Decimal(12, 2)
   closingBreakdown    Json?
   variance            Decimal?  @db.Decimal(12, 2) // closingCashCounted − systemCashTotal
+  // Cash in other currencies the drawer took, counted apart from the branch's
+  // own: [{currency, amount}], worked out at close. NULL = none.
+  foreignCashTotals   Json?
   varianceExplanation String? // required if ABS(variance) > branch threshold
   handoverNotes       String?
 
@@ -1876,15 +2065,18 @@ model OverbookingConfig {
 }
 
 model Outlet {
-  id         String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  tenantId   String         @db.Uuid
-  branchId   String         @db.Uuid
-  name       String         @db.VarChar(150) // "Main Restaurant", "Poolside Bar", "Zen Spa"
-  category   OutletCategory // grouping for management reports
-  chargeType ChargeType // stamped on every line item this outlet posts — staff never choose
-  isActive   Boolean        @default(true) // inactive = hidden from POS selector, kept for history
-  sortOrder  Int?
-  createdAt  DateTime       @default(now()) @db.Timestamptz(6)
+  id                    String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId              String         @db.Uuid
+  branchId              String         @db.Uuid
+  name                  String         @db.VarChar(150) // "Main Restaurant", "Poolside Bar", "Zen Spa"
+  category              OutletCategory // grouping for management reports
+  chargeType            ChargeType // stamped on every line item this outlet posts — staff never choose
+  isActive              Boolean        @default(true) // inactive = hidden from POS selector, kept for history
+  sortOrder             Int?
+  // The most the till's staff may take off an order, as a % of it — managers
+  // may take off any amount. NULL = only a manager can give a discount here.
+  staffDiscountLimitPct Decimal?       @db.Decimal(5, 2)
+  createdAt             DateTime       @default(now()) @db.Timestamptz(6)
 
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   branch Branch @relation(fields: [branchId], references: [id], onDelete: Cascade)
@@ -1956,6 +2148,7 @@ enum PosSettlement {
   room // charged to an in-house guest's folio
   cash
   card
+  split // part cash, part card — `cashAmount` and `cardAmount` say how much
 
   @@map("pos_settlement_enum")
 }
@@ -1965,28 +2158,35 @@ enum PosSettlement {
 // (`lineItemId`), posted through FoliosService like any other charge; a cash
 // sale counts toward the cashier's shift drawer (`shiftId`).
 model PosOrder {
-  id            String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  tenantId      String        @db.Uuid
-  branchId      String        @db.Uuid
-  outletId      String        @db.Uuid
-  orderNo       Int // sequential per outlet — "Order #42" on the receipt
-  settlement    PosSettlement
-  tableNumber   String?       @db.VarChar(20)
+  id             String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId       String        @db.Uuid
+  branchId       String        @db.Uuid
+  outletId       String        @db.Uuid
+  orderNo        Int // sequential per outlet — "Order #42" on the receipt
+  settlement     PosSettlement
+  tableNumber    String?       @db.VarChar(20)
   // Snapshot at the moment of sale: [{ menuItemId, name, qty, unitPrice, modifiers: [{ group, label, price }], lineTotal }]
-  items         Json
-  subtotal      Decimal       @db.Decimal(12, 2)
-  taxTotal      Decimal       @db.Decimal(12, 2)
-  total         Decimal       @db.Decimal(12, 2)
-  currency      String        @db.Char(3)
-  reservationId String?       @db.Uuid // room: the in-house stay it was charged to
-  folioId       String?       @db.Uuid
-  lineItemId    String?       @unique @db.Uuid // room: the folio charge this order became
-  shiftId       String?       @db.Uuid // cash: the drawer it went into
-  createdBy     String?       @db.Uuid
-  createdAt     DateTime      @default(now()) @db.Timestamptz(6)
-  voidedAt      DateTime?     @db.Timestamptz(6)
-  voidedBy      String?       @db.Uuid
-  voidReason    String?       @db.VarChar(500)
+  items          Json
+  subtotal       Decimal       @db.Decimal(12, 2)
+  taxTotal       Decimal       @db.Decimal(12, 2)
+  total          Decimal       @db.Decimal(12, 2)
+  // Taken off the items' price before tax, with why — `subtotal` is after it.
+  discountTotal  Decimal       @default(0) @db.Decimal(12, 2)
+  discountReason String?       @db.VarChar(300)
+  // What the outlet took in each way: all of `total` for a cash or card sale,
+  // the two parts of a split one, nothing for a room charge (the folio has it).
+  cashAmount     Decimal       @default(0) @db.Decimal(12, 2)
+  cardAmount     Decimal       @default(0) @db.Decimal(12, 2)
+  currency       String        @db.Char(3)
+  reservationId  String?       @db.Uuid // room: the in-house stay it was charged to
+  folioId        String?       @db.Uuid
+  lineItemId     String?       @unique @db.Uuid // room: the folio charge this order became
+  shiftId        String?       @db.Uuid // cash: the drawer it went into
+  createdBy      String?       @db.Uuid
+  createdAt      DateTime      @default(now()) @db.Timestamptz(6)
+  voidedAt       DateTime?     @db.Timestamptz(6)
+  voidedBy       String?       @db.Uuid
+  voidReason     String?       @db.VarChar(500)
 
   tenant      Tenant       @relation(fields: [tenantId], references: [id], onDelete: Restrict)
   branch      Branch       @relation(fields: [branchId], references: [id], onDelete: Restrict)
@@ -2012,6 +2212,8 @@ enum LoyaltyTxType {
   earn // a stay's spend, at check-out
   redeem // points turned into a folio payment
   adjust // a manager's correction or goodwill, with a reason
+  expire // points that reached their expiry unspent — taken off by the nightly sweep
+  reversal // points given back: the payment they made was voided
 
   @@map("loyalty_tx_type_enum")
 }
@@ -2019,16 +2221,19 @@ enum LoyaltyTxType {
 // One programme per tenant — guests are tenant-wide, so a member earns and
 // redeems at every branch that charges in the programme's currency.
 model LoyaltyProgram {
-  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  tenantId      String   @unique @db.Uuid
-  isActive      Boolean  @default(false)
-  currency      String   @db.Char(3)
-  pointsPerUnit Decimal  @db.Decimal(10, 4) // points per 1 unit of currency spent before tax — 0.01 = 1 point per ₦100
-  pointValue    Decimal  @db.Decimal(12, 4) // what one point is worth when redeemed, in `currency`
+  id                      String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId                String   @unique @db.Uuid
+  isActive                Boolean  @default(false)
+  currency                String   @db.Char(3)
+  pointsPerUnit           Decimal  @db.Decimal(10, 4) // points per 1 unit of currency spent before tax — 0.01 = 1 point per ₦100
+  pointValue              Decimal  @db.Decimal(12, 4) // what one point is worth when redeemed, in `currency`
   // [{ name, threshold, benefits: string[] }] — threshold = lifetime points; a member holds the highest tier reached
-  tiers         Json
-  updatedAt     DateTime @updatedAt @db.Timestamptz(6)
-  updatedBy     String?  @db.Uuid
+  tiers                   Json
+  // Earned points lapse this many months after they were earned, oldest
+  // first, if still unspent. NULL = points never expire.
+  pointsExpireAfterMonths Int?     @db.SmallInt
+  updatedAt               DateTime @updatedAt @db.Timestamptz(6)
+  updatedBy               String?  @db.Uuid
 
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
@@ -2046,6 +2251,7 @@ model LoyaltyTransaction {
   description       String        @db.VarChar(300)
   earnReservationId String?       @unique @db.Uuid // earn rows: one per stay
   paymentId         String?       @unique @db.Uuid // redeem rows: the folio payment they became
+  expiresAt         DateTime?     @db.Timestamptz(6) // earn rows, when the programme lets points expire: when these lapse if unspent
   createdBy         String?       @db.Uuid // NULL = earned automatically at check-out
   createdAt         DateTime      @default(now()) @db.Timestamptz(6)
 
@@ -2377,6 +2583,10 @@ model RefreshToken {
   tenantId  String    @db.Uuid
   userId    String    @db.Uuid
   tokenHash String    @unique @db.Char(64)
+  // The sign-in this token belongs to: each renewal hands it on to the token
+  // it issues, and signing out ends every token of the sign-in at once.
+  // NULL on tokens issued before it was recorded — those stand alone.
+  sessionId String?   @db.Uuid
   expiresAt DateTime  @db.Timestamptz(6)
   revokedAt DateTime? @db.Timestamptz(6)
   createdAt DateTime  @default(now()) @db.Timestamptz(6)
@@ -2386,6 +2596,7 @@ model RefreshToken {
 
   @@index([userId])
   @@index([expiresAt])
+  @@index([sessionId])
   @@map("refresh_tokens")
 }
 

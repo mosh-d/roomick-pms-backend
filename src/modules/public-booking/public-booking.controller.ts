@@ -11,6 +11,7 @@ import {
   PreArrivalCheckInDto,
   PublicAvailabilityQueryDto,
   PublicCreateReservationDto,
+  PublicPackagesQueryDto,
   PublicQuoteQueryDto,
   PublishBookingEngineDto,
 } from './dto/public-booking.dto';
@@ -80,6 +81,13 @@ export class PublicBookingController {
   @ApiOperation({ summary: 'Per-night availability — the same computation the internal availability screen uses' })
   getAvailability(@Param('slug') slug: string, @Query() dto: PublicAvailabilityQueryDto): ReturnType<PublicBookingService['getAvailability']> {
     return this.publicBookingService.getAvailability(slug, dto);
+  }
+
+  @Get(':slug/packages')
+  @Throttle({ default: { limit: 60, ttl: 60_000 } })
+  @ApiOperation({ summary: 'Packages a guest can add to a stay online — breakfast, transfers — with their prices' })
+  listPackages(@Param('slug') slug: string, @Query() dto: PublicPackagesQueryDto): ReturnType<PublicBookingService['listPackages']> {
+    return this.publicBookingService.listPackages(slug, dto.roomTypeId);
   }
 
   @Get(':slug/quote')

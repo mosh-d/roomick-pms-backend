@@ -6,6 +6,8 @@ import { TenantContextService } from './context/tenant-context.service';
 import { EncryptionService } from './crypto/encryption.service';
 import { DOCUMENT_STORAGE_ADAPTER } from './documents/document-storage.interface';
 import { LocalFilesystemDocumentStorage } from './documents/local-filesystem-document-storage';
+import { ObjectStorageDocumentStorage } from './documents/object-storage-document-storage';
+import { ObjectStorageService } from './storage/object-storage.service';
 import { AccountMailService } from './mail/account-mail.service';
 import { LogMailTransport } from './mail/log-mail-transport';
 import { MAIL_TRANSPORT, MailTransport } from './mail/mail-transport.interface';
@@ -31,7 +33,10 @@ import { RoutePermissionMapService } from './permissions/route-permission-map.se
     PermissionsService,
     PageAccessService,
     RoutePermissionMapService,
-    { provide: DOCUMENT_STORAGE_ADAPTER, useClass: LocalFilesystemDocumentStorage },
+    // The bucket once STORAGE_S3_* is set, the server's own disk until then.
+    ObjectStorageService,
+    LocalFilesystemDocumentStorage,
+    { provide: DOCUMENT_STORAGE_ADAPTER, useClass: ObjectStorageDocumentStorage },
     // SMTP once `SMTP_HOST` is set (any provider — they all take SMTP), the
     // log transport until then, so development sends nothing by default.
     {
@@ -42,6 +47,19 @@ import { RoutePermissionMapService } from './permissions/route-permission-map.se
       },
     },
   ],
-  exports: [ApiKeyAuthService, AccountStatusService, AccountMailService, TenantContextService, EncryptionService, MetricsService, PermissionsService, PageAccessService, RoutePermissionMapService, DOCUMENT_STORAGE_ADAPTER, MAIL_TRANSPORT],
+  exports: [
+    ApiKeyAuthService,
+    AccountStatusService,
+    AccountMailService,
+    TenantContextService,
+    EncryptionService,
+    MetricsService,
+    PermissionsService,
+    PageAccessService,
+    RoutePermissionMapService,
+    ObjectStorageService,
+    DOCUMENT_STORAGE_ADAPTER,
+    MAIL_TRANSPORT,
+  ],
 })
 export class CommonModule {}

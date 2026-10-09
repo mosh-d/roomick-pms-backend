@@ -4,6 +4,7 @@ import { Prisma } from '@prisma/client';
 import { JwtPayload } from '../../common/types/request-context';
 import { PrismaService } from '../../prisma/prisma.service';
 import { TaxesService } from '../taxes/taxes.service';
+import { FoliosService } from '../folios/folios.service';
 import { EventSpacesService } from './event-spaces.service';
 
 const TENANT_ID = '11111111-1111-4111-8111-111111111111';
@@ -35,6 +36,7 @@ describe('EventSpacesService', () => {
     auditLog: { create: jest.Mock };
   };
   let taxesService: { priceCharge: jest.Mock };
+  let foliosService: { postChargeInTx: jest.Mock };
 
   beforeEach(async () => {
     tx = {
@@ -49,11 +51,13 @@ describe('EventSpacesService', () => {
         return Promise.resolve({ price, net: price, taxes: [], taxTotal: addedTax, includedTax: new Prisma.Decimal(0), addedTax, total: price.plus(addedTax) });
       }),
     };
+    foliosService = { postChargeInTx: jest.fn().mockResolvedValue({ id: 'line-1' }) };
     const moduleRef = await Test.createTestingModule({
       providers: [
         EventSpacesService,
         { provide: PrismaService, useValue: { withTenant: jest.fn((_t: string, fn: (x: unknown) => unknown) => fn(tx)) } },
         { provide: TaxesService, useValue: taxesService },
+        { provide: FoliosService, useValue: foliosService },
       ],
     }).compile();
     service = moduleRef.get(EventSpacesService);
@@ -156,7 +160,7 @@ describe('EventSpacesService', () => {
       );
       expect(taxesService.priceCharge).toHaveBeenCalledWith(tx, BRANCH_ID, 'fnb', new Prisma.Decimal('1020000'));
       expect(result.cateringLines.map((l) => l.amount)).toEqual(['850000.00', '170000.00']);
-      expect(result.totals).toEqual({ subtotal: '1020000.00', taxTotal: '76500.00', taxIncluded: '0.00', total: '1096500.00' });
+      expect(result.totals).toEqual({ hire: '0.00', catering: '1020000.00', subtotal: '1020000.00', taxTotal: '76500.00', taxIncluded: '0.00', total: '1096500.00' });
       expect(result.currency).toBe('NGN');
     });
 

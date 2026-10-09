@@ -57,6 +57,7 @@ describe('NightAuditService', () => {
   let withTenant: jest.Mock;
   let foliosService: { ensurePrimaryFolio: jest.Mock; postRoomChargeForDate: jest.Mock };
   let reservationsService: { markNoShowInTx: jest.Mock };
+  let housekeepingService: { ensureStayoverTaskInTx: jest.Mock; ensureTurndownTaskInTx: jest.Mock };
 
   /** The branch's in-house stays and unarrived bookings, as every listing and batch re-read of them finds them. */
   function stays(inHouse: Stay[], unarrived: Stay[] = []) {
@@ -74,6 +75,7 @@ describe('NightAuditService', () => {
       postRoomChargeForDate: jest.fn().mockResolvedValue({ amount: new Prisma.Decimal('100'), taxAmount: new Prisma.Decimal('7.5') }),
     };
     reservationsService = { markNoShowInTx: jest.fn().mockResolvedValue({ reservation: {}, noShowRecord: {} }) };
+    housekeepingService = { ensureStayoverTaskInTx: jest.fn().mockResolvedValue(true), ensureTurndownTaskInTx: jest.fn().mockResolvedValue(true) };
     withTenant = jest.fn((_t: string, fn: (x: unknown) => unknown) => fn(tx));
     const moduleRef = await Test.createTestingModule({
       providers: [
@@ -88,7 +90,7 @@ describe('NightAuditService', () => {
         { provide: PropertyService, useValue: { assertBranch: jest.fn().mockResolvedValue({ id: BRANCH_ID, timezone: 'Africa/Lagos' }) } },
         { provide: FoliosService, useValue: foliosService },
         { provide: ReservationsService, useValue: reservationsService },
-        { provide: HousekeepingService, useValue: { ensureStayoverTaskInTx: jest.fn().mockResolvedValue(true) } },
+        { provide: HousekeepingService, useValue: housekeepingService },
       ],
     }).compile();
     service = moduleRef.get(NightAuditService);
@@ -189,6 +191,26 @@ describe('NightAuditService', () => {
       expect(result.foliosProcessed).toBe(2);
       expect(result.totalAmountPosted).toBe('215.00'); // 2 x (100 + 7.5)
       expect(result.status).toBe('completed');
+    });
+
+    it('raises the evening turndown for guests staying the night — only VIPs’ rooms when the branch says so', async () => {
+      tx.branch.findFirst.mockResolvedValue({ id: BRANCH_ID, timezone: 'Africa/Lagos', noShowPolicy: null, turndownPolicy: { scope: 'vip' } });
+      stays([
+        reservation({ id: 'res-vip', roomId: 'room-a', guest: { name: 'Ada', vipLevel: 2 } }),
+        reservation({ id: 'res-plain', roomId: 'room-b', guest: { name: 'Bayo', vipLevel: 0 } }),
+        reservation({ id: 'res-leaving', roomId: 'room-c', guest: { name: 'Chi', vipLevel: 3 }, checkOutDate: new Date('2026-09-03T00:00:00.000Z') }),
+      ]);
+      await service.runAudit(TENANT_ID, BRANCH_ID, AUDIT_DATE, ACTOR_ID);
+      expect(housekeepingService.ensureStayoverTaskInTx).toHaveBeenCalledTimes(3);
+      expect(housekeepingService.ensureTurndownTaskInTx).toHaveBeenCalledTimes(1);
+      expect(housekeepingService.ensureTurndownTaskInTx).toHaveBeenCalledWith(tx, TENANT_ID, BRANCH_ID, 'room-a', 'res-vip', new Date('2026-09-03T00:00:00.000Z'));
+    });
+
+    it('raises no turndown where the branch offers none', async () => {
+      stays([reservation({ id: 'res-vip', roomId: 'room-a', guest: { name: 'Ada', vipLevel: 5 } })]);
+      await service.runAudit(TENANT_ID, BRANCH_ID, AUDIT_DATE, ACTOR_ID);
+      expect(housekeepingService.ensureStayoverTaskInTx).toHaveBeenCalledTimes(1);
+      expect(housekeepingService.ensureTurndownTaskInTx).not.toHaveBeenCalled();
     });
 
     it('bills everyone checked in that night — whatever their booked departure date', async () => {

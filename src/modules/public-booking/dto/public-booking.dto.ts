@@ -1,6 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { Type } from 'class-transformer';
-import { IsBoolean, IsEmail, IsIn, IsInt, IsOptional, IsString, IsUUID, Matches, MaxLength, Max, Min, MinLength } from 'class-validator';
+import { Transform, Type } from 'class-transformer';
+import { ArrayMaxSize, IsArray, IsBoolean, IsEmail, IsIn, IsInt, IsOptional, IsString, IsUUID, Matches, MaxLength, Max, Min, MinLength } from 'class-validator';
 import { IsDateOnly } from '../../../common/validation/is-date-only.decorator';
 
 export class PublicAvailabilityQueryDto {
@@ -36,6 +36,38 @@ export class PublicQuoteQueryDto {
   @IsString()
   @MaxLength(30)
   promoCode?: string;
+
+  @ApiPropertyOptional({ example: 2, description: 'Who is staying — prices any extra-adult or child charges' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(20)
+  adults?: number;
+
+  @ApiPropertyOptional({ example: 0 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(20)
+  children?: number;
+
+  @ApiPropertyOptional({ description: 'Packages to add, comma-separated ids — priced into the quote' })
+  @IsOptional()
+  @Transform(({ value }: { value: unknown }) => (typeof value === 'string' ? value.split(',').filter(Boolean) : value))
+  @IsArray()
+  @ArrayMaxSize(20)
+  @IsUUID('4', { each: true })
+  packageIds?: string[];
+}
+
+/** The packages offered with a room type online. */
+export class PublicPackagesQueryDto {
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsUUID()
+  roomTypeId?: string;
 }
 
 /**
@@ -129,6 +161,13 @@ export class PublicCreateReservationDto {
   @IsOptional()
   @IsBoolean()
   acceptTerms?: boolean;
+
+  @ApiPropertyOptional({ type: [String], description: 'Packages offered online to add to the stay' })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(20)
+  @IsUUID('4', { each: true })
+  packageIds?: string[];
 }
 
 /**

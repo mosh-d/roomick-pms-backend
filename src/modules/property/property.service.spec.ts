@@ -132,7 +132,7 @@ describe('PropertyService', () => {
       await service.listBranches(TENANT_ID);
       expect(tx.branch.findMany).toHaveBeenCalledWith({
         where: { deletedAt: null },
-        select: { id: true, name: true },
+        select: { id: true, name: true, timezone: true },
         orderBy: { name: 'asc' },
       });
     });

@@ -1,6 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
-import { ArrayMinSize, IsArray, IsBoolean, IsIn, IsNumber, IsOptional, IsPositive, IsString, IsUUID, Max, MaxLength, MinLength, ValidateIf } from 'class-validator';
+import { ArrayMinSize, IsArray, IsBoolean, IsIn, IsISO4217CurrencyCode, IsNumber, IsOptional, IsPositive, IsString, IsUUID, Max, MaxLength, MinLength, ValidateIf } from 'class-validator';
 import { IsDateOnly } from '../../../common/validation/is-date-only.decorator';
 import { ChargeType, PaymentMethod, PaymentPurpose } from '@prisma/client';
 
@@ -53,6 +53,58 @@ export class RecordPaymentDto {
   @IsString()
   @MaxLength(100)
   reference?: string;
+
+  @ApiPropertyOptional({
+    example: 'USD',
+    description: "Paid in another currency: `amount` is then in this currency, turned into the branch's own at the rate set under Property Config → Currencies.",
+  })
+  @IsOptional()
+  @IsISO4217CurrencyCode()
+  currency?: string;
+}
+
+/** A deposit before arrival — always a `deposit`, on the stay's own bill. */
+export class RecordDepositDto {
+  @ApiProperty({ example: 25000.0 })
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @IsPositive()
+  @Max(1_000_000_000)
+  amount!: number;
+
+  @ApiProperty({ enum: PaymentMethod, example: 'bank_transfer' })
+  @IsIn(Object.values(PaymentMethod))
+  method!: PaymentMethod;
+
+  @ApiPropertyOptional({ example: 'TRF-55120' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  reference?: string;
+
+  @ApiPropertyOptional({ example: 'USD', description: 'Paid in another currency — see RecordPaymentDto.currency.' })
+  @IsOptional()
+  @IsISO4217CurrencyCode()
+  currency?: string;
+}
+
+/** Taking back a payment recorded in error. */
+export class VoidPaymentDto {
+  @ApiProperty({ example: 'Recorded on the wrong guest’s bill' })
+  @IsString()
+  @MinLength(3)
+  @MaxLength(500)
+  reason!: string;
+}
+
+/** What one unit of another currency is worth in the branch's own. */
+export class SetExchangeRateDto {
+  @ApiProperty({ example: 1550.5, description: 'Branch currency per one unit of this currency' })
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 6 })
+  @IsPositive()
+  @Max(1_000_000_000)
+  rate!: number;
 }
 
 export class CreateFolioDto {

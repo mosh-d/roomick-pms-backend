@@ -1,5 +1,6 @@
-import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Patch, Post } from '@nestjs/common';
-import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Patch, Post, UploadedFile, UseInterceptors } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { ApiBearerAuth, ApiBody, ApiConsumes, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentTenant, CurrentUser } from '../../common/decorators';
 import { Permission } from '../../common/decorators/permission.decorator';
 import { ALL_SYSTEM_ROLES, Roles, SystemRole } from '../../common/decorators/roles.decorator';
@@ -7,6 +8,7 @@ import { JwtPayload } from '../../common/types/request-context';
 import { CreateRoomTypeDto, UpdateRoomTypeDto } from './dto/room-type.dto';
 import { BulkCreateRoomsDto, ChangeRoomStatusDto, CreateRoomBlockDto, UpdateRoomDto } from './dto/rooms.dto';
 import { RoomsService } from './rooms.service';
+import { MAX_PHOTO_BYTES } from './room-photos';
 import { BranchOf } from '../../common/decorators/branch-of.decorator';
 
 @ApiTags('rooms')
@@ -36,6 +38,29 @@ export class RoomsController {
     @Param('branchId', ParseUUIDPipe) branchId: string,
   ): ReturnType<RoomsService['listRoomTypes']> {
     return this.roomsService.listRoomTypes(tenantId, branchId);
+  }
+
+  @Get('branches/:branchId/room-photo-uploads')
+  @Roles(SystemRole.Owner, SystemRole.Manager)
+  @ApiOperation({ summary: 'Whether room photos can be uploaded — a storage bucket is set up — and the largest one taken' })
+  photoUploads(@Param('branchId', ParseUUIDPipe) _branchId: string): ReturnType<RoomsService['photoUploadsEnabled']> {
+    return this.roomsService.photoUploadsEnabled();
+  }
+
+  @Post('room-types/:roomTypeId/photos')
+  @BranchOf('roomType', 'roomTypeId')
+  @Roles(SystemRole.Owner, SystemRole.Manager)
+  @UseInterceptors(FileInterceptor('photo', { limits: { fileSize: MAX_PHOTO_BYTES, files: 1 } }))
+  @ApiConsumes('multipart/form-data')
+  @ApiBody({ schema: { type: 'object', properties: { photo: { type: 'string', format: 'binary' } } } })
+  @ApiOperation({ summary: 'Upload a photo of a room type (JPEG, PNG or WebP, up to 5 MB) — added to its photos, shown on the booking page' })
+  uploadRoomTypePhoto(
+    @CurrentTenant() tenantId: string,
+    @CurrentUser() user: JwtPayload,
+    @Param('roomTypeId', ParseUUIDPipe) roomTypeId: string,
+    @UploadedFile() photo: Express.Multer.File | undefined,
+  ): ReturnType<RoomsService['uploadRoomTypePhoto']> {
+    return this.roomsService.uploadRoomTypePhoto(tenantId, roomTypeId, photo, user.sub);
   }
 
   @Patch('room-types/:roomTypeId')

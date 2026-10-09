@@ -12,6 +12,8 @@ export interface BeoPdfSpec {
   headcount: string;
   contact: string;
   catering: Array<{ description: string; quantity: string; unitPrice: string; amount: string }>;
+  /** What the space costs, when it is charged for. */
+  spaceHire?: string | null;
   subtotal: string;
   tax: string;
   /** Tax already inside the menu prices; null when none is. */
@@ -68,7 +70,7 @@ export function renderBeoPdf(spec: BeoPdfSpec): Promise<Buffer> {
     rule();
 
     heading('Catering');
-    if (spec.catering.length === 0) {
+    if (spec.catering.length === 0 && !spec.spaceHire) {
       paragraph('No catering on this event.');
     } else {
       const columns: Column[] = [
@@ -91,6 +93,7 @@ export function renderBeoPdf(spec: BeoPdfSpec): Promise<Buffer> {
         doc.y = y + Math.max(tallest, 12) + 3;
       };
       row(columns.map((c) => c.label), true);
+      if (spec.spaceHire) row([`Hire of ${spec.venue}`, '1', spec.spaceHire, spec.spaceHire]);
       for (const line of spec.catering) row([line.description, line.quantity, line.unitPrice, line.amount]);
       doc.moveDown(0.3);
       row(['', '', 'Subtotal', spec.subtotal]);

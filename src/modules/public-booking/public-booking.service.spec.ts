@@ -5,6 +5,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { CommsLogService } from '../comms-log/comms-log.service';
 import { FoliosService } from '../folios/folios.service';
 import { HousekeepingService } from '../housekeeping/housekeeping.service';
+import { PackagesService } from '../rate-resolver/packages.service';
 import { RateResolverService } from '../rate-resolver/rate-resolver.service';
 import { ReservationsService } from '../reservations/reservations.service';
 import { PublicBookingService } from './public-booking.service';
@@ -88,6 +89,7 @@ describe('PublicBookingService', () => {
         taxTotal: new Prisma.Decimal('6750'),
         taxIncluded: new Prisma.Decimal('0'),
         totalWithTax: new Prisma.Decimal('96750'),
+        occupancySurcharge: new Prisma.Decimal('0'),
       }),
     };
 
@@ -103,6 +105,7 @@ describe('PublicBookingService', () => {
         { provide: PrismaService, useValue: prisma },
         { provide: ReservationsService, useValue: reservationsService },
         { provide: RateResolverService, useValue: rateResolverService },
+        { provide: PackagesService, useValue: { list: jest.fn().mockResolvedValue([]), snapshotsFor: jest.fn().mockResolvedValue([]), quote: jest.fn() } },
         { provide: FoliosService, useValue: foliosService },
         { provide: CommsLogService, useValue: commsLogService },
         { provide: HousekeepingService, useValue: housekeepingService },
@@ -298,9 +301,9 @@ describe('PublicBookingService', () => {
       expect(reservationsService.createReservation).toHaveBeenCalledWith(TENANT_ID, BRANCH_ID, expect.anything(), null, { publicBooking: true });
     });
 
-    it('forces channel to direct so a public booking can never masquerade as an OTA one', async () => {
+    it('forces the website channel so a public booking can never masquerade as an OTA one', async () => {
       await service.createReservation(SLUG, validDto);
-      expect(reservationsService.createReservation).toHaveBeenCalledWith(TENANT_ID, BRANCH_ID, expect.objectContaining({ channel: 'direct' }), null, { publicBooking: true });
+      expect(reservationsService.createReservation).toHaveBeenCalledWith(TENANT_ID, BRANCH_ID, expect.objectContaining({ channel: 'website' }), null, { publicBooking: true });
     });
 
     it('forces joinWaitlist false so the public can never bypass the availability check', async () => {
@@ -328,7 +331,7 @@ describe('PublicBookingService', () => {
 
     it('returns only confirmation-safe fields', async () => {
       const result = await service.createReservation(SLUG, validDto);
-      expect(Object.keys(result).sort()).toEqual(['checkInDate', 'checkOutDate', 'confirmationNumber', 'currency', 'guestName', 'roomTypeName', 'totalRate']);
+      expect(Object.keys(result).sort()).toEqual(['checkInDate', 'checkOutDate', 'confirmationNumber', 'currency', 'deposit', 'guestName', 'roomTypeName', 'totalRate']);
     });
   });
 
@@ -405,7 +408,8 @@ describe('PublicBookingService', () => {
       // entitled to see it. Everything here is either the guest's own data or
       // the property's own public information.
       expect(Object.keys(result).sort()).toEqual([
-        'adults', 'cancellationPolicySummary', 'checkInDate', 'checkOutDate', 'children', 'confirmationNumber', 'currency',
+        // `deposit`: the deposit this guest was asked, and what they have paid of it — their own money.
+        'adults', 'cancellationPolicySummary', 'checkInDate', 'checkOutDate', 'children', 'confirmationNumber', 'currency', 'deposit',
         'estimatedArrivalTime', 'guestEmail', 'guestName', 'guestPhoneEnding',
         'houseRules', 'preArrivalCompletedAt', 'property', 'roomTypeName', 'specialRequests',
         'status', 'totalRate',

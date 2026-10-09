@@ -28,6 +28,28 @@ const OVERRIDE_TYPES: RateType[] = ['negotiated', 'promotional'];
 /** The longest stay one booking or quote can price — the same limit `ReservationsService` books to. */
 export const MAX_STAY_NIGHTS = 92;
 
+/** Who is staying — what a room type's extra-person charges are worked out from. */
+export interface Occupancy {
+  adults: number;
+  children: number;
+}
+
+/**
+ * What the people beyond those a room type's rate covers add to each night:
+ * each adult over `adultsIncluded` at `extraAdultRate`, each child over
+ * `childrenIncluded` at `childRate`. Nothing when the room type sets no such
+ * charges, or when nobody says who is staying.
+ */
+export function occupancySurcharge(
+  roomType: Pick<RoomType, 'adultsIncluded' | 'extraAdultRate' | 'childrenIncluded' | 'childRate'>,
+  occupancy: Occupancy | undefined,
+): Prisma.Decimal {
+  if (!occupancy) return new Prisma.Decimal(0);
+  const extraAdults = roomType.adultsIncluded == null || !roomType.extraAdultRate ? 0 : Math.max(0, occupancy.adults - roomType.adultsIncluded);
+  const extraChildren = !roomType.childRate ? 0 : Math.max(0, occupancy.children - (roomType.childrenIncluded ?? 0));
+  return new Prisma.Decimal(roomType.extraAdultRate ?? 0).mul(extraAdults).plus(new Prisma.Decimal(roomType.childRate ?? 0).mul(extraChildren));
+}
+
 export interface CascadeStep {
   tier: number;
   ratePlanId: string;
@@ -57,6 +79,8 @@ export interface StayResolution {
   taxIncluded: Prisma.Decimal;
   /** What the guest pays: `subtotal` + `taxTotal`. */
   totalWithTax: Prisma.Decimal;
+  /** What the extra adults and children add to each night (already inside every night's rate). */
+  occupancySurcharge: Prisma.Decimal;
   /** The check-in night's winning plan — display/reporting convenience only. A stay whose rate changes mid-week (seasonal/weekend tiers) has no single "the" plan; the full per-night trace is what's authoritative, both here and in RateAuditLog. */
   ratePlanId: string | null;
   ruleApplied: { type: 'override' | 'cascade' | 'base'; planName: string | null; adjustmentApplied: string | null };
@@ -189,7 +213,11 @@ export class RateResolverService {
         roomType,
         checkInDate,
         checkOutDate,
-        { promoCode: dto.promoCode, corporateAccountId: dto.corporateAccountId },
+        {
+          promoCode: dto.promoCode,
+          corporateAccountId: dto.corporateAccountId,
+          occupancy: dto.adults ? { adults: dto.adults, children: dto.children ?? 0 } : undefined,
+        },
         { triggeredBy: 'booking_create', userId: userId ?? undefined, persistAudit: options.persistAudit },
       );
       // The branch's currency rides along, so a quote is never shown as a bare number.
@@ -222,7 +250,7 @@ export class RateResolverService {
     roomType: RoomType,
     checkInDate: Date,
     checkOutDate: Date,
-    options: { promoCode?: string; corporateAccountId?: string },
+    options: { promoCode?: string; corporateAccountId?: string; occupancy?: Occupancy },
     context: { triggeredBy: TriggeredBy; userId?: string; reservationId?: string; persistAudit?: boolean },
   ): Promise<StayResolution> {
     // A four-year quote took seconds and wrote a trail row for every night,
@@ -261,7 +289,14 @@ export class RateResolverService {
     const eligible = isCorporate ? plans : plans.filter((plan) => plan.type !== 'corporate');
     const branch = await tx.branch.findFirst({ where: { id: branchId }, select: { policies: true } });
     const weekendNights = weekendNightsFor(branch?.policies);
-    const perNight: NightResolution[] = nights.map((date) => this.resolveNight(roomType, date, eligible, options.promoCode, corporateRatePlanId, weekendNights));
+    // Extra adults and children are charged on every night, on top of whatever
+    // plan priced it — a contract or promo rate is for the room as it's
+    // normally occupied, the same as the public rate.
+    const surcharge = occupancySurcharge(roomType, options.occupancy);
+    const perNight: NightResolution[] = nights.map((date) => {
+      const night = this.resolveNight(roomType, date, eligible, options.promoCode, corporateRatePlanId, weekendNights);
+      return surcharge.isZero() ? night : { ...night, finalRate: night.finalRate.plus(surcharge) };
+    });
     // Never a free or negative night from the rate plans: it was quoted on the
     // booking page and booked, and the night audit then posted nothing for it.
     // (A manager comping a stay does it with a rate override, not here.)
@@ -310,6 +345,7 @@ export class RateResolverService {
             isOverride: n.isOverride,
             overrideRatePlanId: n.overrideRatePlanId,
             cascade: n.cascade,
+            ...(surcharge.isZero() ? {} : { occupancySurcharge: surcharge.toFixed(2), occupancy: options.occupancy }),
           } as unknown as Prisma.InputJsonValue,
           triggeredBy: context.triggeredBy,
           userId: context.userId ?? null,
@@ -330,6 +366,7 @@ export class RateResolverService {
     return {
       nightlyRate,
       subtotal,
+      occupancySurcharge: surcharge,
       taxTotal: priced.addedTax,
       taxIncluded: priced.includedTax,
       totalWithTax: priced.total,

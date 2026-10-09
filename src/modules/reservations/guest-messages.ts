@@ -41,6 +41,12 @@ export function bookingConfirmationBody(input: {
   /** Tax added on top; zero when rates are tax-inclusive or no tax applies. */
   taxTotal: Prisma.Decimal;
   total: Prisma.Decimal;
+  /** The deposit asked, if any — `describeDeposit`'s sentence. */
+  deposit?: string | null;
+  /** Day use: the hours the room is theirs, instead of nights. */
+  dayUse?: { from: string; until: string } | null;
+  /** The packages booked with the stay, by name. */
+  packages?: string[];
 }): string {
   const nights = Math.max(1, Math.round((Date.parse(input.checkOutDate) - Date.parse(input.checkInDate)) / 86_400_000));
   const { branch } = input;
@@ -54,10 +60,14 @@ export function bookingConfirmationBody(input: {
     '',
     `Your reservation ${input.confirmationNumber} at ${branch.name} is confirmed.`,
     '',
-    `Room: ${input.roomTypeName} — ${nights} ${nights === 1 ? 'night' : 'nights'}, ${input.checkInDate} to ${input.checkOutDate}`,
+    input.dayUse
+      ? `Room: ${input.roomTypeName} — day use, ${input.checkInDate}, ${input.dayUse.from} to ${input.dayUse.until}`
+      : `Room: ${input.roomTypeName} — ${nights} ${nights === 1 ? 'night' : 'nights'}, ${input.checkInDate} to ${input.checkOutDate}`,
     `Guests: ${guests}`,
-    `Check-in from ${clock(branch.checkInTime)} · Check-out by ${clock(branch.checkOutTime)}`,
+    ...(input.dayUse ? [] : [`Check-in from ${clock(branch.checkInTime)} · Check-out by ${clock(branch.checkOutTime)}`]),
     `Rate: ${price}`,
+    ...(input.packages?.length ? [`Included: ${input.packages.join(', ')} (charged on the bill)`] : []),
+    ...(input.deposit ? [input.deposit] : []),
     '',
     branch.name,
     ...(where ? [where] : []),

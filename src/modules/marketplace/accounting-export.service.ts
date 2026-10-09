@@ -134,11 +134,11 @@ export class AccountingExportService {
         tx.posOrder.findMany({
           where: {
             branchId,
-            settlement: { in: ['cash', 'card'] },
+            settlement: { not: 'room' },
             voidedAt: null,
             createdAt: { gte: branchDayStart(from, branch.timezone), lt: branchDayStart(dayAfter, branch.timezone) },
           },
-          select: { subtotal: true, total: true, settlement: true, createdAt: true, outlet: { select: { chargeType: true } } },
+          select: { subtotal: true, total: true, cashAmount: true, cardAmount: true, createdAt: true, outlet: { select: { chargeType: true } } },
         }),
       ]);
 
@@ -156,7 +156,10 @@ export class AccountingExportService {
           department: sale.outlet.chargeType,
           subtotal: sale.subtotal,
           total: sale.total,
-          method: sale.settlement,
+          tenders: [
+            { method: 'cash', amount: sale.cashAmount },
+            { method: 'card', amount: sale.cardAmount },
+          ].filter((tender) => tender.amount.greaterThan(0)),
         })),
       };
 

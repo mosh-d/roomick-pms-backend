@@ -115,6 +115,24 @@ export async function signIn(client: Client, email: string, password: string): P
   return { token: accessToken, tenantId: user.tenantId, userId: user.id, email, password };
 }
 
+/** The `Set-Cookie` line that carries the session, if the answer set one. */
+export function sessionSetCookie(res: Response): string | undefined {
+  const lines = ([] as string[]).concat(res.headers['set-cookie'] ?? []);
+  return lines.find((line) => line.startsWith('roomick_session='));
+}
+
+/** What a browser sends back: `roomick_session=<token>`. */
+export function sessionCookie(res: Response): string {
+  const line = sessionSetCookie(res);
+  if (!line) throw new Error(`no session cookie (${res.status}): ${JSON.stringify(res.body)}`);
+  return line.split(';')[0];
+}
+
+/** The refresh token itself, from the cookie. */
+export function sessionToken(res: Response): string {
+  return sessionCookie(res).slice('roomick_session='.length);
+}
+
 export interface BranchLayout {
   id: string;
   roomTypeId: string;

@@ -7,6 +7,7 @@ import { PropertyService } from '../property/property.service';
 import { FoliosService } from '../folios/folios.service';
 import { ReservationsService } from '../reservations/reservations.service';
 import { HousekeepingService } from '../housekeeping/housekeeping.service';
+import { turndownScopeFor, wantsTurndown } from '../housekeeping/turndown';
 
 /** `Branch.noShowPolicy` JSON (schema comment: `{cutoffTime, defaultPenalty, autoMark, notifyMinutesBefore}`), plus a flat-fee amount the enum implies but the comment omits. */
 interface NoShowPolicy {
@@ -119,9 +120,14 @@ export class NightAuditService {
       ).map((stay) => stay.id);
 
       // Stay-over service: every room still occupied this morning gets its
-      // daily housekeeping task, unless one is already waiting for it.
+      // daily housekeeping task, unless one is already waiting for it — and,
+      // where the branch turns rooms down, its evening turndown for a guest
+      // staying the night.
       const serviceDate = new Date(auditDate.getTime() + 86_400_000);
       let stayoverTasks = 0;
+      const turndownScope = turndownScopeFor(
+        (await this.prisma.withTenant(tenantId, (tx) => tx.branch.findFirst({ where: { id: branchId }, select: { turndownPolicy: true } })))?.turndownPolicy,
+      );
 
       for (const ids of inBatches(stayIds, STAY_BATCH)) {
         try {
@@ -130,7 +136,10 @@ export class NightAuditService {
             async (tx) => {
               // Read again inside the batch: a guest checked out since the run
               // started isn't billed for a night their check-out already settled.
-              const stays = await tx.reservation.findMany({ where: { id: { in: ids }, ...inHouseWhere }, include: { roomType: { select: { name: true } } } });
+              const stays = await tx.reservation.findMany({
+                where: { id: { in: ids }, ...inHouseWhere },
+                include: { roomType: { select: { name: true } }, guest: { select: { vipLevel: true } } },
+              });
               const done = { processed: 0, posted: 0, amount: new Prisma.Decimal(0), tasks: 0, errors: [] as RunError[] };
               for (const reservation of stays) {
                 // Each stay in its own savepoint: a failed statement aborts a
@@ -165,6 +174,9 @@ export class NightAuditService {
                 await tx.$executeRawUnsafe('SAVEPOINT night_audit_housekeeping');
                 try {
                   if (await this.housekeepingService.ensureStayoverTaskInTx(tx, tenantId, branchId, reservation.roomId, reservation.id, serviceDate)) done.tasks++;
+                  if (!reservation.isDayUse && reservation.checkOutDate > serviceDate && wantsTurndown(turndownScope, reservation.guest.vipLevel)) {
+                    if (await this.housekeepingService.ensureTurndownTaskInTx(tx, tenantId, branchId, reservation.roomId, reservation.id, serviceDate)) done.tasks++;
+                  }
                   await tx.$executeRawUnsafe('RELEASE SAVEPOINT night_audit_housekeeping');
                 } catch (error) {
                   await tx.$executeRawUnsafe('ROLLBACK TO SAVEPOINT night_audit_housekeeping');
@@ -194,7 +206,7 @@ export class NightAuditService {
           for (const id of ids) errors.push({ reservationId: id, reason: `Not closed this run, run it again: ${reasonOf(error)}` });
         }
       }
-      if (stayoverTasks > 0) this.logger.log(`Night audit ${auditDateStr}: ${stayoverTasks} stay-over housekeeping task(s) raised`);
+      if (stayoverTasks > 0) this.logger.log(`Night audit ${auditDateStr}: ${stayoverTasks} stay-over and turndown housekeeping task(s) raised`);
 
       // 2. Mark no-shows: confirmed arrivals for this date that never checked in.
       const noShows = await this.markNoShows(tenantId, branchId, auditDate, triggeredBy, errors);

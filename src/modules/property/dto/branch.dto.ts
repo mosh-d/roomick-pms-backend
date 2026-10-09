@@ -21,6 +21,7 @@ import {
   ValidateIf,
   ValidateNested,
 } from 'class-validator';
+import { TURNDOWN_SCOPES, TurndownScope } from '../../housekeeping/turndown';
 
 const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/; // "14:00"
 
@@ -129,6 +130,103 @@ export class NoShowPolicyDto {
   @Min(0.01)
   @Max(1_000_000_000)
   flatFeeAmount?: number;
+}
+
+/** `Branch.depositPolicy` — see reservations/deposits.ts. `none` switches deposits off. */
+export class DepositPolicyDto {
+  @ApiProperty({ enum: ['none', 'first_night', 'percentage', 'fixed'] })
+  @IsIn(['none', 'first_night', 'percentage', 'fixed'])
+  type!: 'none' | 'first_night' | 'percentage' | 'fixed';
+
+  @ApiPropertyOptional({ example: 30, description: 'percentage: of the stay, tax included (1–100). fixed: the amount.' })
+  @ValidateIf((o: DepositPolicyDto) => o.type === 'percentage' || o.type === 'fixed')
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0.01)
+  @Max(1_000_000_000)
+  value?: number;
+
+  @ApiProperty({ example: 7, description: 'Due this many days before arrival (0 = by arrival); a booking made closer in owes it at once' })
+  @IsInt()
+  @Min(0)
+  @Max(365)
+  dueDaysBeforeArrival!: number;
+}
+
+export class LateCheckoutPolicyDto {
+  @ApiProperty({ enum: ['flat', 'percent_of_night'] })
+  @IsIn(['flat', 'percent_of_night'])
+  feeType!: 'flat' | 'percent_of_night';
+
+  @ApiProperty({ example: 50, description: 'flat: the amount. percent_of_night: a share of the last night (1–100).' })
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0.01)
+  @Max(1_000_000_000)
+  amount!: number;
+
+  @ApiProperty({ example: 30, description: 'Minutes after check-out time before the fee applies' })
+  @IsInt()
+  @Min(0)
+  @Max(720)
+  graceMinutes!: number;
+}
+
+export class EarlyDeparturePolicyDto {
+  @ApiProperty({ enum: ['flat', 'first_night', 'percent_of_remaining'] })
+  @IsIn(['flat', 'first_night', 'percent_of_remaining'])
+  feeType!: 'flat' | 'first_night' | 'percent_of_remaining';
+
+  @ApiPropertyOptional({ example: 50, description: 'flat: the amount. percent_of_remaining: a share of the nights given up (1–100). Not used for first_night.' })
+  @ValidateIf((o: EarlyDeparturePolicyDto) => o.feeType !== 'first_night')
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0.01)
+  @Max(1_000_000_000)
+  amount?: number;
+}
+
+/** `Branch.dayUsePolicy` — the hours a day-use room is the guest's. `enabled: false` stops selling day use. */
+export class DayUsePolicyDto {
+  @ApiProperty({ description: 'Sell rooms for the day (each room type at its own day-use rate)' })
+  @IsBoolean()
+  enabled!: boolean;
+
+  @ApiPropertyOptional({ example: '10:00' })
+  @ValidateIf((o: DayUsePolicyDto) => o.enabled)
+  @Matches(/^([01]\d|2[0-3]):[0-5]\d$/, { message: 'from must be a time like 10:00' })
+  from?: string;
+
+  @ApiPropertyOptional({ example: '17:00' })
+  @ValidateIf((o: DayUsePolicyDto) => o.enabled)
+  @Matches(/^([01]\d|2[0-3]):[0-5]\d$/, { message: 'until must be a time like 17:00' })
+  until?: string;
+}
+
+/** `Branch.turndownPolicy` — the evening turndown, for every occupied room or only VIP guests'. `enabled: false` stops it. */
+export class TurndownPolicyDto {
+  @ApiProperty({ description: 'Raise an evening turndown task for occupied rooms' })
+  @IsBoolean()
+  enabled!: boolean;
+
+  @ApiPropertyOptional({ enum: TURNDOWN_SCOPES, example: 'all', description: 'all = every occupied room; vip = only VIP guests’ rooms' })
+  @ValidateIf((o: TurndownPolicyDto) => o.enabled)
+  @IsIn(TURNDOWN_SCOPES)
+  scope?: TurndownScope;
+}
+
+/** `Branch.stayFeePolicy` — see reservations/stay-fees.ts. Either half sent as null switches it off; left out, it stays as it is. */
+export class StayFeePolicyDto {
+  @ApiPropertyOptional({ type: LateCheckoutPolicyDto, nullable: true })
+  @IsOptional()
+  @ValidateIf((_o, value) => value !== null)
+  @ValidateNested()
+  @Type(() => LateCheckoutPolicyDto)
+  lateCheckout?: LateCheckoutPolicyDto | null;
+
+  @ApiPropertyOptional({ type: EarlyDeparturePolicyDto, nullable: true })
+  @IsOptional()
+  @ValidateIf((_o, value) => value !== null)
+  @ValidateNested()
+  @Type(() => EarlyDeparturePolicyDto)
+  earlyDeparture?: EarlyDeparturePolicyDto | null;
 }
 
 /** `Branch.cancellationPolicy` — see reservations/policies.ts for how it's applied and what the default is. */

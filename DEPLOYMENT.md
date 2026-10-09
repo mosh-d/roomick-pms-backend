@@ -15,8 +15,8 @@ real test of that file.
 ## 1. Generate the secrets first
 
 Three secrets are `required` by `src/config/env.validation.ts` and the app
-**refuses to boot** without valid values. Generate them now and keep them
-somewhere safe:
+**refuses to boot** without valid values, and a fourth is shared by the API and
+the web app. Generate them now and keep them somewhere safe:
 
 ```bash
 # JWT_ACCESS_SECRET  (min 32 chars)
@@ -26,6 +26,9 @@ node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"
 node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"
 
 # ENCRYPTION_KEY — EXACTLY 64 hex chars (32 bytes). Nothing else is accepted.
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+
+# WEB_PROXY_SECRET — the SAME value on Render and on Vercel (min 32 chars)
 node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 ```
 
@@ -77,6 +80,8 @@ its connection string.
 | `SMTP_PORT` | `587` (STARTTLS, the default) or `465` (TLS from the start) |
 | `SMTP_USER` / `SMTP_PASS` | the SMTP username and password (for Resend: `resend` and an API key) |
 | `MAIL_FROM` | the sender guests see, e.g. `Lekki Suites <bookings@yourdomain>` — required with `SMTP_HOST`, and the domain must be verified with the provider (SPF, DKIM, DMARC) |
+| `WEB_PROXY_SECRET` | generated above — the **same** value as on Vercel. Sign-ins, renewals and sign-outs reach the API through the web app's own address (the session cookie is the web app's), and this value is how the API knows the web app is telling the truth about which visitor each request is from. Without it, everyone signing in through the web app shares one rate limit |
+| `STORAGE_S3_ENDPOINT` / `STORAGE_S3_REGION` / `STORAGE_S3_BUCKET` / `STORAGE_S3_ACCESS_KEY_ID` / `STORAGE_S3_SECRET_ACCESS_KEY` | optional — an S3-compatible bucket (see §5). Room photo uploads need it; with it, documents and backups go to the bucket instead of the disk |
 
 Do **not** set `PORT` — Render injects it, and `main.ts` reads it and binds
 `0.0.0.0`.
@@ -113,6 +118,11 @@ Import `roomick-pms-frontend`. Next.js is detected automatically; no
 | Key | Value |
 |---|---|
 | `NEXT_PUBLIC_API_URL` | `https://<your-render-service>.onrender.com/api/v1` |
+| `WEB_PROXY_SECRET` | the **same** value as on Render |
+| `NEXT_PUBLIC_SENTRY_DSN` / `SENTRY_DSN` | optional — the web app's Sentry project (browser / server) |
+| `NEXT_PUBLIC_LANDING_URL` | optional — where "Back to the website" on the sign-up page goes |
+
+`NEXT_PUBLIC_*` values are built into the app — change one and redeploy.
 
 The `/api/v1` suffix matters — `main.ts` sets a global `api` prefix plus URI
 versioning, so every route lives under it.
@@ -140,19 +150,24 @@ In order — each step depends on the previous one working:
 
 ---
 
-## 5. If files don't survive (or you outgrow one instance)
+## 5. Object storage (room photo uploads; files off the disk)
 
-Both storage concerns already sit behind adapter interfaces with DI tokens,
-written for exactly this swap:
+Set the five `STORAGE_S3_*` values on Render to a **private** S3-compatible
+bucket — Cloudflare R2 (`STORAGE_S3_ENDPOINT=https://<account id>.r2.cloudflarestorage.com`,
+`STORAGE_S3_REGION=auto`), Amazon S3 (leave the endpoint out, set the bucket's
+region), Backblaze B2 or DigitalOcean Spaces (their S3 endpoint). One bucket
+holds everything, under three prefixes:
 
-- `src/common/documents/document-storage.interface.ts` (`DOCUMENT_STORAGE_ADAPTER`)
-- `src/modules/backups/storage/backup-storage.interface.ts`
+| Prefix | Contents |
+|---|---|
+| `room-photos/` | photos uploaded in Property Config — shown through the API's own public address, so the bucket stays private |
+| `documents/` | encrypted ID photos, registration-card PDFs, GDPR exports |
+| `backups/` | nightly per-tenant dumps |
 
-Only local-filesystem implementations exist today. Adding an S3-compatible one
-(AWS S3, Cloudflare R2, Backblaze B2, DigitalOcean Spaces) means writing one
-class per interface and selecting it by env — no changes to any calling code.
-The existing restore-drill endpoint makes it verifiable: write a backup to the
-bucket, then restore from it.
+Files already written to the disk keep opening from it; only new ones go to
+the bucket. Verify it the same way as the disk: upload a room photo and see it
+on the booking page, then Security → Backups → Run backup now and run the
+restore drill on it.
 
 ---
 
@@ -178,10 +193,9 @@ These are real and deliberate, not oversights — each is documented in
 `PHASE_NOTES.md`:
 
 - **No card payment.** Guests pay at the property; the booking page says so.
-- **No outbound email.** Confirmations are recorded in the comms log but never
-  sent — a guest who books online sees a confirmation number on screen and
-  receives nothing afterwards. Worth closing early if real guests will use the
-  booking engine.
+- **No email until `SMTP_HOST` is set.** Confirmations are recorded in the comms
+  log and only written to the server log until then — a guest who books online
+  sees a confirmation number on screen and receives nothing afterwards.
 - **No channel manager.** No OTA connectivity; direct bookings only.
 - **Single instance only** while a disk is attached (see §2).
 - **In-memory rate limiting and metrics**, which is correct for one instance and

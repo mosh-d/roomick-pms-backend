@@ -7,11 +7,12 @@ import { RestrictionsService } from './restrictions.service';
 import { DemandForecastService } from './demand-forecast.service';
 import { RateRecommendationsService } from './rate-recommendations.service';
 import { CompSetService } from './comp-set.service';
+import { ChannelAllotmentsService } from './channel-allotments.service';
 
 @Module({
   imports: [PropertyModule, ReportsModule, RateResolverModule],
   controllers: [RevenueManagementController],
-  providers: [RestrictionsService, DemandForecastService, RateRecommendationsService, CompSetService],
-  exports: [RestrictionsService],
+  providers: [RestrictionsService, DemandForecastService, RateRecommendationsService, CompSetService, ChannelAllotmentsService],
+  exports: [RestrictionsService, ChannelAllotmentsService],
 })
 export class RevenueManagementModule {}

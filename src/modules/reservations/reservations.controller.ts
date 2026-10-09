@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, ParseUUIDPipe, Patch, Post, Query } from '@nestjs/common';
+import { Body, Controller, Get, Param, ParseUUIDPipe, Patch, Post, Put, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentTenant, CurrentUser } from '../../common/decorators';
 import { Permission } from '../../common/decorators/permission.decorator';
@@ -10,6 +10,7 @@ import {
   CancelReservationDto,
   CancelWithWaiverDto,
   CheckInDto,
+  CheckOutDto,
   CreateReservationDto,
   DateOnlyQueryDto,
   ExtendStayDto,
@@ -24,6 +25,7 @@ import {
   WalkReservationDto,
 } from './dto/reservation.dto';
 import { ReservationsService } from './reservations.service';
+import { SetStayPackagesDto } from '../rate-resolver/dto/package.dto';
 import { BranchOf } from '../../common/decorators/branch-of.decorator';
 
 @ApiTags('reservations')
@@ -55,6 +57,13 @@ export class ReservationsController {
     @Body() dto: WalkInReservationDto,
   ): ReturnType<ReservationsService['walkIn']> {
     return this.reservationsService.walkIn(tenantId, branchId, dto, user.sub);
+  }
+
+  @Get('branches/:branchId/booking-options')
+  @Roles(...ALL_SYSTEM_ROLES)
+  @ApiOperation({ summary: 'What the booking screens need of the branch — its day-use hours (null when it sells no day use) and its currency' })
+  getBookingOptions(@CurrentTenant() tenantId: string, @Param('branchId', ParseUUIDPipe) branchId: string): ReturnType<ReservationsService['bookingOptions']> {
+    return this.reservationsService.bookingOptions(tenantId, branchId);
   }
 
   @Get('branches/:branchId/availability')
@@ -187,13 +196,39 @@ export class ReservationsController {
   @BranchOf('reservation', 'reservationId')
   @Permission('reservations', 'update')
   @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk)
-  @ApiOperation({ summary: 'Check out a checked-in reservation and release the room (marked dirty)' })
+  @ApiOperation({ summary: 'Check out a checked-in reservation and release the room (marked dirty) — late check-out / early departure fees are charged unless a manager waives them' })
   checkOut(
     @CurrentTenant() tenantId: string,
     @CurrentUser() user: JwtPayload,
     @Param('reservationId', ParseUUIDPipe) reservationId: string,
+    @Body() dto: CheckOutDto,
   ): ReturnType<ReservationsService['checkOut']> {
-    return this.reservationsService.checkOut(tenantId, reservationId, user.sub);
+    return this.reservationsService.checkOut(tenantId, reservationId, user, dto);
+  }
+
+  @Put('reservations/:reservationId/packages')
+  @BranchOf('reservation', 'reservationId')
+  @Permission('reservations', 'update')
+  @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk)
+  @ApiOperation({ summary: "Set a stay's packages — these, and only these, from now on (one already on the stay keeps its price)" })
+  setPackages(
+    @CurrentTenant() tenantId: string,
+    @CurrentUser() user: JwtPayload,
+    @Param('reservationId', ParseUUIDPipe) reservationId: string,
+    @Body() dto: SetStayPackagesDto,
+  ): ReturnType<ReservationsService['setPackages']> {
+    return this.reservationsService.setPackages(tenantId, reservationId, dto.packageIds, user.sub);
+  }
+
+  @Get('reservations/:reservationId/check-out-quote')
+  @BranchOf('reservation', 'reservationId')
+  @Roles(SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk)
+  @ApiOperation({ summary: 'The fees checking out now would add — late check-out, early departure — before anyone confirms' })
+  getCheckOutQuote(
+    @CurrentTenant() tenantId: string,
+    @Param('reservationId', ParseUUIDPipe) reservationId: string,
+  ): ReturnType<ReservationsService['getCheckOutQuote']> {
+    return this.reservationsService.getCheckOutQuote(tenantId, reservationId);
   }
 
   @Get('reservations/:reservationId/cancellation-quote')

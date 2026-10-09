@@ -8,7 +8,8 @@ import { PrismaService, TenantTx } from '../../prisma/prisma.service';
 import { CommsLogService } from '../comms-log/comms-log.service';
 import { FoliosService } from '../folios/folios.service';
 import { AdjustPointsDto, SaveLoyaltyProgramDto } from './dto/loyalty.dto';
-import { LoyaltyTier, SUGGESTED_TIERS, nextTierFor, parseTiers, pointsForSpend, redemptionValue, sortTiers, tierFor } from './loyalty-rules';
+import { applyLoyaltyPoints, findLoyaltyGuest, LIFETIME_POINTS_WHERE, lifetimeLoyaltyPoints, LoyaltyEntry, lockLoyaltyGuest } from './loyalty-ledger';
+import { lapsedPoints, LoyaltyTier, SUGGESTED_TIERS, nextTierFor, parseTiers, pointsExpireAt, pointsForSpend, redemptionValue, sortTiers, tierFor } from './loyalty-rules';
 
 const REDEEM_ROLES = [SystemRole.Owner, SystemRole.Manager, SystemRole.FrontDesk];
 const HISTORY_ROWS = 50;
@@ -42,6 +43,8 @@ export interface LoyaltyProgramView {
   pointsPerUnit: string;
   pointValue: string;
   tiers: LoyaltyTier[];
+  /** Points earned lapse this many months later if unspent; null = never. */
+  pointsExpireAfterMonths: number | null;
   /** The currencies the tenant's branches charge in — the programme's must be one of them. */
   branchCurrencies: string[];
   updatedAt: Date | null;
@@ -61,6 +64,8 @@ export interface GuestLoyaltyView {
   nextTier: { name: string; pointsToGo: number } | null;
   /** What the whole balance is worth at redemption. */
   redeemableValue: string | null;
+  /** The next points to lapse unspent, and when — null when none are due to. */
+  expiring: { points: number; on: Date } | null;
   transactions: Array<{ id: string; type: LoyaltyTxType; points: number; description: string; createdAt: Date }>;
 }
 
@@ -148,6 +153,7 @@ export class LoyaltyService {
           pointsPerUnit: '0.0100',
           pointValue: '1.0000',
           tiers: SUGGESTED_TIERS,
+          pointsExpireAfterMonths: null,
           branchCurrencies: currencies,
           updatedAt: null,
         };
@@ -184,6 +190,8 @@ export class LoyaltyService {
         pointsPerUnit: new Prisma.Decimal(dto.pointsPerUnit),
         pointValue: new Prisma.Decimal(dto.pointValue),
         tiers,
+        // Left out, it stays as it was; points already earned keep the lapse date they were earned with.
+        ...(dto.pointsExpireAfterMonths !== undefined ? { pointsExpireAfterMonths: dto.pointsExpireAfterMonths } : {}),
         updatedBy: actorId,
       };
       const program = await tx.loyaltyProgram.upsert({ where: { tenantId }, create: { tenantId, ...data }, update: data });
@@ -219,7 +227,15 @@ export class LoyaltyService {
           action: 'loyalty_program.saved',
           entityType: 'loyalty_program',
           entityId: program.id,
-          after: { isActive: dto.isActive, currency: dto.currency, pointsPerUnit: dto.pointsPerUnit, pointValue: dto.pointValue, tiers, membersRetiered: moved },
+          after: {
+            isActive: dto.isActive,
+            currency: dto.currency,
+            pointsPerUnit: dto.pointsPerUnit,
+            pointValue: dto.pointValue,
+            tiers,
+            pointsExpireAfterMonths: program.pointsExpireAfterMonths,
+            membersRetiered: moved,
+          },
         },
       });
       return this.toProgramView(program, currencies);
@@ -296,6 +312,7 @@ export class LoyaltyService {
       description: `Stay ${reservation.confirmationNumber} — ${program.currency} ${spendBeforeTax.toFixed(2)} before tax`,
       branchId: reservation.branchId,
       earnReservationId: reservation.id,
+      expiresAt: pointsExpireAt(new Date(), program.pointsExpireAfterMonths),
       actorId,
     });
     if (upgradedTo) {
@@ -347,45 +364,55 @@ export class LoyaltyService {
     });
   }
 
+  /**
+   * The nightly sweep: takes off every member's points that have lapsed
+   * unspent, as an `expire` row each — oldest earnings first (see
+   * `lapsedPoints`). Tenant by tenant (the ledger is behind row-level
+   * security), in batches of members. Lifetime points, and so tiers, don't
+   * change: a lapse isn't spending. Returns how many points lapsed.
+   */
+  async expireLapsedPoints(now = new Date()): Promise<number> {
+    const tenants = await this.prisma.tenant.findMany({ where: { status: { in: ['trial', 'active'] } }, select: { id: true } });
+    let lapsed = 0;
+    for (const tenant of tenants) {
+      const candidates = await this.prisma.withTenant(tenant.id, async (tx) => {
+        const rows = await tx.loyaltyTransaction.groupBy({ by: ['guestId'], where: { type: 'earn', expiresAt: { lte: now }, guest: { loyaltyPoints: { gt: 0 } } } });
+        return rows.map((row) => row.guestId);
+      });
+      for (let i = 0; i < candidates.length; i += 200) {
+        const batch = candidates.slice(i, i + 200);
+        lapsed += await this.prisma.withTenant(
+          tenant.id,
+          async (tx) => {
+            let points = 0;
+            for (const guestId of batch) {
+              const guest = await this.lockGuest(tx, guestId).catch(() => null);
+              if (!guest) continue;
+              const ledger = await tx.loyaltyTransaction.findMany({ where: { guestId }, select: { type: true, points: true, expiresAt: true } });
+              const { due } = lapsedPoints(ledger, now);
+              if (due <= 0) continue;
+              await this.applyPoints(tx, tenant.id, guest, {
+                type: 'expire',
+                points: -due,
+                description: `${due.toLocaleString('en-US')} points lapsed unspent`,
+                actorId: null,
+              });
+              points += due;
+            }
+            return points;
+          },
+          { timeout: 60_000 },
+        );
+      }
+    }
+    return lapsed;
+  }
+
   // -------------------------------------------------------------------------
 
   /** Writes one ledger row and moves the balance and tier with it. Callers hold the guest row lock. */
-  private async applyPoints(
-    tx: TenantTx,
-    tenantId: string,
-    guest: GuestProfile,
-    entry: { type: LoyaltyTxType; points: number; description: string; branchId?: string; earnReservationId?: string; paymentId?: string; actorId: string | null },
-  ): Promise<{ upgradedTo: LoyaltyTier | null }> {
-    await tx.loyaltyTransaction.create({
-      data: {
-        tenantId,
-        guestId: guest.id,
-        branchId: entry.branchId,
-        type: entry.type,
-        points: entry.points,
-        description: entry.description.slice(0, 300),
-        earnReservationId: entry.earnReservationId,
-        paymentId: entry.paymentId,
-        createdBy: entry.actorId,
-      },
-    });
-
-    const program = await tx.loyaltyProgram.findUnique({ where: { tenantId } });
-    const tiers = parseTiers(program?.tiers);
-    const lifetime = await this.lifetimePoints(tx, guest.id);
-    const reached = program ? tierFor(tiers, lifetime) : null;
-    const before = tiers.findIndex((tier) => tier.name === guest.loyaltyTier);
-    const after = reached ? tiers.indexOf(reached) : -1;
-
-    await tx.guestProfile.update({
-      where: { id: guest.id },
-      data: {
-        loyaltyPoints: { increment: entry.points },
-        loyaltyTier: program ? (reached?.name ?? null) : guest.loyaltyTier,
-        loyaltyEnrolledAt: guest.loyaltyEnrolledAt ?? new Date(),
-      },
-    });
-    return { upgradedTo: reached && after > before ? reached : null };
+  private applyPoints(tx: TenantTx, tenantId: string, guest: GuestProfile, entry: LoyaltyEntry): Promise<{ upgradedTo: LoyaltyTier | null }> {
+    return applyLoyaltyPoints(tx, tenantId, guest, entry);
   }
 
   private async guestView(tx: TenantTx, tenantId: string, guest: GuestProfile): Promise<GuestLoyaltyView> {
@@ -399,6 +426,7 @@ export class LoyaltyService {
       select: { id: true, type: true, points: true, description: true, createdAt: true },
     });
     const balance = guest.loyaltyPoints ?? 0;
+    const ledger = await tx.loyaltyTransaction.findMany({ where: { guestId: guest.id }, select: { type: true, points: true, expiresAt: true } });
     return {
       guestId: guest.id,
       programActive: program?.isActive ?? false,
@@ -411,30 +439,27 @@ export class LoyaltyService {
       tierName: guest.loyaltyTier,
       nextTier: program ? nextTierFor(tiers, lifetime) : null,
       redeemableValue: program ? redemptionValue(balance, program.pointValue).toFixed(2) : null,
+      expiring: lapsedPoints(ledger, new Date()).next,
       transactions,
     };
   }
 
-  private async findGuest(tx: TenantTx, guestId: string): Promise<GuestProfile> {
-    const guest = await tx.guestProfile.findFirst({ where: { id: guestId, deletedAt: null } });
-    if (!guest) throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Guest not found' });
-    return guest;
+  private findGuest(tx: TenantTx, guestId: string): Promise<GuestProfile> {
+    return findLoyaltyGuest(tx, guestId);
   }
 
   /** Serialises everything that moves one guest's points: two redemptions at once can't both spend the same balance. */
-  private async lockGuest(tx: TenantTx, guestId: string): Promise<GuestProfile> {
-    await tx.$queryRaw`SELECT id FROM guest_profiles WHERE id = ${guestId}::uuid FOR UPDATE`;
-    return this.findGuest(tx, guestId);
+  private lockGuest(tx: TenantTx, guestId: string): Promise<GuestProfile> {
+    return lockLoyaltyGuest(tx, guestId);
   }
 
   /** Everything ever earned or added — what tiers go by. Never falls when points are spent. */
-  private async lifetimePoints(tx: TenantTx, guestId: string): Promise<number> {
-    const sum = await tx.loyaltyTransaction.aggregate({ _sum: { points: true }, where: { guestId, points: { gt: 0 } } });
-    return sum._sum.points ?? 0;
+  private lifetimePoints(tx: TenantTx, guestId: string): Promise<number> {
+    return lifetimeLoyaltyPoints(tx, guestId);
   }
 
   private async lifetimeByGuest(tx: TenantTx): Promise<Map<string, number>> {
-    const rows = await tx.loyaltyTransaction.groupBy({ by: ['guestId'], where: { points: { gt: 0 } }, _sum: { points: true } });
+    const rows = await tx.loyaltyTransaction.groupBy({ by: ['guestId'], where: LIFETIME_POINTS_WHERE, _sum: { points: true } });
     return new Map(rows.map((row) => [row.guestId, row._sum.points ?? 0]));
   }
 
@@ -451,6 +476,7 @@ export class LoyaltyService {
       pointsPerUnit: program.pointsPerUnit.toFixed(4),
       pointValue: program.pointValue.toFixed(4),
       tiers: parseTiers(program.tiers),
+      pointsExpireAfterMonths: program.pointsExpireAfterMonths,
       branchCurrencies: currencies,
       updatedAt: program.updatedAt,
     };

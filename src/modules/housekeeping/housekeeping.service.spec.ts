@@ -224,7 +224,7 @@ describe('HousekeepingService', () => {
     it('skips the waiting stay-over tasks for the room with the reason, and audits each', async () => {
       tx.housekeepingTask.findMany.mockResolvedValue([{ id: 'stay-1', notes: null }, { id: 'stay-2', notes: 'Extra towels' }]);
       await expect(service.supersedeStayoverTasksInTx(tx as never, TENANT_ID, BRANCH_ID, ROOM_ID, 'Guest checked out', MANAGER_ID)).resolves.toBe(2);
-      expect(tx.housekeepingTask.findMany).toHaveBeenCalledWith({ where: { roomId: ROOM_ID, status: 'pending', triggerEvent: 'stayover' }, select: { id: true, notes: true } });
+      expect(tx.housekeepingTask.findMany).toHaveBeenCalledWith({ where: { roomId: ROOM_ID, status: 'pending', triggerEvent: { in: ['stayover', 'turndown'] } }, select: { id: true, notes: true } });
       expect(tx.housekeepingTask.update).toHaveBeenCalledWith({ where: { id: 'stay-1' }, data: { status: 'skipped', notes: 'Guest checked out' } });
       expect(tx.housekeepingTask.update).toHaveBeenCalledWith({ where: { id: 'stay-2' }, data: { status: 'skipped', notes: 'Extra towels\nGuest checked out' } });
       expect(tx.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: 'housekeeping.task_superseded', entityId: 'stay-1' }) }));

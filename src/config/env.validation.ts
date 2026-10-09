@@ -15,6 +15,13 @@ export const envValidationSchema = Joi.object({
   // 32 bytes hex — AES-256-GCM key for guest ID document encryption
   ENCRYPTION_KEY: Joi.string().hex().length(64).required(),
   CORS_ORIGINS: Joi.string().allow('').default(''),
+  // The same long random value on the API and the web app: proves a sign-in
+  // came through the web app's own proxy, which then says who the visitor is
+  // (common/utils/web-proxy.ts). Optional, but without it sign-ins through
+  // the web app share one rate limit.
+  WEB_PROXY_SECRET: Joi.string().min(32).allow('').optional(),
+  // The session cookie is Secure in production; true makes it Secure anywhere.
+  SESSION_COOKIE_SECURE: Joi.string().valid('true', 'false').optional(),
   // The interactive API docs at /api/docs are always served in development; in
   // production only with this set to true (for integrators who need them).
   SWAGGER_ENABLED: Joi.string().valid('true', 'false').optional(),
@@ -26,6 +33,14 @@ export const envValidationSchema = Joi.object({
   BACKUP_STORAGE_DIR: Joi.string().allow('').optional(),
   // Optional — defaults to <os temp dir>/roomick-documents (see LocalFilesystemDocumentStorage).
   DOCUMENT_STORAGE_DIR: Joi.string().allow('').optional(),
+  // An S3-compatible bucket (Cloudflare R2, Amazon S3, Backblaze B2, Spaces…) for
+  // uploaded room photos, guest documents and backups. Off until the bucket, key id
+  // and secret are all set; the endpoint is left out for Amazon S3 itself.
+  STORAGE_S3_ENDPOINT: Joi.string().uri({ scheme: ['https', 'http'] }).allow('').optional(),
+  STORAGE_S3_REGION: Joi.string().allow('').optional(),
+  STORAGE_S3_BUCKET: Joi.string().allow('').optional(),
+  STORAGE_S3_ACCESS_KEY_ID: Joi.string().allow('').optional(),
+  STORAGE_S3_SECRET_ACCESS_KEY: Joi.string().allow('').optional(),
   // Where a guest's mail client reaches this API: the open pixel, click redirect and
   // unsubscribe link in a marketing email are absolute URLs, and they are baked into a
   // message that outlives any request. Required in production — a campaign sent before it

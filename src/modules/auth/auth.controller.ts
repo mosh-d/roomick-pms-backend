@@ -12,10 +12,14 @@ import {
   Post,
   Put,
   Query,
+  Req,
+  Res,
+  UnauthorizedException,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { Role } from '@prisma/client';
+import type { Request, Response } from 'express';
 import { CurrentTenant, CurrentUser, Public } from '../../common/decorators';
 import { Roles, SystemRole } from '../../common/decorators/roles.decorator';
 import { ErrorCode } from '../../common/errors/error-codes';
@@ -31,6 +35,7 @@ import { RegisterDto } from './dto/register.dto';
 import { CreateRoleDto, UpdateRoleDto, UpdateRolePermissionsDto } from './dto/update-role-permissions.dto';
 import { ChangePasswordDto, EmailOnlyDto, ResetPasswordDto } from './dto/password.dto';
 import { ResendVerificationDto, VerifyEmailDto } from './dto/verify-email.dto';
+import { assertFromWebApp, clearSessionCookie, handOverSession, readSessionCookie, SessionStarted } from './session-cookie';
 
 @ApiTags('auth')
 @Controller('auth')
@@ -98,8 +103,13 @@ export class AuthController {
   @ApiBearerAuth()
   @Throttle({ default: { limit: 10, ttl: 900_000 } })
   @ApiOperation({ summary: 'Change my own password — ends my other sessions and returns a fresh one for this browser' })
-  changePassword(@CurrentUser() user: JwtPayload, @Body() dto: ChangePasswordDto): Promise<LoginResult> {
-    return this.passwordService.changePassword(user, dto.currentPassword, dto.newPassword);
+  async changePassword(
+    @CurrentUser() user: JwtPayload,
+    @Body() dto: ChangePasswordDto,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<SessionStarted> {
+    return this.startBrowserSession(req, res, await this.passwordService.changePassword(user, dto.currentPassword, dto.newPassword));
   }
 
   @Public()
@@ -112,30 +122,51 @@ export class AuthController {
   @Throttle({ default: { limit: 10, ttl: 60_000 } })
   @Post('login')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Login with email + password' })
-  login(@Body() dto: LoginDto): Promise<LoginResult | MfaChallenge> {
-    return this.authService.login(dto);
+  @ApiOperation({ summary: 'Login with email + password — the session goes into an httpOnly cookie, the access token into the answer' })
+  async login(
+    @Body() dto: LoginDto,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<SessionStarted | MfaChallenge> {
+    const result = await this.authService.login(dto);
+    // A challenge isn't a session: nothing goes into the cookie until the second step.
+    if ('mfaRequired' in result) return result;
+    return this.startBrowserSession(req, res, result);
   }
 
   @Public()
   // Looser than login: reaching this route at all requires already
   // possessing a valid (signed, unexpired) refresh token, which is a much
-  // higher bar than "knows an email address."
-  @Throttle({ default: { limit: 20, ttl: 60_000 } })
+  // higher bar than "knows an email address." Looser still since the access
+  // token lives only in the page's memory: every page load renews once, and a
+  // front desk of several computers shares one address.
+  @Throttle({ default: { limit: 60, ttl: 60_000 } })
   @Post('refresh')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Exchange a refresh token for a fresh token pair' })
-  refresh(@Body() dto: RefreshTokenDto): Promise<LoginResult> {
-    return this.authService.refresh(dto.refreshToken);
+  @ApiOperation({ summary: 'Renew the session in the cookie (or, for a caller without one, the refresh token sent) — a fresh access token, and a fresh cookie' })
+  async refresh(
+    @Body() dto: RefreshTokenDto,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<SessionStarted> {
+    // A token in the body first: a browser still holding one from before the
+    // cookie (localStorage) trades it for the cookie on its first renewal.
+    const token = dto.refreshToken ?? this.cookieSession(req);
+    // No cookie to clear on a refusal: another tab of the same browser may
+    // have just renewed, and its new cookie must survive this answer.
+    if (!token) throw new UnauthorizedException({ code: ErrorCode.TOKEN_INVALID, message: 'Your session has ended — sign in again' });
+    return handOverSession(res, await this.authService.refresh(token));
   }
 
   @Public()
   @Throttle({ default: { limit: 20, ttl: 60_000 } })
   @Post('logout')
   @HttpCode(HttpStatus.NO_CONTENT)
-  @ApiOperation({ summary: 'End the session behind a refresh token — signing out on the server, not just in the browser' })
-  logout(@Body() dto: RefreshTokenDto): Promise<void> {
-    return this.authService.logout(dto.refreshToken);
+  @ApiOperation({ summary: 'End the session in the cookie (or behind the refresh token sent) — signing out on the server, not just in the browser' })
+  async logout(@Body() dto: RefreshTokenDto, @Req() req: Request, @Res({ passthrough: true }) res: Response): Promise<void> {
+    const sessions = new Set([dto.refreshToken, this.cookieSession(req)]);
+    clearSessionCookie(res);
+    for (const token of sessions) if (token) await this.authService.logout(token);
   }
 
   @Public()
@@ -150,11 +181,14 @@ export class AuthController {
   @Throttle({ default: { limit: 10, ttl: 60_000 } })
   @Post('accept-invite/:token')
   @ApiOperation({ summary: 'Accept a staff invite — someone new gets an account and is signed in; someone with an account here gives its password and then signs in as usual' })
-  acceptInvite(
+  async acceptInvite(
     @Param('token') token: string,
     @Body() dto: AcceptInviteDto,
-  ): Promise<LoginResult | InviteJoined> {
-    return this.authService.acceptInvite(token, dto);
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<SessionStarted | InviteJoined> {
+    const result = await this.authService.acceptInvite(token, dto);
+    return 'refreshToken' in result ? this.startBrowserSession(req, res, result) : result;
   }
 
   @Get('me/branches')
@@ -196,8 +230,12 @@ export class AuthController {
   // Per IP, on top of the per-account lock after five wrong codes.
   @Throttle({ default: { limit: 10, ttl: 60_000 } })
   @ApiOperation({ summary: 'Second step of a sign-in: the ticket from /auth/login plus an authenticator or recovery code' })
-  verifyMfa(@Body() dto: MfaVerifyDto): Promise<MfaLoginResult> {
-    return this.authService.verifyMfaLogin(dto.challengeToken, dto.code);
+  async verifyMfa(
+    @Body() dto: MfaVerifyDto,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<SessionStarted<MfaLoginResult>> {
+    return this.startBrowserSession(req, res, await this.authService.verifyMfaLogin(dto.challengeToken, dto.code));
   }
 
   @Get('mfa')
@@ -297,5 +335,23 @@ export class AuthController {
     @Body() dto: UpdateRolePermissionsDto,
   ): Promise<Role> {
     return this.authService.updateRolePermissions(tenantId, roleId, dto.permissions, user.sub);
+  }
+
+  /** The session in the cookie — which only the web app itself may use (see `assertFromWebApp`). */
+  private cookieSession(req: Request): string | undefined {
+    const token = readSessionCookie(req);
+    if (token) assertFromWebApp(req);
+    return token;
+  }
+
+  /**
+   * Hands a new session to the browser. The one it replaces in this browser
+   * ends too: the cookie is about to be overwritten, and a session nobody
+   * holds any more shouldn't stay open on the server for a week.
+   */
+  private async startBrowserSession<T extends LoginResult>(req: Request, res: Response, result: T): Promise<SessionStarted<T>> {
+    const previous = readSessionCookie(req);
+    if (previous && previous !== result.refreshToken) await this.authService.logout(previous).catch(() => undefined);
+    return handOverSession(res, result);
   }
 }

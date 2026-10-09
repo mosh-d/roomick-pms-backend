@@ -70,7 +70,7 @@ export class MaintenanceService {
       });
 
       if (takesRoomOutOfService && room) {
-        await tx.room.update({ where: { id: room.id }, data: { heldStatus: 'out_of_order' } });
+        await tx.room.update({ where: { id: room.id }, data: { heldStatus: 'out_of_order', heldUntil: null } });
       }
 
       await this.audit(tx, tenantId, branchId, actorId, 'maintenance.work_order_created', order.id, {
@@ -139,7 +139,7 @@ export class MaintenanceService {
         });
         const room = await tx.room.findFirst({ where: { id: existing.roomId } });
         if (room?.heldStatus === 'out_of_order' && !stillOut) {
-          await tx.room.update({ where: { id: existing.roomId }, data: { heldStatus: null } });
+          await tx.room.update({ where: { id: existing.roomId }, data: { heldStatus: null, heldUntil: null } });
         }
       }
 

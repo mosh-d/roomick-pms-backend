@@ -13,8 +13,13 @@ import {
   MaxLength,
   Min,
   MinLength,
+  ValidateIf,
   ValidateNested,
 } from 'class-validator';
+import { uploadedPhotoKey } from '../room-photos';
+
+/** The most photos a room type shows. */
+export const MAX_ROOM_PHOTOS = 20;
 
 export class CapacityDto {
   @ApiProperty({ example: 2 })
@@ -73,10 +78,12 @@ export class CreateRoomTypeDto {
   @IsString({ each: true })
   amenities?: string[];
 
-  @ApiPropertyOptional({ type: [String], description: 'https addresses — shown to guests on the public booking page' })
+  @ApiPropertyOptional({ type: [String], description: 'https addresses, or photos uploaded here — shown to guests on the public booking page' })
   @IsOptional()
   @IsArray()
-  @ArrayMaxSize(20)
+  @ArrayMaxSize(MAX_ROOM_PHOTOS)
+  // A pasted link must be https; a photo uploaded here is this API's own address, http in local development.
+  @ValidateIf((_o, value: unknown) => !(Array.isArray(value) && value.every((url) => typeof url === 'string' && uploadedPhotoKey(url) !== null)))
   @IsUrl({ protocols: ['https'], require_protocol: true }, { each: true, message: 'Each photo must be an https:// address' })
   @MaxLength(2048, { each: true })
   photoUrls?: string[];
@@ -86,6 +93,50 @@ export class CreateRoomTypeDto {
   @Type(() => Number)
   @IsInt()
   sortOrder?: number;
+
+  @ApiPropertyOptional({ example: 2, nullable: true, description: 'Adults the nightly rate covers. Null = every adult the room holds (no extra-adult charge).' })
+  @IsOptional()
+  @ValidateIf((_o, value) => value !== null)
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(20)
+  adultsIncluded?: number | null;
+
+  @ApiPropertyOptional({ example: 10000, nullable: true, description: 'Added a night for each adult beyond those included' })
+  @IsOptional()
+  @ValidateIf((_o, value) => value !== null)
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  @Max(1_000_000_000)
+  extraAdultRate?: number | null;
+
+  @ApiPropertyOptional({ example: 1, description: 'Children who stay free' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(20)
+  childrenIncluded?: number;
+
+  @ApiPropertyOptional({ example: 5000, nullable: true, description: 'Added a night for each child beyond those who stay free. Null = children stay free.' })
+  @IsOptional()
+  @ValidateIf((_o, value) => value !== null)
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  @Max(1_000_000_000)
+  childRate?: number | null;
+
+  @ApiPropertyOptional({ example: 30000, nullable: true, description: 'The price of the room for the day (no night). Null = not sold for day use.' })
+  @IsOptional()
+  @ValidateIf((_o, value) => value !== null)
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @IsPositive()
+  @Max(1_000_000_000)
+  dayUseRate?: number | null;
 }
 
 /** Property Config's own room-type editor — every field optional, same "change just one thing" shape `UpdateBranchDto`/`UpdateBrandDto` already use. */

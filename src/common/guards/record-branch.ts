@@ -44,4 +44,8 @@ export const RECORD_BRANCH: Record<BranchRecord, Lookup> = {
   // property's campaign the same way.
   housekeepingTask: async (tx, id) => (await tx.housekeepingTask.findFirst({ where: { id }, select: { branchId: true } }))?.branchId,
   marketingCampaign: async (tx, id) => (await tx.marketingCampaign.findFirst({ where: { id }, select: { branchId: true } }))?.branchId,
+  payment: async (tx, id) => (await tx.payment.findFirst({ where: { id }, select: { folio: { select: { branchId: true } } } }))?.folio.branchId,
+  invoice: async (tx, id) => (await tx.invoice.findFirst({ where: { id }, select: { branchId: true } }))?.branchId,
+  package: async (tx, id) => (await tx.package.findFirst({ where: { id }, select: { branchId: true } }))?.branchId,
+  channelAllotment: async (tx, id) => (await tx.channelAllotment.findFirst({ where: { id }, select: { branchId: true } }))?.branchId,
 };
