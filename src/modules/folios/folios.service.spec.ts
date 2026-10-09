@@ -375,6 +375,20 @@ describe('FoliosService', () => {
     });
   });
 
+  describe('correctLineItem — the outlet order', () => {
+    it("taking an outlet's charge off the bill voids that order at the outlet too", async () => {
+      tx.folio.findFirst.mockResolvedValue(folio());
+      tx.lineItem.findFirst
+        .mockResolvedValueOnce({ id: 'li-pos', folioId: FOLIO_ID, amount: new Prisma.Decimal(10000), description: 'Restaurant order #3', chargeType: 'fnb', taxRuleIds: [], serviceDate: null, outletId: 'outlet-1' })
+        .mockResolvedValueOnce(null);
+      await service.correctLineItem(TENANT_ID, 'li-pos', { reason: 'Dish sent back' }, ACTOR_ID);
+      expect(tx.posOrder.updateMany).toHaveBeenCalledWith({
+        where: { lineItemId: 'li-pos', voidedAt: null },
+        data: { voidedAt: expect.any(Date), voidedBy: ACTOR_ID, voidReason: "Taken off the guest's bill: Dish sent back" },
+      });
+    });
+  });
+
   describe('correctLineItem — append-only', () => {
     const original = (over: Record<string, unknown> = {}) => ({
       id: 'li-original', folioId: FOLIO_ID, description: 'Minibar', chargeType: 'minibar', taxRuleIds: [],

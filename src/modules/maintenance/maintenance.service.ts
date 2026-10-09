@@ -131,8 +131,14 @@ export class MaintenanceService {
       });
 
       if (existing.takesRoomOutOfService && existing.roomId && dto.status && RESOLVED_OR_CANCELLED.includes(dto.status)) {
+        // Back in service only when no other open order still needs the room
+        // out — resolving one of two used to put a still-broken room on sale.
+        const stillOut = await tx.maintenanceOrder.findFirst({
+          where: { id: { not: orderId }, roomId: existing.roomId, takesRoomOutOfService: true, status: { notIn: [...RESOLVED_OR_CANCELLED] } },
+          select: { id: true },
+        });
         const room = await tx.room.findFirst({ where: { id: existing.roomId } });
-        if (room?.heldStatus === 'out_of_order') {
+        if (room?.heldStatus === 'out_of_order' && !stillOut) {
           await tx.room.update({ where: { id: existing.roomId }, data: { heldStatus: null } });
         }
       }

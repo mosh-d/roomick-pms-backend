@@ -121,6 +121,23 @@ export class HousekeepingService {
     return true;
   }
 
+  /**
+   * A room's guest has left it — checked out, or moved to another room — so
+   * the daily service the night audit raised for them is no longer the job:
+   * the clean the departure raises replaces it. Left waiting, the board
+   * showed two tasks for one room, and once either was done the other could
+   * never be started (the room was clean, and cleaning starts from dirty).
+   * One already under way is left to finish.
+   */
+  async supersedeStayoverTasksInTx(tx: TenantTx, tenantId: string, branchId: string, roomId: string, why: string, actorId: string | null): Promise<number> {
+    const waiting = await tx.housekeepingTask.findMany({ where: { roomId, status: 'pending', triggerEvent: 'stayover' }, select: { id: true, notes: true } });
+    for (const task of waiting) {
+      await tx.housekeepingTask.update({ where: { id: task.id }, data: { status: 'skipped', notes: task.notes ? `${task.notes}\n${why}` : why } });
+      await this.audit(tx, tenantId, actorId, 'housekeeping.task_superseded', task.id, { roomId, why }, branchId);
+    }
+    return waiting.length;
+  }
+
   /** Task Board (all tasks, optionally by status) and "my assigned rooms" (assigneeId = the caller). */
   async listTasks(tenantId: string, branchId: string, query: ListTasksQueryDto) {
     return this.prisma.withTenant(tenantId, async (tx) => {

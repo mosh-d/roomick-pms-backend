@@ -1,7 +1,7 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { ErrorCode } from '../../common/errors/error-codes';
-import { branchDayStart, localDateOf, toBranchDate } from '../../common/utils/branch-date';
+import { branchDayStart, localDateOf, toBranchDate, todayInTimezone } from '../../common/utils/branch-date';
 import { PrismaService, TenantTx } from '../../prisma/prisma.service';
 import { PropertyService } from '../property/property.service';
 import { ReportGroupBy, ReportQueryDto } from './dto/report-query.dto';
@@ -89,7 +89,7 @@ export class ReportsService {
    * different ways by the public methods below rather than three separate
    * near-identical queries against the same underlying data.
    */
-  private async roomNightMetrics(tx: TenantTx, branchId: string, from: Date, to: Date, roomTypeId?: string) {
+  private async roomNightMetrics(tx: TenantTx, branchId: string, timezone: string, from: Date, to: Date, roomTypeId?: string) {
     const roomTypes = await tx.roomType.findMany({
       where: { branchId, deletedAt: null, ...(roomTypeId ? { id: roomTypeId } : {}) },
       select: { id: true, name: true },
@@ -107,10 +107,12 @@ export class ReportsService {
         deletedAt: null,
         status: { in: [...SOLD_STATUSES] },
         checkInDate: { lt: to },
-        checkOutDate: { gt: from },
+        // A guest still in, or who left after their date, can hold nights
+        // past the departure they booked.
+        OR: [{ checkOutDate: { gt: from } }, { status: 'checked_in' }, { status: 'checked_out', actualCheckOut: { gte: from } }],
         ...(roomTypeId ? { roomTypeId } : {}),
       },
-      select: { roomTypeId: true, checkInDate: true, checkOutDate: true },
+      select: { roomTypeId: true, checkInDate: true, checkOutDate: true, status: true, actualCheckOut: true },
     });
 
     const roomRevenueRows = await tx.lineItem.findMany({
@@ -136,9 +138,24 @@ export class ReportsService {
         buckets.set(`${dateStr}|${rt.id}`, { available: poolByType.get(rt.id) ?? 0, sold: 0, revenue: ZERO });
       }
     }
+    // From the branch's own today: UTC's is a different date for part of every day.
+    const branchToday = toBranchDate(todayInTimezone(timezone));
     for (const r of reservations) {
+      // The nights the room was really taken. A guest who left early used it
+      // up to the day they left — the nights after went back on sale, and
+      // counting them too put a resold room in the figures twice (occupancy
+      // over 100%). One who stayed on past their date held it every night
+      // they were there, as availability and the night audit already count.
+      let until = r.checkOutDate;
+      if (r.status === 'checked_out' && r.actualCheckOut) {
+        const leftOn = toBranchDate(localDateOf(r.actualCheckOut, timezone));
+        const firstNightAfter = new Date(r.checkInDate.getTime() + 86_400_000);
+        until = leftOn > firstNightAfter ? leftOn : firstNightAfter;
+      } else if (r.status === 'checked_in' && r.checkOutDate <= branchToday) {
+        until = new Date(branchToday.getTime() + 86_400_000);
+      }
       for (const day of days) {
-        if (day >= r.checkInDate && day < r.checkOutDate) {
+        if (day >= r.checkInDate && day < until) {
           const bucket = buckets.get(`${this.isoDate(day)}|${r.roomTypeId}`);
           if (bucket) bucket.sold += 1;
         }
@@ -160,14 +177,13 @@ export class ReportsService {
         }
       }
     }
-    const todayUtc = new Date(new Date().toISOString().slice(0, 10));
     const heldNow = await tx.room.findMany({
       where: { branchId, deletedAt: null, heldStatus: 'out_of_order', ...(roomTypeId ? { roomTypeId } : {}) },
       select: { roomTypeId: true },
     });
     for (const room of heldNow) {
       for (const day of days) {
-        if (day >= todayUtc) {
+        if (day >= branchToday) {
           const bucket = buckets.get(`${this.isoDate(day)}|${room.roomTypeId}`);
           if (bucket && bucket.available > 0) bucket.available -= 1;
         }
@@ -204,8 +220,8 @@ export class ReportsService {
     const { from, to } = this.range(dto);
     const groupBy = dto.groupBy ?? 'day';
     return this.prisma.withTenant(tenantId, async (tx) => {
-      await this.propertyService.assertBranch(tx, branchId);
-      const { roomTypes, days, buckets } = await this.roomNightMetrics(tx, branchId, from, to, dto.roomTypeId);
+      const branch = await this.propertyService.assertBranch(tx, branchId);
+      const { roomTypes, days, buckets } = await this.roomNightMetrics(tx, branchId, branch.timezone, from, to, dto.roomTypeId);
       const roomTypeIds = roomTypes.map((rt) => rt.id);
 
       const byRoomType = roomTypes.map((rt) => {
@@ -250,7 +266,7 @@ export class ReportsService {
     const { from, to } = this.range(dto);
     return this.prisma.withTenant(tenantId, async (tx) => {
       const branch = await this.propertyService.assertBranch(tx, branchId);
-      const { roomTypes, days, buckets } = await this.roomNightMetrics(tx, branchId, from, to, dto.roomTypeId);
+      const { roomTypes, days, buckets } = await this.roomNightMetrics(tx, branchId, branch.timezone, from, to, dto.roomTypeId);
       const roomTypeIds = roomTypes.map((rt) => rt.id);
 
       const byRoomType = roomTypes.map((rt) => {
@@ -287,7 +303,7 @@ export class ReportsService {
     const { from, to } = this.range(dto);
     return this.prisma.withTenant(tenantId, async (tx) => {
       const branch = await this.propertyService.assertBranch(tx, branchId);
-      const { roomTypes, days, buckets } = await this.roomNightMetrics(tx, branchId, from, to, dto.roomTypeId);
+      const { roomTypes, days, buckets } = await this.roomNightMetrics(tx, branchId, branch.timezone, from, to, dto.roomTypeId);
       const roomTypeIds = roomTypes.map((rt) => rt.id);
 
       const byRoomType = roomTypes.map((rt) => {

@@ -41,6 +41,36 @@ describe('ReportsService', () => {
   });
 
   describe('getOccupancy', () => {
+    it('counts a guest who left early only up to the day they left — the room went back on sale', async () => {
+      tx.room.count.mockImplementation(({ where }: { where: { roomTypeId: string } }) => Promise.resolve(where.roomTypeId === TYPE_A ? 1 : 0));
+      // Booked 1–4 September, left on the 2nd (09:00 in Lagos); the room was resold for the 2nd and 3rd.
+      tx.reservation.findMany.mockResolvedValue([
+        { roomTypeId: TYPE_A, status: 'checked_out', actualCheckOut: new Date('2026-09-02T08:00:00.000Z'), checkInDate: new Date('2026-09-01T00:00:00.000Z'), checkOutDate: new Date('2026-09-04T00:00:00.000Z') },
+        { roomTypeId: TYPE_A, status: 'checked_out', actualCheckOut: new Date('2026-09-04T08:00:00.000Z'), checkInDate: new Date('2026-09-02T00:00:00.000Z'), checkOutDate: new Date('2026-09-04T00:00:00.000Z') },
+      ]);
+      propertyService.assertBranch.mockResolvedValue({ id: BRANCH_ID, currency: 'NGN', timezone: 'Africa/Lagos' });
+      const result = await service.getOccupancy(TENANT_ID, BRANCH_ID, { from: '2026-09-01', to: '2026-09-04' });
+      // One room, three nights, each sold once — not the 2nd and 3rd twice (5 sold, 167%).
+      expect(result.summary.roomNightsSold).toBe(3);
+      expect(result.summary.occupancyPct).toBe(100);
+    });
+
+    it('counts a guest still in the room past their date for every night they hold it', async () => {
+      jest.useFakeTimers({ now: new Date('2026-09-05T12:00:00.000Z'), doNotFake: ['nextTick', 'setImmediate'] });
+      try {
+        tx.room.count.mockImplementation(({ where }: { where: { roomTypeId: string } }) => Promise.resolve(where.roomTypeId === TYPE_A ? 1 : 0));
+        // Due out on the 3rd, still checked in on the 5th.
+        tx.reservation.findMany.mockResolvedValue([
+          { roomTypeId: TYPE_A, status: 'checked_in', actualCheckOut: null, checkInDate: new Date('2026-09-01T00:00:00.000Z'), checkOutDate: new Date('2026-09-03T00:00:00.000Z') },
+        ]);
+        propertyService.assertBranch.mockResolvedValue({ id: BRANCH_ID, currency: 'NGN', timezone: 'Africa/Lagos' });
+        const result = await service.getOccupancy(TENANT_ID, BRANCH_ID, { from: '2026-09-01', to: '2026-09-06' });
+        expect(result.trend.map((d) => d.roomNightsSold)).toEqual([1, 1, 1, 1, 1]);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
     it('computes occupancy% from physical pool vs. overlapping reservations, 2 nights x 2 room types', async () => {
       tx.room.count.mockImplementation(({ where }: { where: { roomTypeId: string } }) => Promise.resolve(where.roomTypeId === TYPE_A ? 4 : 2));
       // Type A: 1 reservation covering both nights. Type B: 1 reservation covering only the first night.

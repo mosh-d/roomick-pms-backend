@@ -84,7 +84,7 @@ function makeTx() {
         Promise.resolve(reservation({ ...data })),
       ),
     },
-    lineItem: { findFirst: jest.fn().mockResolvedValue(null) },
+    lineItem: { findFirst: jest.fn().mockResolvedValue(null), findMany: jest.fn().mockResolvedValue([]) },
     corporateAccount: { findFirst: jest.fn().mockResolvedValue({ id: 'corp-1' }) },
     noShowRecord: {
       create: jest.fn().mockImplementation(({ data }: { data: Record<string, unknown> }) => Promise.resolve({ id: 'nsr-1', penaltyWaived: false, ...data })),
@@ -114,7 +114,7 @@ describe('ReservationsService', () => {
     reverseChargeInTx: jest.Mock;
     paidOnPrimaryFolio: jest.Mock;
   };
-  let housekeepingService: { createTaskInTx: jest.Mock };
+  let housekeepingService: { createTaskInTx: jest.Mock; supersedeStayoverTasksInTx: jest.Mock };
   let rateResolverService: { resolveStay: jest.Mock; linkAuditLogsToReservation: jest.Mock };
   let registrationCardsService: { generateCardInTx: jest.Mock };
   let commsLogService: { logAutomatedInTx: jest.Mock };
@@ -153,7 +153,7 @@ describe('ReservationsService', () => {
       reverseChargeInTx: jest.fn().mockResolvedValue({ id: 'li-reversal' }),
       paidOnPrimaryFolio: jest.fn().mockResolvedValue(new Prisma.Decimal(0)),
     };
-    housekeepingService = { createTaskInTx: jest.fn().mockResolvedValue({ id: 'task-1' }) };
+    housekeepingService = { createTaskInTx: jest.fn().mockResolvedValue({ id: 'task-1' }), supersedeStayoverTasksInTx: jest.fn().mockResolvedValue(0) };
     // Mirrors the OLD flat baseRate × nights math the resolver replaced —
     // ReservationsService's own tests only need to prove it wires the
     // resolver correctly (right roomType/dates in, `subtotal` out as
@@ -907,6 +907,13 @@ describe('ReservationsService', () => {
       );
     });
 
+    it("retires the room's waiting stay-over service first — the check-out clean replaces it", async () => {
+      tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'checked_in', roomId: ROOM_ID }));
+      await service.checkOut(TENANT_ID, RESERVATION_ID, ACTOR_ID);
+      expect(housekeepingService.supersedeStayoverTasksInTx).toHaveBeenCalledWith(tx, TENANT_ID, BRANCH_ID, ROOM_ID, expect.stringContaining('checked out'), ACTOR_ID);
+      expect(housekeepingService.supersedeStayoverTasksInTx.mock.invocationCallOrder[0]).toBeLessThan(housekeepingService.createTaskInTx.mock.invocationCallOrder[0]);
+    });
+
     // Safety net: a guest leaving before the night audit next runs would
     // otherwise depart with un-posted nights.
     it('backfills any elapsed-but-unposted night before settling', async () => {
@@ -1624,6 +1631,7 @@ describe('ReservationsService', () => {
       expect(roomsService.applyReservationOccupancy).toHaveBeenCalledWith(tx, TENANT_ID, ROOM_ID, { occupancyStatus: 'vacant', cleanlinessStatus: 'dirty' }, ACTOR_ID);
       expect(roomsService.applyReservationOccupancy).toHaveBeenCalledWith(tx, TENANT_ID, NEW_ROOM_ID, { occupancyStatus: 'occupied' }, ACTOR_ID);
       expect(housekeepingService.createTaskInTx).toHaveBeenCalledWith(tx, TENANT_ID, BRANCH_ID, expect.objectContaining({ roomId: ROOM_ID, triggerEvent: 'room_move' }));
+      expect(housekeepingService.supersedeStayoverTasksInTx).toHaveBeenCalledWith(tx, TENANT_ID, BRANCH_ID, ROOM_ID, expect.stringContaining('moved'), ACTOR_ID);
     });
 
     it('bills any past night not yet on the bill at the old rate before anything changes', async () => {
@@ -1765,8 +1773,12 @@ describe('ReservationsService', () => {
       tx.reservation.findFirst.mockResolvedValue(
         reservation({ status: 'checked_in', roomId: ROOM_ID, confirmedRate: new Prisma.Decimal('460'), overrideRate: new Prisma.Decimal('180'), checkOutDate: new Date('2026-09-04T00:00:00.000Z') }),
       );
+      // The first night was billed at 100 before the rate was pinned; the other two will be at 180 (= 460).
+      tx.lineItem.findMany.mockResolvedValue([{ serviceDate: new Date('2026-09-01T00:00:00.000Z'), amount: new Prisma.Decimal(100), correctedBy: null }]);
       const result = await service.extendStay(TENANT_ID, RESERVATION_ID, { checkOutDate: '2026-09-06' }, ACTOR_ID);
       expect(String((result as unknown as { confirmedRate: unknown }).confirmedRate)).toBe('820');
+      const { data } = tx.reservation.update.mock.calls[0][0] as { data: { nightlyRates: Array<{ rate: string }> } };
+      expect(data.nightlyRates.map((n) => n.rate)).toEqual(['100.00', '180.00', '180.00', '180.00', '180.00']);
     });
   });
 
@@ -1777,8 +1789,33 @@ describe('ReservationsService', () => {
       tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'confirmed' }));
       await expect(service.setRateOverride(TENANT_ID, RESERVATION_ID, dto, ACTOR_ID)).resolves.toBeDefined();
       expect(tx.reservation.update).toHaveBeenCalledWith(
-        expect.objectContaining({ data: { overrideRate: 25000, overrideReason: dto.reason } }),
+        expect.objectContaining({ data: expect.objectContaining({ overrideRate: 25000, overrideReason: dto.reason }) }),
       );
+    });
+
+    it('re-states the stay total at the new rate — every night, before arrival', async () => {
+      tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'confirmed' }));
+      await service.setRateOverride(TENANT_ID, RESERVATION_ID, dto, ACTOR_ID);
+      const { data } = tx.reservation.update.mock.calls[0][0] as { data: { confirmedRate: { toFixed: (n: number) => string }; nightlyRates: Array<{ date: string; rate: string }> } };
+      // 1–4 September: three nights at 25,000.
+      expect(data.confirmedRate.toFixed(2)).toBe('75000.00');
+      expect(data.nightlyRates).toEqual([
+        { date: '2026-09-01', rate: '25000.00' },
+        { date: '2026-09-02', rate: '25000.00' },
+        { date: '2026-09-03', rate: '25000.00' },
+      ]);
+    });
+
+    it('keeps the nights already billed at what they were billed at (net of a correction), the rest at the new rate', async () => {
+      tx.reservation.findFirst.mockResolvedValue(reservation({ status: 'checked_in' }));
+      tx.lineItem.findMany.mockResolvedValue([
+        { serviceDate: new Date('2026-09-01T00:00:00.000Z'), amount: new Prisma.Decimal(30000), correctedBy: null },
+        { serviceDate: new Date('2026-09-02T00:00:00.000Z'), amount: new Prisma.Decimal(30000), correctedBy: { amount: new Prisma.Decimal(-30000), isVoid: false, deletedAt: null } },
+      ]);
+      await service.setRateOverride(TENANT_ID, RESERVATION_ID, dto, ACTOR_ID);
+      const { data } = tx.reservation.update.mock.calls[0][0] as { data: { confirmedRate: { toFixed: (n: number) => string }; nightlyRates: Array<{ date: string; rate: string }> } };
+      expect(data.nightlyRates.map((n) => n.rate)).toEqual(['30000.00', '0.00', '25000.00']);
+      expect(data.confirmedRate.toFixed(2)).toBe('55000.00');
     });
 
     it('allows a checked_in reservation too — a manager can override a live folio, not just pre-arrival', async () => {

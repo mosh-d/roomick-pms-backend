@@ -102,6 +102,22 @@ describe('reservation policies', () => {
     it('none is nothing', () => {
       expect(penaltyAmountFor(stay(), 'none', null)).toBeNull();
     });
+
+    it("first night is the arrival night's own price — not the stay's average", () => {
+      // 10–13 October at 20,000, 30,000 and 40,000: the average is 30,000; the first night 20,000.
+      const nightlyRates = [
+        { date: '2026-10-10', rate: '20000.00' },
+        { date: '2026-10-11', rate: '30000.00' },
+        { date: '2026-10-12', rate: '40000.00' },
+      ];
+      expect(penaltyAmountFor({ ...stay(), nightlyRates }, 'first_night', null)?.toFixed(2)).toBe('20000.00');
+    });
+
+    it('first night: a pinned rate wins; a stay with no nights kept splits its total evenly', () => {
+      const nightlyRates = [{ date: '2026-10-10', rate: '20000.00' }];
+      expect(penaltyAmountFor({ ...stay({ overrideRate: new Prisma.Decimal('15000') }), nightlyRates }, 'first_night', null)?.toFixed(2)).toBe('15000.00');
+      expect(penaltyAmountFor(stay(), 'first_night', null)?.toFixed(2)).toBe('30000.00');
+    });
   });
 
   describe('describeCancellationPolicy', () => {

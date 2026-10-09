@@ -248,7 +248,7 @@ export class ExtendStayDto {
   checkOutDate!: string;
 }
 
-/** Pins an absolute nightly rate (§P0: "NOT a rate_plans row") — independent of `confirmedRate` (the stay TOTAL). `postRoomChargeForDate` already prefers `overrideRate` over `confirmedRate / nights`, so this only affects nights not yet posted. */
+/** Pins an absolute nightly rate (§P0: "NOT a rate_plans row") for every night not yet posted — `postRoomChargeForDate` prefers `overrideRate`. The stay TOTAL (`confirmedRate`) is re-stated to match: nights already billed at what they were billed at, the rest at this rate. */
 export class SetRateOverrideDto {
   @ApiProperty({ example: 25000, description: 'Absolute nightly rate — replaces confirmedRate/nights for every night not yet posted' })
   @Type(() => Number)

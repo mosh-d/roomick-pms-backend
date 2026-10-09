@@ -998,7 +998,9 @@ export class ReservationsService {
       );
       // Task Board reflects a checked-out room automatically — nobody has
       // to remember to flag it. `triggeredByReservationId` is what makes
-      // this traceable back to the stay that caused it.
+      // this traceable back to the stay that caused it. Its waiting
+      // stay-over service is replaced by this clean, not left beside it.
+      await this.housekeepingService.supersedeStayoverTasksInTx(tx, tenantId, reservation.branchId, reservation.roomId, 'Guest checked out — the check-out clean replaces this', actorId);
       await this.housekeepingService.createTaskInTx(tx, tenantId, reservation.branchId, {
         roomId: reservation.roomId,
         triggerEvent: 'checkout',
@@ -1662,15 +1664,16 @@ export class ReservationsService {
       // A pinned nightly rate (a manager's override, a room move) is what the
       // extra nights are billed at, so it's what the stay total grows by —
       // re-pricing the whole stay would state a total the bill never shows.
-      const extraNights = Math.round((newCheckOutDate.getTime() - reservation.checkOutDate.getTime()) / 86_400_000);
-      const confirmedRate = reservation.overrideRate
-        ? new Prisma.Decimal(reservation.confirmedRate).plus(new Prisma.Decimal(reservation.overrideRate).mul(extraNights))
-        : resolved.subtotal;
+      // The night-by-night list says the same: billed nights as billed, the rest at the pinned rate.
+      const pinned = reservation.overrideRate
+        ? await this.pricedWithPinnedRate(tx, { ...reservation, checkOutDate: newCheckOutDate }, new Prisma.Decimal(reservation.overrideRate))
+        : null;
+      const confirmedRate = pinned ? pinned.confirmedRate : resolved.subtotal;
 
       const previousCheckOutDate = reservation.checkOutDate;
       const updated = await tx.reservation.update({
         where: { id: reservationId },
-        data: { checkOutDate: newCheckOutDate, confirmedRate, ratePlanId: resolved.ratePlanId, nightlyRates: nightlyRatesOf(resolved) },
+        data: { checkOutDate: newCheckOutDate, confirmedRate, ratePlanId: resolved.ratePlanId, nightlyRates: pinned ? pinned.nightlyRates : nightlyRatesOf(resolved) },
         include: RESERVATION_INCLUDE,
       });
 
@@ -1792,6 +1795,7 @@ export class ReservationsService {
 
       // The old room needs cleaning before anyone else sleeps in it — vacated dirty, on the Task Board, as at check-out.
       await this.roomsService.applyReservationOccupancy(tx, tenantId, fromRoomId, { occupancyStatus: 'vacant', cleanlinessStatus: 'dirty' }, actorId);
+      await this.housekeepingService.supersedeStayoverTasksInTx(tx, tenantId, reservation.branchId, fromRoomId, `Guest moved to room ${room.number} — the move's clean replaces this`, actorId);
       await this.housekeepingService.createTaskInTx(tx, tenantId, reservation.branchId, {
         roomId: fromRoomId,
         triggerEvent: 'room_move',
@@ -1902,19 +1906,61 @@ export class ReservationsService {
       }
 
       const previousOverrideRate = reservation.overrideRate ? reservation.overrideRate.toFixed(2) : null;
+      // The stay's total follows the rate: nights already on the bill at
+      // what they were posted at, every other night at the new one. It used
+      // to keep the old total, so the registration card, "Manage your
+      // booking" and a full-stay cancellation charge all priced the stay at
+      // a rate the bill no longer used.
+      const priced = await this.pricedWithPinnedRate(tx, reservation, new Prisma.Decimal(dto.overrideRate));
       const updated = await tx.reservation.update({
         where: { id: reservationId },
-        data: { overrideRate: dto.overrideRate, overrideReason: dto.reason },
+        data: { overrideRate: dto.overrideRate, overrideReason: dto.reason, confirmedRate: priced.confirmedRate, nightlyRates: priced.nightlyRates },
         include: RESERVATION_INCLUDE,
       });
 
       await this.audit(tx, tenantId, reservation.branchId, actorId, 'reservation.rate_overridden', reservationId, {
         previousOverrideRate,
         overrideRate: dto.overrideRate.toFixed(2),
+        previousConfirmedRate: reservation.confirmedRate.toFixed(2),
+        confirmedRate: priced.confirmedRate.toFixed(2),
         reason: dto.reason,
       });
       return updated;
     });
+  }
+
+  /**
+   * What a stay comes to once `nightly` is pinned for every night not yet on
+   * the bill: a night already posted at what it was posted at (net of any
+   * correction), every other night at the pinned rate. Returns the total and
+   * the night-by-night list the bill will follow.
+   */
+  private async pricedWithPinnedRate(tx: TenantTx, reservation: Reservation, nightly: Prisma.Decimal): Promise<{ confirmedRate: Prisma.Decimal; nightlyRates: Prisma.InputJsonValue }> {
+    const posted = await tx.lineItem.findMany({
+      where: {
+        chargeType: 'room',
+        isVoid: false,
+        deletedAt: null,
+        OR: [{ stayReservationId: reservation.id }, { stayReservationId: null, folio: { reservationId: reservation.id } }],
+      },
+      select: { serviceDate: true, amount: true, correctedBy: { select: { amount: true, isVoid: true, deletedAt: true } } },
+    });
+    const postedByNight = new Map<string, Prisma.Decimal>();
+    for (const line of posted) {
+      if (!line.serviceDate) continue;
+      const reversal = line.correctedBy && !line.correctedBy.isVoid && !line.correctedBy.deletedAt ? line.correctedBy.amount : new Prisma.Decimal(0);
+      const night = line.serviceDate.toISOString().slice(0, 10);
+      postedByNight.set(night, (postedByNight.get(night) ?? new Prisma.Decimal(0)).plus(line.amount).plus(reversal));
+    }
+    const nights: Array<{ date: string; rate: string }> = [];
+    let total = new Prisma.Decimal(0);
+    for (let night = new Date(reservation.checkInDate); night < reservation.checkOutDate; night = new Date(night.getTime() + 86_400_000)) {
+      const date = night.toISOString().slice(0, 10);
+      const rate = postedByNight.get(date) ?? nightly;
+      nights.push({ date, rate: rate.toFixed(2) });
+      total = total.plus(rate);
+    }
+    return { confirmedRate: total, nightlyRates: nights };
   }
 
   /**

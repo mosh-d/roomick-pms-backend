@@ -1,5 +1,6 @@
 import { PenaltyType, Prisma } from '@prisma/client';
 import { branchCutoffInstant, timeOfDay } from '../../common/utils/branch-date';
+import { nightlyRateFor } from './nightly-rates';
 
 /**
  * Reservation policies: the branch cancellation policy, and the penalty
@@ -62,19 +63,23 @@ export function resolveCancellationPolicy(stored: unknown): CancellationPolicy {
   };
 }
 
-type PricedStay = { confirmedRate: Prisma.Decimal; overrideRate: Prisma.Decimal | null; checkInDate: Date; checkOutDate: Date };
+type PricedStay = { confirmedRate: Prisma.Decimal; overrideRate: Prisma.Decimal | null; checkInDate: Date; checkOutDate: Date; nightlyRates?: Prisma.JsonValue | null };
 
 /**
  * Pre-tax penalty for a stay; `null` = nothing to charge. One function for
  * no-shows and late cancellations, so "first night" can't be priced two
  * different ways. Same derivation as the nightly room charge: `overrideRate`
- * is an absolute nightly rate, `confirmedRate` the stay total.
+ * is an absolute nightly rate, then the arrival night's own quoted price,
+ * and `confirmedRate` (the stay total) split evenly only for a stay booked
+ * before nights were kept — the split charged a Friday-and-Saturday stay's
+ * first night at the average of the two.
  */
 export function penaltyAmountFor(stay: PricedStay, penaltyType: PenaltyType, flatFeeAmount: number | null | undefined): Prisma.Decimal | null {
   const nights = Math.max(1, Math.round((stay.checkOutDate.getTime() - stay.checkInDate.getTime()) / 86_400_000));
   switch (penaltyType) {
     case 'first_night':
-      return stay.overrideRate ? new Prisma.Decimal(stay.overrideRate) : new Prisma.Decimal(stay.confirmedRate).div(nights).toDecimalPlaces(2);
+      if (stay.overrideRate) return new Prisma.Decimal(stay.overrideRate);
+      return nightlyRateFor({ nightlyRates: stay.nightlyRates ?? null }, stay.checkInDate) ?? new Prisma.Decimal(stay.confirmedRate).div(nights).toDecimalPlaces(2);
     case 'full_stay':
       return new Prisma.Decimal(stay.confirmedRate);
     case 'flat_fee':

@@ -3,6 +3,7 @@ import { AdjustmentType, ChargeType, Folio, FolioTransfer, LineItem, Payment, Pr
 import { ErrorCode } from '../../common/errors/error-codes';
 import { todayInTimezone, toBranchDate } from '../../common/utils/branch-date';
 import { PrismaService, TenantTx } from '../../prisma/prisma.service';
+import { nightlyRateFor } from '../reservations/nightly-rates';
 import { PropertyService } from '../property/property.service';
 import { WebhookEventsService } from '../integrations/webhook-events.service';
 import { describeRule, PricedCharge, TaxesService } from '../taxes/taxes.service';
@@ -69,21 +70,6 @@ export type FolioListFilter = 'all' | 'outstanding' | 'overdue' | 'in_house' | '
 /** The `all` list is paged; the others are already narrowed to open bills. */
 export const FOLIO_LIST_LIMIT = 200;
 export const FOLIO_LIST_MAX = 500;
-
-/**
- * The night's own price, as the resolver quoted it when the stay was booked
- * or last re-priced (`Reservation.nightlyRates`). Null for a stay from
- * before nights were kept — billed as the stay total split evenly, as before.
- */
-function nightlyRateFor(reservation: Pick<Reservation, 'nightlyRates'>, serviceDate: Date): Prisma.Decimal | null {
-  const nights = reservation.nightlyRates;
-  if (!Array.isArray(nights)) return null;
-  const day = serviceDate.toISOString().slice(0, 10);
-  const night = nights.find((n): n is { date: string; rate: string | number } => typeof n === 'object' && n !== null && (n as { date?: unknown }).date === day);
-  if (!night || (typeof night.rate !== 'string' && typeof night.rate !== 'number')) return null;
-  const rate = new Prisma.Decimal(night.rate);
-  return rate.isFinite() ? rate : null;
-}
 
 @Injectable()
 export class FoliosService {
@@ -491,7 +477,17 @@ export class FoliosService {
     }
     const folio = await this.findFolioOrThrow(tx, original.folioId);
     this.assertFolioOpen(folio);
-    return this.reverseLineItem(tx, tenantId, original, folio, reason, actorId);
+    const correction = await this.reverseLineItem(tx, tenantId, original, folio, reason, actorId);
+    // A charge rung up at an outlet is that outlet's sale too. Taken back
+    // here, the outlet's own list still showed the sale as standing; now it
+    // shows it voided, as voiding it at the outlet would. (Voiding at the
+    // outlet claims the order first and then comes through here — the
+    // update below then finds nothing left to do.)
+    await tx.posOrder.updateMany({
+      where: { lineItemId: original.id, voidedAt: null },
+      data: { voidedAt: new Date(), voidedBy: actorId, voidReason: `Taken off the guest's bill: ${reason}`.slice(0, 500) },
+    });
+    return correction;
   }
 
   /**
