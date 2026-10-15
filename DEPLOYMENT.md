@@ -1,6 +1,6 @@
 # Deploying Roomick
 
-Backend → Render (Docker + managed Postgres). Frontend → Vercel.
+Backend → Render (Docker + managed Postgres). Frontend → Cloudflare Workers (OpenNext).
 
 Nothing here has been run against a real Render account yet. What **has** been
 verified locally: the exact build commands the Dockerfile uses, that the
@@ -28,7 +28,7 @@ node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"
 # ENCRYPTION_KEY — EXACTLY 64 hex chars (32 bytes). Nothing else is accepted.
 node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 
-# WEB_PROXY_SECRET — the SAME value on Render and on Vercel (min 32 chars)
+# WEB_PROXY_SECRET — the SAME value on Render and on Cloudflare (min 32 chars)
 node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 ```
 
@@ -70,17 +70,17 @@ its connection string.
 | `JWT_ACCESS_SECRET` | generated above |
 | `JWT_REFRESH_SECRET` | generated above |
 | `ENCRYPTION_KEY` | generated above (64 hex chars) |
-| `CORS_ORIGINS` | the Vercel URL, e.g. `https://roomick.vercel.app` |
+| `CORS_ORIGINS` | the web app's address, e.g. `https://app.yourdomain` (its custom domain on Cloudflare, §3) |
 | `DOCUMENT_STORAGE_DIR` | `/var/roomick/documents` |
 | `BACKUP_STORAGE_DIR` | `/var/roomick/backups` |
 | `SENTRY_DSN` | optional; error tracking stays off entirely while unset |
 | `PUBLIC_API_BASE_URL` | this API's public address, e.g. `https://api.yourdomain` — the open pixel, links and unsubscribe link in a marketing email point here (without it they point at localhost) |
-| `PUBLIC_WEB_BASE_URL` | the web app's public address — the Vercel URL, e.g. `https://roomick.vercel.app` (it's `https://<project name>.vercel.app`, so it's known before the frontend is deployed). Staff invitations, password-reset links, email confirmation at sign-up and a guest's "Manage your booking" link all point here. **Required** — the API refuses to start in production without it |
+| `PUBLIC_WEB_BASE_URL` | the web app's public address, e.g. `https://app.yourdomain` (chosen before the frontend is deployed, so it can be set now). Staff invitations, password-reset links, email confirmation at sign-up and a guest's "Manage your booking" link all point here. **Required** — the API refuses to start in production without it |
 | `SMTP_HOST` | your email provider's SMTP server, e.g. `smtp.resend.com`. While unset, no email is sent — every message is only written to the log |
 | `SMTP_PORT` | `587` (STARTTLS, the default) or `465` (TLS from the start) |
 | `SMTP_USER` / `SMTP_PASS` | the SMTP username and password (for Resend: `resend` and an API key) |
 | `MAIL_FROM` | the sender guests see, e.g. `Lekki Suites <bookings@yourdomain>` — required with `SMTP_HOST`, and the domain must be verified with the provider (SPF, DKIM, DMARC) |
-| `WEB_PROXY_SECRET` | generated above — the **same** value as on Vercel. Sign-ins, renewals and sign-outs reach the API through the web app's own address (the session cookie is the web app's), and this value is how the API knows the web app is telling the truth about which visitor each request is from. Without it, everyone signing in through the web app shares one rate limit |
+| `WEB_PROXY_SECRET` | generated above — the **same** value as the web app's secret on Cloudflare. Sign-ins, renewals and sign-outs reach the API through the web app's own address (the session cookie is the web app's), and this value is how the API knows the web app is telling the truth about which visitor each request is from. Without it, everyone signing in through the web app shares one rate limit |
 | `STORAGE_S3_ENDPOINT` / `STORAGE_S3_REGION` / `STORAGE_S3_BUCKET` / `STORAGE_S3_ACCESS_KEY_ID` / `STORAGE_S3_SECRET_ACCESS_KEY` | optional — an S3-compatible bucket (see §5). Room photo uploads need it; with it, documents and backups go to the bucket instead of the disk |
 
 Do **not** set `PORT` — Render injects it, and `main.ts` reads it and binds
@@ -110,25 +110,33 @@ fine at this size, and it's also the signal for when to move to object storage.
 
 ---
 
-## 3. Frontend on Vercel
+## 3. Frontend on Cloudflare Workers
 
-Import `roomick-pms-frontend`. Next.js is detected automatically; no
-`vercel.json` is needed.
+The web app is built by OpenNext (`@opennextjs/cloudflare`) into a Worker;
+`wrangler.jsonc` and `open-next.config.ts` in `roomick-pms-frontend` describe it.
+It needs the **Workers Paid** plan: the free plan allows 10 ms of CPU a
+request, too little to render a page.
 
-| Key | Value |
-|---|---|
-| `NEXT_PUBLIC_API_URL` | `https://<your-render-service>.onrender.com/api/v1` |
-| `WEB_PROXY_SECRET` | the **same** value as on Render |
-| `NEXT_PUBLIC_SENTRY_DSN` / `SENTRY_DSN` | optional — the web app's Sentry project (browser / server) |
-| `NEXT_PUBLIC_LANDING_URL` | optional — where "Back to the website" on the sign-up page goes |
+Workers & Pages → Create application → Import a repository →
+`roomick-pms-frontend`. Project name `roomick-web` (it must match `name` in
+`wrangler.jsonc`), build command `npx opennextjs-cloudflare build`, deploy
+command `npx wrangler deploy`.
 
-`NEXT_PUBLIC_*` values are built into the app — change one and redeploy.
+| Key | Where | Value |
+|---|---|---|
+| `NEXT_PUBLIC_API_URL` | Settings → Build → Build variables | `https://<your-render-service>.onrender.com/api/v1`, later `https://api.yourdomain/api/v1` |
+| `WEB_PROXY_SECRET` | Settings → Variables and Secrets (Secret) | the **same** value as on Render |
+| `NEXT_PUBLIC_SENTRY_DSN` / `SENTRY_DSN` | build variables (and `SENTRY_DSN` as a Secret too) | optional — the web app's Sentry project (browser / server) |
+| `NEXT_PUBLIC_LANDING_URL` | build variable | optional — where "Back to the website" on the sign-up page goes |
+
+`NEXT_PUBLIC_*` values are built into the app — change one and build again.
 
 The `/api/v1` suffix matters — `main.ts` sets a global `api` prefix plus URI
 versioning, so every route lives under it.
 
-Once the Vercel domain exists, go back and set `CORS_ORIGINS` and
-`PUBLIC_WEB_BASE_URL` on Render to it.
+Give the Worker its address under Settings → Domains & Routes → Add → Custom
+Domain (`app.yourdomain`); Cloudflare makes the DNS record and certificate.
+`CORS_ORIGINS` and `PUBLIC_WEB_BASE_URL` on Render must be that address.
 Skipping that produces a frontend that loads fine and fails every request with
 an opaque CORS error in the console.
 
