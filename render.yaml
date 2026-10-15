@@ -10,7 +10,10 @@ databases:
   - name: roomick-postgres
     databaseName: roomick
     user: roomick
-    plan: starter # `free` expires after 90 days; starter is the smallest durable tier
+    # `free` expires after 90 days. The legacy `starter` type can't be chosen for
+    # a new database any more; this is the smallest current paid plan (Basic
+    # tier, 15 GB disk by default).
+    plan: 0.1c-256mb
     # Render's nearest region to West Africa. The database and the API must
     # share a region — change both together, and only before the first deploy.
     region: frankfurt
