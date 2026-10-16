@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
-import { RatePlan } from '@prisma/client';
+import { RatePlan } from '../../generated/prisma/client';
 import { ErrorCode } from '../../common/errors/error-codes';
 import { PrismaService } from '../../prisma/prisma.service';
 import { RateResolverService } from '../rate-resolver/rate-resolver.service';

@@ -1,4 +1,4 @@
-import { PenaltyType, Prisma } from '@prisma/client';
+import { PenaltyType, Prisma } from '../../generated/prisma/client';
 import { branchCutoffInstant, timeOfDay } from '../../common/utils/branch-date';
 import { nightlyRateFor } from './nightly-rates';
 

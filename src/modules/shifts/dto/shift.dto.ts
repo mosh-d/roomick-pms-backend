@@ -1,7 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import { IsArray, IsIn, IsInt, IsNumber, IsOptional, IsPositive, IsString, Max, MaxLength, Min, MinLength, ValidateNested } from 'class-validator';
-import { IssuePriority, IssueStatus, ShiftType } from '@prisma/client';
+import { IssuePriority, IssueStatus, ShiftType } from '../../../generated/prisma/client';
 
 export class CashDenominationDto {
   @ApiProperty({ example: 1000, description: 'Note/coin face value, in the branch currency’s smallest-to-largest denominations' })

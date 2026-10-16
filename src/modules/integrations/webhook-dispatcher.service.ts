@@ -1,6 +1,6 @@
 import { ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { Cron, CronExpression, Interval } from '@nestjs/schedule';
-import { Prisma, WebhookDeliveryStatus } from '@prisma/client';
+import { Prisma, WebhookDeliveryStatus } from '../../generated/prisma/client';
 import { randomUUID } from 'node:crypto';
 import { EncryptionService } from '../../common/crypto/encryption.service';
 import { ErrorCode } from '../../common/errors/error-codes';

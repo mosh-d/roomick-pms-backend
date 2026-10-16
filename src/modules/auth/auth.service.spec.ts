@@ -2,7 +2,7 @@ import { BadRequestException, ConflictException, ForbiddenException, Unauthorize
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { Test } from '@nestjs/testing';
-import { Prisma } from '@prisma/client';
+import { Prisma } from '../../generated/prisma/client';
 import * as bcrypt from 'bcrypt';
 import { AccountMailService } from '../../common/mail/account-mail.service';
 import { PermissionsService } from '../../common/permissions/permissions.service';

@@ -4,7 +4,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { Brand, Branch, Building, Floor, OverbookingConfig, Prisma } from '@prisma/client';
+import { Brand, Branch, Building, Floor, OverbookingConfig, Prisma } from '../../generated/prisma/client';
 import { ErrorCode } from '../../common/errors/error-codes';
 import { PrismaService, TenantTx } from '../../prisma/prisma.service';
 import { CreateBrandDto, UpdateBrandDto } from './dto/brand.dto';

@@ -1,4 +1,4 @@
-import { Prisma, Reservation } from '@prisma/client';
+import { Prisma, Reservation } from '../../generated/prisma/client';
 
 /**
  * The night's own price, as the resolver quoted it when the stay was booked

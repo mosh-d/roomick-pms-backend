@@ -1,4 +1,4 @@
-import { Prisma } from '@prisma/client';
+import { DATAMODEL_MODELS } from '../../generated/datamodel';
 
 /**
  * Every table that belongs to a tenant, read off the Prisma schema itself so
@@ -28,7 +28,7 @@ export interface TenantModelMeta extends TenantModel {
 }
 
 export function tenantScopedModels(): TenantModel[] {
-  return Prisma.dmmf.datamodel.models
+  return DATAMODEL_MODELS
     .filter((m) => m.fields.some((f) => f.name === 'tenantId') && !NOT_TENANT_DATA.has(m.name))
     .map((m) => ({ modelName: m.name, accessor: m.name.charAt(0).toLowerCase() + m.name.slice(1) }));
 }
@@ -52,7 +52,7 @@ export function tenantModelInsertOrder(): TenantModelMeta[] {
   const scopedNames = new Set(scoped.map((m) => m.modelName));
   const optionalField = new Map<string, boolean>();
   const metas: TenantModelMeta[] = scoped.map(({ modelName, accessor }) => {
-    const model = Prisma.dmmf.datamodel.models.find((m) => m.name === modelName)!;
+    const model = DATAMODEL_MODELS.find((m) => m.name === modelName)!;
     const idField = model.fields.find((f) => f.isId)!;
     for (const f of model.fields) optionalField.set(`${modelName}.${f.name}`, !f.isRequired);
     const relations = model.fields

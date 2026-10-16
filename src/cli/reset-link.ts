@@ -1,7 +1,8 @@
 import 'dotenv/config';
-import { PrismaClient } from '@prisma/client';
+import { PrismaClient } from '../generated/prisma/client';
 import { createHash, randomBytes } from 'node:crypto';
 import { webUrl } from '../common/utils/web-url';
+import { databaseAdapter } from '../prisma/database-adapter';
 
 /**
  * Break-glass: a one-use, 24-hour password-reset link for an account, made
@@ -30,7 +31,7 @@ async function main(): Promise<void> {
     process.exit(2);
   }
 
-  const prisma = new PrismaClient();
+  const prisma = new PrismaClient({ adapter: databaseAdapter() });
   try {
     const indexRow = await prisma.userEmailIndex.findUnique({ where: { email } });
     if (!indexRow) {

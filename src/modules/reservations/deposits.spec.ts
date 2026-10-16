@@ -1,4 +1,4 @@
-import { Prisma } from '@prisma/client';
+import { Prisma } from '../../generated/prisma/client';
 import { depositFor, describeDeposit, resolveDepositPolicy } from './deposits';
 
 const D = (value: string | number) => new Prisma.Decimal(value);

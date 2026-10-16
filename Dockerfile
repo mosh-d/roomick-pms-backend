@@ -2,10 +2,9 @@
 # the compiled output — no source, no dev toolchain, no test files.
 #
 # node:22 because package.json declares `"engines": { "node": ">=22" }`.
-# Alpine keeps the runtime image small; `openssl` is installed explicitly
-# because Prisma's query engine links against it and Alpine doesn't ship it by
-# default (a Prisma-on-Alpine gotcha that surfaces as a cryptic engine load
-# error at boot, not at build time).
+# Alpine keeps the runtime image small. `openssl` was for Prisma 6's query
+# engine; Prisma 7 has none (the app talks to Postgres through the `pg`
+# driver), but the CLI still looks for it when it runs migrations.
 
 # --- deps -------------------------------------------------------------------
 FROM node:22-alpine AS deps
@@ -25,8 +24,9 @@ RUN apk add --no-cache openssl
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
-# Generate the Prisma client against the schema before compiling — the
-# TypeScript build imports types from it.
+# Generate the Prisma client (src/generated) against the schema before
+# compiling — the build compiles it with the app. `npm ci` above already ran it
+# (postinstall); this makes sure it matches the schema copied in.
 RUN npx prisma generate
 RUN npm run build
 # Drop dev dependencies from this layer's node_modules so the runtime stage can

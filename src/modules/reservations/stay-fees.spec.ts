@@ -1,4 +1,4 @@
-import { Prisma } from '@prisma/client';
+import { Prisma } from '../../generated/prisma/client';
 import { resolveStayFeePolicy, stayFeesFor } from './stay-fees';
 
 const D = (value: string | number) => new Prisma.Decimal(value);

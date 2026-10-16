@@ -1,4 +1,4 @@
-import { RegistrationCard } from '@prisma/client';
+import { RegistrationCard } from '../../generated/prisma/client';
 import { renderPdf } from '../../common/pdf/pdf.util';
 
 /** The exact shape `RegistrationCardsService.generateCardInTx` writes into `RegistrationCard.fields` — this is the only place that snapshot is read back out. */

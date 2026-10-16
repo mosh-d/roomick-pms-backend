@@ -1,4 +1,4 @@
-import { Prisma } from '@prisma/client';
+import { Prisma } from '../../generated/prisma/client';
 
 /** Who gets the evening turndown: every occupied room, or only VIP guests' rooms. */
 export const TURNDOWN_SCOPES = ['all', 'vip'] as const;

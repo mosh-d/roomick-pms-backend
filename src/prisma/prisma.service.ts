@@ -1,5 +1,6 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
-import { Prisma, PrismaClient } from '@prisma/client';
+import { Prisma, PrismaClient } from '../generated/prisma/client';
+import { databaseAdapter } from './database-adapter';
 
 /**
  * Prisma transaction client scoped to a tenant (RLS context applied).
@@ -9,6 +10,10 @@ export type TenantTx = Prisma.TransactionClient;
 @Injectable()
 export class PrismaService extends PrismaClient implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(PrismaService.name);
+
+  constructor() {
+    super({ adapter: databaseAdapter() });
+  }
 
   async onModuleInit(): Promise<void> {
     try {

@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { GdprType } from '@prisma/client';
+import { GdprType } from '../../../generated/prisma/client';
 import { IsIn, IsInt, IsOptional, IsString, IsUUID, Max, MaxLength, Min, ValidateIf } from 'class-validator';
 
 export class CreateGdprRequestDto {

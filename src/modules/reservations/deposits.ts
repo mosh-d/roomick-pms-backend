@@ -1,4 +1,4 @@
-import { Prisma } from '@prisma/client';
+import { Prisma } from '../../generated/prisma/client';
 
 /**
  * Deposits: what a booking is asked to pay ahead, from the branch's deposit

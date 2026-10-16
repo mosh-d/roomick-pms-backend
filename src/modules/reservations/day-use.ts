@@ -1,4 +1,4 @@
-import { Prisma } from '@prisma/client';
+import { Prisma } from '../../generated/prisma/client';
 
 /** A branch's day-use hours, `HH:mm` in its own timezone. */
 export interface DayUseHours {

@@ -1,7 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import { IsIn, IsInt, IsOptional, IsString, IsUUID, Max, MaxLength, Min } from 'class-validator';
-import { HousekeepingStatus } from '@prisma/client';
+import { HousekeepingStatus } from '../../../generated/prisma/client';
 import { IsDateOnly } from '../../../common/validation/is-date-only.decorator';
 
 export class CreateTaskDto {

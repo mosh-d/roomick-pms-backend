@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
-import { EventBooking, EventSpace, Prisma } from '@prisma/client';
+import { EventBooking, EventSpace, Prisma } from '../../generated/prisma/client';
 import { SystemRole } from '../../common/decorators/roles.decorator';
 import { ErrorCode } from '../../common/errors/error-codes';
 import { JwtPayload } from '../../common/types/request-context';

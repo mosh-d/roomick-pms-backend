@@ -1,4 +1,4 @@
-import { Prisma } from '@prisma/client';
+import { Prisma } from '../../generated/prisma/client';
 import { LedgerRow, SUGGESTED_TIERS, lapsedPoints, nextTierFor, pointsExpireAt, pointsForSpend, redemptionValue, tierFor } from './loyalty-rules';
 
 describe('loyalty rules', () => {

@@ -1,5 +1,5 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
-import { CommsChannel, CommsDirection, CommunicationLog } from '@prisma/client';
+import { CommsChannel, CommsDirection, CommunicationLog } from '../../generated/prisma/client';
 import { ErrorCode } from '../../common/errors/error-codes';
 import { PrismaService, TenantTx } from '../../prisma/prisma.service';
 import { InboxReplyDto, SendCommunicationDto } from './dto/comms-log.dto';

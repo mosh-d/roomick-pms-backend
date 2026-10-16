@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { Prisma } from '../../generated/prisma/client';
 import { hasPassedBranchCutoff, timeOfDay, toBranchDate, todayInTimezone } from '../../common/utils/branch-date';
 import { PrismaService } from '../../prisma/prisma.service';
 import { PropertyService } from '../property/property.service';

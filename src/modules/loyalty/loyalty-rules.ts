@@ -1,4 +1,4 @@
-import { Prisma } from '@prisma/client';
+import { Prisma } from '../../generated/prisma/client';
 
 /** What a tier can promise. Shown on the guest's profile for staff to honour — the system doesn't apply them itself. */
 export const LOYALTY_BENEFITS = ['late_checkout', 'early_checkin', 'room_upgrade', 'welcome_drink', 'free_breakfast', 'lounge_access'] as const;

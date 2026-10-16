@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable, Logger, NotFoundException, OnApplicationBootstrap, OnModuleDestroy } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { Prisma } from '../../generated/prisma/client';
 import { randomBytes } from 'node:crypto';
 import { hashApiKey } from '../../common/auth/api-key-auth.service';
 import { EncryptionService } from '../../common/crypto/encryption.service';

@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
-import { AdjustmentType, ChargeType, Folio, FolioTransfer, LineItem, Payment, Prisma, Reservation } from '@prisma/client';
+import { AdjustmentType, ChargeType, Folio, FolioTransfer, LineItem, Payment, Prisma, Reservation } from '../../generated/prisma/client';
 import { ErrorCode } from '../../common/errors/error-codes';
 import { todayInTimezone, toBranchDate } from '../../common/utils/branch-date';
 import { PrismaService, TenantTx } from '../../prisma/prisma.service';

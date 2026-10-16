@@ -1,6 +1,6 @@
 import { BadRequestException, ConflictException, ForbiddenException } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
-import { Prisma } from '@prisma/client';
+import { Prisma } from '../../generated/prisma/client';
 import { MAIL_TRANSPORT } from '../../common/mail/mail-transport.interface';
 import { JwtPayload } from '../../common/types/request-context';
 import { PrismaService } from '../../prisma/prisma.service';

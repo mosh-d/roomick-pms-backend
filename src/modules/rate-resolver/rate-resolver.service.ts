@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
-import { Prisma, RatePlan, RateType, RoomType } from '@prisma/client';
+import { Prisma, RatePlan, RateType, RoomType } from '../../generated/prisma/client';
 import { ErrorCode } from '../../common/errors/error-codes';
 import { JwtPayload } from '../../common/types/request-context';
 import { assertRoleAtBranch } from '../../common/utils/branch-roles';

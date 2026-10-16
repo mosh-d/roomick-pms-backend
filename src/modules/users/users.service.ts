@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
-import { Branch, UserOutlet } from '@prisma/client';
+import { Branch, UserOutlet } from '../../generated/prisma/client';
 import { AccountStatusService } from '../../common/auth/account-status.service';
 import { ErrorCode } from '../../common/errors/error-codes';
 import { AccountMailService } from '../../common/mail/account-mail.service';

@@ -1,5 +1,5 @@
 import { ArgumentsHost } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { Prisma } from '../../generated/prisma/client';
 import { ProblemJsonExceptionFilter } from './problem-json.filter';
 
 /** What the filter would send for this exception. */

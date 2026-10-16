@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
-import { ChargeType, OutletCategory, Prisma } from '@prisma/client';
+import { ChargeType, OutletCategory, Prisma } from '../../generated/prisma/client';
 import { ErrorCode } from '../../common/errors/error-codes';
 
 /**

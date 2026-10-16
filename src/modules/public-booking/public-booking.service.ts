@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
-import { CommunicationLog, Prisma, Reservation } from '@prisma/client';
+import { CommunicationLog, Prisma, Reservation } from '../../generated/prisma/client';
 import { ErrorCode } from '../../common/errors/error-codes';
 import { todayInTimezone, toBranchDate } from '../../common/utils/branch-date';
 import { PackagesQuote, PackagesService, PackageView } from '../rate-resolver/packages.service';

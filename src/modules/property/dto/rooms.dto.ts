@@ -16,7 +16,7 @@ import {
   ValidateNested,
 } from 'class-validator';
 import { IsDateOnly } from '../../../common/validation/is-date-only.decorator';
-import { BlockReason, CleanlinessStatus, HeldStatus, OccupancyStatus } from '@prisma/client';
+import { BlockReason, CleanlinessStatus, HeldStatus, OccupancyStatus } from '../../../generated/prisma/client';
 
 export class RoomRangeDto {
   @ApiProperty({ example: 301 })

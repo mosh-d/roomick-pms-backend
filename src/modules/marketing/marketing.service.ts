@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { CampaignStatus, GuestSegment, MessageTemplate, Prisma } from '@prisma/client';
+import { CampaignStatus, GuestSegment, MessageTemplate, Prisma } from '../../generated/prisma/client';
 import { randomBytes, createHmac } from 'crypto';
 import { SystemRole } from '../../common/decorators/roles.decorator';
 import { ErrorCode } from '../../common/errors/error-codes';

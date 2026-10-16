@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
-import { Branch, NoShowRecord, PenaltyType, Prisma, Reservation, Room, RoomType } from '@prisma/client';
+import { Branch, NoShowRecord, PenaltyType, Prisma, Reservation, Room, RoomType } from '../../generated/prisma/client';
 import { ErrorCode } from '../../common/errors/error-codes';
 import { JwtPayload } from '../../common/types/request-context';
 import { isSupervisorAt } from '../../common/utils/branch-roles';

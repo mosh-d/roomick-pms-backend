@@ -20,7 +20,7 @@ import {
   ValidateNested,
 } from 'class-validator';
 import { IsDateOnly } from '../../../common/validation/is-date-only.decorator';
-import { ReservationChannel, ReservationStatus } from '@prisma/client';
+import { ReservationChannel, ReservationStatus } from '../../../generated/prisma/client';
 import { CreateGuestDto, RecordIdDocumentDto } from '../../guests/dto/guest.dto';
 
 /**

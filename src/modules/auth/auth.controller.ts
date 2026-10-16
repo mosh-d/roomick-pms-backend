@@ -18,7 +18,7 @@ import {
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
-import { Role } from '@prisma/client';
+import { Role } from '../../generated/prisma/client';
 import type { Request, Response } from 'express';
 import { CurrentTenant, CurrentUser, Public } from '../../common/decorators';
 import { Roles, SystemRole } from '../../common/decorators/roles.decorator';

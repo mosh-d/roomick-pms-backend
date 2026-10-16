@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
-import { AdjustmentType, ChargeType, Prisma, TaxRule } from '@prisma/client';
+import { AdjustmentType, ChargeType, Prisma, TaxRule } from '../../generated/prisma/client';
 import { SystemRole } from '../../common/decorators/roles.decorator';
 import { ErrorCode } from '../../common/errors/error-codes';
 import { JwtPayload } from '../../common/types/request-context';

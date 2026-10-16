@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
-import { CorporateAccount, Prisma } from '@prisma/client';
+import { CorporateAccount, Prisma } from '../../generated/prisma/client';
 import { ErrorCode } from '../../common/errors/error-codes';
 import { PrismaService, TenantTx } from '../../prisma/prisma.service';
 import { CreateCorporateAccountDto, ListCorporateAccountsQueryDto, UpdateCorporateAccountDto } from './dto/corporate-account.dto';

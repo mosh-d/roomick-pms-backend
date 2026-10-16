@@ -1,5 +1,5 @@
 import { NotFoundException } from '@nestjs/common';
-import { GuestProfile, LoyaltyTxType, Prisma } from '@prisma/client';
+import { GuestProfile, LoyaltyTxType, Prisma } from '../../generated/prisma/client';
 import { ErrorCode } from '../../common/errors/error-codes';
 import { TenantTx } from '../../prisma/prisma.service';
 import { LoyaltyTier, parseTiers, tierFor } from './loyalty-rules';

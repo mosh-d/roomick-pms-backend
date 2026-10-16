@@ -1,4 +1,4 @@
-import { ChargeType, Prisma } from '@prisma/client';
+import { ChargeType, Prisma } from '../../generated/prisma/client';
 
 /**
  * Packages sold with a stay — breakfast, an airport transfer — and how they

@@ -10,14 +10,27 @@
 // - RLS is applied in a hand-written migration (see prisma/migrations/*_rls); Prisma does
 //   not model policies.
 
+// The client is generated into src/generated/prisma (not committed — `npm ci`
+// and the Docker build run `prisma generate`), as CommonJS for Nest's build.
 generator client {
-  provider        = "prisma-client-js"
+  provider        = "prisma-client"
+  output          = "../src/generated/prisma"
+  moduleFormat    = "cjs"
+  runtime         = "nodejs"
   previewFeatures = ["postgresqlExtensions"]
 }
 
+// The models' shape for backups and organisation deletion (Prisma 6's
+// `Prisma.dmmf`, which Prisma 7's client no longer carries).
+generator datamodel {
+  provider = "node prisma/datamodel-generator.js"
+  output   = "../src/generated/datamodel.ts"
+}
+
+// The connection string is in prisma.config.ts; the app connects through the
+// pg driver adapter (src/prisma/prisma.service.ts).
 datasource db {
   provider   = "postgresql"
-  url        = env("DATABASE_URL")
   // pg_trgm: the trigram index that makes "part of a phone number" lookups index-backed.
   extensions = [pg_trgm]
 }

@@ -1,4 +1,4 @@
-import { Prisma } from '@prisma/client';
+import { Prisma } from '../../generated/prisma/client';
 import { TenantTx } from '../../prisma/prisma.service';
 import { WebhookDispatcherService } from './webhook-dispatcher.service';
 import { WebhookEventsService } from './webhook-events.service';

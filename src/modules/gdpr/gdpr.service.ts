@@ -2,7 +2,7 @@ import { BadRequestException, ConflictException, Inject, Injectable, Logger, Not
 import { DOCUMENT_STORAGE_ADAPTER, DocumentStorageAdapter } from '../../common/documents/document-storage.interface';
 import { EncryptionService } from '../../common/crypto/encryption.service';
 import { ErrorCode } from '../../common/errors/error-codes';
-import { Prisma } from '@prisma/client';
+import { Prisma } from '../../generated/prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { GuestsService } from '../guests/guests.service';
 import { CreateGdprRequestDto, UpdateGdprRequestStatusDto } from './dto/gdpr.dto';

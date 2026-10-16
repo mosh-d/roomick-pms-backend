@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
-import { GuestProfile, LoyaltyProgram, LoyaltyTxType, Prisma, Reservation } from '@prisma/client';
+import { GuestProfile, LoyaltyProgram, LoyaltyTxType, Prisma, Reservation } from '../../generated/prisma/client';
 import { SystemRole } from '../../common/decorators/roles.decorator';
 import { ErrorCode } from '../../common/errors/error-codes';
 import { JwtPayload } from '../../common/types/request-context';

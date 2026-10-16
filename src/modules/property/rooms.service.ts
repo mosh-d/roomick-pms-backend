@@ -7,7 +7,7 @@ import {
   NotFoundException,
   ServiceUnavailableException,
 } from '@nestjs/common';
-import { CleanlinessStatus, OccupancyStatus, Prisma, Room, RoomBlock, RoomType } from '@prisma/client';
+import { CleanlinessStatus, OccupancyStatus, Prisma, Room, RoomBlock, RoomType } from '../../generated/prisma/client';
 import { ErrorCode } from '../../common/errors/error-codes';
 import { todayInTimezone, toBranchDate } from '../../common/utils/branch-date';
 import { JwtPayload } from '../../common/types/request-context';

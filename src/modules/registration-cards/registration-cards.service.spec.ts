@@ -2,7 +2,7 @@ process.env.ENCRYPTION_KEY = 'c'.repeat(64);
 
 import { ConflictException, NotFoundException } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
-import { Prisma } from '@prisma/client';
+import { Prisma } from '../../generated/prisma/client';
 import { EncryptionService } from '../../common/crypto/encryption.service';
 import { DOCUMENT_STORAGE_ADAPTER } from '../../common/documents/document-storage.interface';
 import { PrismaService } from '../../prisma/prisma.service';

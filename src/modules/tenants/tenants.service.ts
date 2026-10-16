@@ -1,7 +1,7 @@
 import { ConflictException, Injectable, Logger, UnauthorizedException } from '@nestjs/common';
 import * as bcrypt from 'bcrypt';
 import { Cron, CronExpression } from '@nestjs/schedule';
-import { Brand, Tenant } from '@prisma/client';
+import { Brand, Tenant } from '../../generated/prisma/client';
 import { AccountStatusService } from '../../common/auth/account-status.service';
 import { ErrorCode } from '../../common/errors/error-codes';
 import { MfaService } from '../auth/mfa.service';

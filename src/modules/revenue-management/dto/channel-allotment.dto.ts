@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { ReservationChannel } from '@prisma/client';
+import { ReservationChannel } from '../../../generated/prisma/client';
 import { Type } from 'class-transformer';
 import { IsIn, IsInt, IsOptional, IsUUID, Max, Min } from 'class-validator';
 import { IsDateOnly } from '../../../common/validation/is-date-only.decorator';

@@ -1,7 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import { ArrayUnique, IsBoolean, IsIn, IsNumber, IsOptional, IsString, Max, MaxLength, Min, MinLength } from 'class-validator';
-import { ChargeType } from '@prisma/client';
+import { ChargeType } from '../../../generated/prisma/client';
 
 export const TAX_RULE_TYPES = ['percentage', 'fixed'] as const;
 export type TaxRuleType = (typeof TAX_RULE_TYPES)[number];

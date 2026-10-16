@@ -2,7 +2,7 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import { ArrayMinSize, IsArray, IsBoolean, IsIn, IsISO4217CurrencyCode, IsNumber, IsOptional, IsPositive, IsString, IsUUID, Max, MaxLength, MinLength, ValidateIf } from 'class-validator';
 import { IsDateOnly } from '../../../common/validation/is-date-only.decorator';
-import { ChargeType, PaymentMethod, PaymentPurpose } from '@prisma/client';
+import { ChargeType, PaymentMethod, PaymentPurpose } from '../../../generated/prisma/client';
 
 /** `tax` and `correction` are excluded: tax rows are written by the engine, corrections by `POST /line-items/:id/correct`. Neither is a thing a human posts directly. */
 const MANUALLY_POSTABLE_CHARGE_TYPES: ChargeType[] = ['room', 'fnb', 'spa', 'laundry', 'minibar', 'transport', 'penalty', 'misc'];

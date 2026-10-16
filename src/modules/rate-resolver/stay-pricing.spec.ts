@@ -1,4 +1,4 @@
-import { Prisma } from '@prisma/client';
+import { Prisma } from '../../generated/prisma/client';
 import { dayUseHoursFor } from '../reservations/day-use';
 import { chargePerPosting, packageTotal, parsePackageSnapshots, PackageSnapshot, postingsFor } from './package-pricing';
 import { occupancySurcharge } from './rate-resolver.service';

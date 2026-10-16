@@ -1,4 +1,4 @@
-import { ChargeType, PaymentMethod, ReservationChannel, ReservationStatus } from '@prisma/client';
+import { ChargeType, PaymentMethod, ReservationChannel, ReservationStatus } from '../../generated/prisma/client';
 
 /**
  * Custom Report Builder's catalogue: the datasets a report can be built

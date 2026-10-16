@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable, Logger, NotFoundException, UnauthorizedException } from '@nestjs/common';
-import { User } from '@prisma/client';
+import { User } from '../../generated/prisma/client';
 import * as bcrypt from 'bcrypt';
 import { createHash, randomBytes } from 'node:crypto';
 import { ErrorCode } from '../../common/errors/error-codes';

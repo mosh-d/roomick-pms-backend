@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
-import { Prisma, ReportTemplate } from '@prisma/client';
+import { Prisma, ReportTemplate } from '../../generated/prisma/client';
 import { ErrorCode } from '../../common/errors/error-codes';
 import { branchDayStart, localDateOf, toBranchDate } from '../../common/utils/branch-date';
 import { csvCell } from '../../common/utils/csv';

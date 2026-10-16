@@ -2,7 +2,7 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import { ArrayMaxSize, IsArray, IsBoolean, IsIn, IsInt, IsNumber, IsOptional, IsString, IsUUID, Max, MaxLength, Min, MinLength } from 'class-validator';
 import { IsDateOnly } from '../../../common/validation/is-date-only.decorator';
-import { AdjustmentType, RateType } from '@prisma/client';
+import { AdjustmentType, RateType } from '../../../generated/prisma/client';
 
 export class CalculateRateDto {
   @ApiProperty()

@@ -1,5 +1,5 @@
 import { Test } from '@nestjs/testing';
-import { Prisma } from '@prisma/client';
+import { Prisma } from '../../generated/prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { FoliosService } from '../folios/folios.service';
 import { ReportsService } from '../reports/reports.service';

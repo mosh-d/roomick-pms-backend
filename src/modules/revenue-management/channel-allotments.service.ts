@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
-import { ChannelAllotment, Prisma, ReservationChannel } from '@prisma/client';
+import { ChannelAllotment, Prisma, ReservationChannel } from '../../generated/prisma/client';
 import { ErrorCode } from '../../common/errors/error-codes';
 import { toBranchDate } from '../../common/utils/branch-date';
 import { PrismaService, TenantTx } from '../../prisma/prisma.service';

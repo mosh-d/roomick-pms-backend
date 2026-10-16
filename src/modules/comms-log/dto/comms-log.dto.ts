@@ -1,6 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { IsIn, IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
-import { CommsChannel } from '@prisma/client';
+import { CommsChannel } from '../../../generated/prisma/client';
 
 /** Manual sends only — automated triggers (booking_confirmation, checkin_receipt, post_stay, no_show_notice, cancellation) always go through email; push/in_app_chat have no manual UI yet. */
 const MANUAL_CHANNELS: CommsChannel[] = ['email', 'sms'];

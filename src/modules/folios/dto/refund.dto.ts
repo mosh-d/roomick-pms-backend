@@ -1,7 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import { IsIn, IsNumber, IsOptional, IsPositive, IsString, IsUUID, Max, MaxLength, MinLength } from 'class-validator';
-import { RefundStatus } from '@prisma/client';
+import { RefundStatus } from '../../../generated/prisma/client';
 
 /** The ways money can go back to a guest. Points go back as a loyalty adjustment, and a voucher isn't money. */
 export const REFUND_METHODS = ['cash', 'card', 'bank_transfer'] as const;

@@ -1,10 +1,10 @@
 import { Test } from '@nestjs/testing';
-import { Prisma } from '@prisma/client';
 import { gunzipSync, gzipSync } from 'zlib';
 import { PrismaService } from '../../prisma/prisma.service';
 import { BackupsService } from './backups.service';
 import { EncryptionService } from '../../common/crypto/encryption.service';
 import { BACKUP_STORAGE_ADAPTER } from './storage/backup-storage.interface';
+import { DATAMODEL_MODELS } from '../../generated/datamodel';
 
 /** A stand-in cipher: four marker bytes in front, so a test can tell sealed from plain and open it again. */
 const SEAL = Buffer.from('ENC:');
@@ -118,7 +118,7 @@ describe('BackupsService', () => {
 
     it('opens an encrypted backup, and still a plain one written before encryption', async () => {
       const { gzipSync } = jest.requireActual('zlib');
-      const expectedModels = Prisma.dmmf.datamodel.models
+      const expectedModels = DATAMODEL_MODELS
         .filter((m) => m.fields.some((f) => f.name === 'tenantId') && !['UserEmailIndex', 'BackupRecord'].includes(m.name))
         .map((m) => m.name);
       const plain = gzipSync(Buffer.from(JSON.stringify(Object.fromEntries(expectedModels.map((name) => [name, []]))), 'utf-8'));
@@ -175,9 +175,9 @@ describe('BackupsService', () => {
     it('reports ok:true with row counts when the file has every expected table', async () => {
       prisma.backupRecord.findFirst.mockResolvedValue({ id: 'backup-1', storageUrl: 'file:///x.json.gz' });
       const { gzipSync } = jest.requireActual('zlib');
-      // Build a snapshot with exactly the model set BackupsService itself expects, from the DMMF, so this test
+      // Build a snapshot with exactly the model set BackupsService itself expects, from the schema, so this test
       // stays correct if the schema grows a new tenant-scoped model rather than hand-maintaining a duplicate list.
-      const expectedModels = Prisma.dmmf.datamodel.models
+      const expectedModels = DATAMODEL_MODELS
         .filter((m) => m.fields.some((f) => f.name === 'tenantId') && !['UserEmailIndex', 'BackupRecord'].includes(m.name))
         .map((m) => m.name);
       const snapshot = Object.fromEntries(expectedModels.map((name) => [name, []]));

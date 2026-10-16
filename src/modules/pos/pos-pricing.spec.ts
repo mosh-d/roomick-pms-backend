@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { Prisma } from '../../generated/prisma/client';
 import { normaliseModifierGroups, OUTLET_CHARGE_TYPES, priceOrder } from './pos-pricing';
 
 const SUYA = {

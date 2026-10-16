@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { Prisma, RegistrationCard } from '@prisma/client';
+import { Prisma, RegistrationCard } from '../../generated/prisma/client';
 import { EncryptionService } from '../../common/crypto/encryption.service';
 import { DOCUMENT_STORAGE_ADAPTER, DocumentStorageAdapter } from '../../common/documents/document-storage.interface';
 import { ErrorCode } from '../../common/errors/error-codes';

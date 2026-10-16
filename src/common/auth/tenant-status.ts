@@ -1,4 +1,4 @@
-import { TenantStatus } from '@prisma/client';
+import { TenantStatus } from '../../generated/prisma/client';
 
 /** The organisation statuses whose people may sign in and work. `suspended` and `cancelled` are shut — for staff, API keys and the public booking page alike. */
 export const OPEN_TENANT_STATUSES: readonly TenantStatus[] = ['trial', 'active'];

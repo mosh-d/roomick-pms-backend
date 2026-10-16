@@ -1,6 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
-import { MaintenancePriority, MaintenanceStatus } from '@prisma/client';
+import { MaintenancePriority, MaintenanceStatus } from '../../../generated/prisma/client';
 import { IsArray, IsBoolean, IsIn, IsInt, IsOptional, IsPositive, IsString, IsUUID, MaxLength } from 'class-validator';
 import { IsDateOnly } from '../../../common/validation/is-date-only.decorator';
 

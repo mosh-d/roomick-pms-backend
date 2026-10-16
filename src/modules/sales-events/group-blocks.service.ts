@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, HttpException, Injectable, NotFoundException } from '@nestjs/common';
-import { GroupBlock, Prisma } from '@prisma/client';
+import { GroupBlock, Prisma } from '../../generated/prisma/client';
 import { SystemRole } from '../../common/decorators/roles.decorator';
 import { ErrorCode } from '../../common/errors/error-codes';
 import { JwtPayload } from '../../common/types/request-context';

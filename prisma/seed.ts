@@ -11,10 +11,11 @@
  * cannot write without tenant context. This seed doubles as a smoke test that
  * RLS is wired correctly.
  */
-import { PrismaClient, Prisma } from '@prisma/client';
+import { PrismaClient, Prisma } from '../src/generated/prisma/client';
 import * as bcrypt from 'bcrypt';
+import { databaseAdapter } from '../src/prisma/database-adapter';
 
-const prisma = new PrismaClient();
+const prisma = new PrismaClient({ adapter: databaseAdapter() });
 
 const SYSTEM_ROLES = ['owner', 'manager', 'front_desk', 'housekeeper', 'accountant', 'pos_staff'];
 

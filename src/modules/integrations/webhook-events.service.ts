@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { Prisma } from '../../generated/prisma/client';
 import { randomUUID } from 'node:crypto';
 import { TenantTx } from '../../prisma/prisma.service';
 import { WebhookDispatcherService } from './webhook-dispatcher.service';
