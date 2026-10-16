@@ -7,7 +7,9 @@ on:
 
 jobs:
   ci:
-    runs-on: ubuntu-latest
+    # Named, not ubuntu-latest: GitHub moves ubuntu-latest to 26.04 from 19 Oct 2026,
+    # and a named image changes only when this line does.
+    runs-on: ubuntu-26.04
 
     services:
       postgres:
