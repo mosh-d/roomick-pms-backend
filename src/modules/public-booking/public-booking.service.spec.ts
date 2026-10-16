@@ -6,6 +6,7 @@ import { CommsLogService } from '../comms-log/comms-log.service';
 import { FoliosService } from '../folios/folios.service';
 import { HousekeepingService } from '../housekeeping/housekeeping.service';
 import { PackagesService } from '../rate-resolver/packages.service';
+import { ChannelAllotmentsService } from '../revenue-management/channel-allotments.service';
 import { RateResolverService } from '../rate-resolver/rate-resolver.service';
 import { ReservationsService } from '../reservations/reservations.service';
 import { PublicBookingService } from './public-booking.service';
@@ -106,6 +107,7 @@ describe('PublicBookingService', () => {
         { provide: ReservationsService, useValue: reservationsService },
         { provide: RateResolverService, useValue: rateResolverService },
         { provide: PackagesService, useValue: { list: jest.fn().mockResolvedValue([]), snapshotsFor: jest.fn().mockResolvedValue([]), quote: jest.fn() } },
+        { provide: ChannelAllotmentsService, useValue: { remainingByNight: jest.fn().mockResolvedValue(new Map()) } },
         { provide: FoliosService, useValue: foliosService },
         { provide: CommsLogService, useValue: commsLogService },
         { provide: HousekeepingService, useValue: housekeepingService },

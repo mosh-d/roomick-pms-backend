@@ -1040,7 +1040,7 @@ export class ReservationsService {
     return this.prisma.withTenant(tenantId, async (tx) => {
       const reservation = await this.findReservationOrThrow(tx, reservationId);
       const branch = await this.propertyService.assertBranch(tx, reservation.branchId);
-      const fees = reservation.status === 'checked_in' ? this.stayFeesNow(reservation, branch) : [];
+      const fees = reservation.status === 'checked_in' ? await this.stayFeesNow(tx, reservation, branch) : [];
       const priced = await Promise.all(fees.map((fee) => this.foliosService.previewCharge(tx, branch.id, 'penalty', fee.amount)));
       return {
         currency: branch.currency,
@@ -1055,13 +1055,20 @@ export class ReservationsService {
     });
   }
 
-  private stayFeesNow(reservation: Reservation, branch: Branch): StayFee[] {
+  private async stayFeesNow(tx: TenantTx, reservation: Reservation, branch: Branch): Promise<StayFee[]> {
     // Day use leaves at the end of its hours, not at the branch's check-out time.
     const leaveBy = reservation.isDayUse ? { timezone: branch.timezone, checkOutTime: new Date(`1970-01-01T${this.dayUseHours(branch).until}:00.000Z`) } : branch;
-    return stayFeesFor(resolveStayFeePolicy(branch.stayFeePolicy), reservation, leaveBy, toBranchDate(todayInTimezone(branch.timezone)), new Date());
+    const today = toBranchDate(todayInTimezone(branch.timezone));
+    // Nights from today on that are on the bill already — tonight, when the
+    // guest is leaving on the day they arrived — aren't given up.
+    const billed = await tx.lineItem.findMany({
+      where: { stayReservationId: reservation.id, chargeType: 'room', dayUse: false, isVoid: false, deletedAt: null, serviceDate: { gte: today } },
+      select: { serviceDate: true },
+    });
+    const billedNights = new Set(billed.flatMap((line) => (line.serviceDate ? [line.serviceDate.toISOString().slice(0, 10)] : [])));
+    return stayFeesFor(resolveStayFeePolicy(branch.stayFeePolicy), reservation, leaveBy, today, new Date(), billedNights);
   }
 
-  /** The branch's day-use hours — refused when it doesn't sell day use. */
   /**
    * Tonight's evening turndown for a stay just placed in a room — at check-in
    * or after a move — when the branch turns its guest's room down. The night
@@ -1088,6 +1095,7 @@ export class ReservationsService {
     });
   }
 
+  /** The branch's day-use hours — refused when it doesn't sell day use. */
   private dayUseHours(branch: Branch): DayUseHours {
     const hours = dayUseHoursFor(branch.dayUsePolicy);
     if (!hours) throw new BadRequestException({ code: ErrorCode.VALIDATION_FAILED, message: 'This property doesn’t offer day use — switch it on under Property Config' });
@@ -1247,7 +1255,7 @@ export class ReservationsService {
       );
       // Leaving late, or before the booked last night, costs what the branch
       // says it does — unless a manager waived it.
-      const fees = this.stayFeesNow(reservation, branch);
+      const fees = await this.stayFeesNow(tx, reservation, branch);
       if (fees.length > 0 && !dto.waiveFees) {
         for (const fee of fees) {
           await this.foliosService.postChargeInTx(

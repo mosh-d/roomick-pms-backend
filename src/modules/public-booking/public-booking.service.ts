@@ -3,6 +3,7 @@ import { CommunicationLog, Prisma, Reservation } from '@prisma/client';
 import { ErrorCode } from '../../common/errors/error-codes';
 import { todayInTimezone, toBranchDate } from '../../common/utils/branch-date';
 import { PackagesQuote, PackagesService, PackageView } from '../rate-resolver/packages.service';
+import { ChannelAllotmentsService } from '../revenue-management/channel-allotments.service';
 import { PrismaService, TenantTx } from '../../prisma/prisma.service';
 import { CommsLogService } from '../comms-log/comms-log.service';
 import { FoliosService } from '../folios/folios.service';
@@ -258,6 +259,7 @@ export class PublicBookingService {
     private readonly commsLogService: CommsLogService,
     private readonly housekeepingService: HousekeepingService,
     private readonly packagesService: PackagesService,
+    private readonly channelAllotmentsService: ChannelAllotmentsService,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -405,7 +407,8 @@ export class PublicBookingService {
     const to = toBranchDate(dto.to);
 
     if (!dto.roomTypeId) {
-      return this.reservationsService.getAvailabilityForRange(tenantId, branchId, from, to);
+      const types = await this.reservationsService.getAvailabilityForRange(tenantId, branchId, from, to);
+      return this.withinWebsiteAllotments(tenantId, branchId, from, to, types);
     }
 
     const nights = await this.reservationsService.getAvailability(tenantId, branchId, { from: dto.from, to: dto.to, roomTypeId: dto.roomTypeId });
@@ -413,7 +416,34 @@ export class PublicBookingService {
       tx.roomType.findFirst({ where: { id: dto.roomTypeId, branchId, deletedAt: null }, select: { id: true, name: true } }),
     );
     if (!roomType) throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Room type not found at this property' });
-    return [{ roomTypeId: roomType.id, roomTypeName: roomType.name, nights }];
+    return this.withinWebsiteAllotments(tenantId, branchId, from, to, [{ roomTypeId: roomType.id, roomTypeName: roomType.name, nights }]);
+  }
+
+  /**
+   * The rooms this page can sell: the house's, but never more a night than
+   * the website's channel allotment leaves (`ChannelAllotmentsService`). The
+   * booking itself is held to the allotment; showing the whole house here
+   * let a guest pick dates and fill in the form, only to be refused at the end.
+   */
+  private async withinWebsiteAllotments<T extends { roomTypeId: string; nights: Array<{ date: string; available: number }> }>(
+    tenantId: string,
+    branchId: string,
+    from: Date,
+    to: Date,
+    types: T[],
+  ): Promise<T[]> {
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      const capped: T[] = [];
+      for (const type of types) {
+        const left = await this.channelAllotmentsService.remainingByNight(tx, branchId, type.roomTypeId, 'website', from, to);
+        capped.push(
+          left.size === 0
+            ? type
+            : { ...type, nights: type.nights.map((night) => (left.has(night.date) ? { ...night, available: Math.min(night.available, left.get(night.date)!) } : night)) },
+        );
+      }
+      return capped;
+    });
   }
 
   /**

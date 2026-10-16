@@ -65,6 +65,36 @@ describe('stayFeesFor', () => {
     expect(stayFeesFor(resolveStayFeePolicy({ earlyDeparture: { feeType: 'percent_of_remaining', amount: 50 } }), stay, branch, today, now)[0].amount.toFixed(2)).toBe('25000.00');
   });
 
+  it('early departure leaves out the nights already billed — the arrival night, billed at check-in', () => {
+    // Leaving on the arrival day: the 10th is on the bill already, so three nights are given up, not four.
+    const fees = stayFeesFor(
+      resolveStayFeePolicy({ earlyDeparture: { feeType: 'flat', amount: 7500 } }),
+      stay,
+      branch,
+      day('2026-11-10'),
+      new Date('2026-11-10T18:00:00.000Z'),
+      new Set(['2026-11-10']),
+    );
+    expect(fees).toEqual([{ kind: 'early_departure', amount: D('7500'), description: 'Early departure fee (3 nights given up)' }]);
+    // A share of what's given up: the 11th to the 13th, not the 10th as well.
+    const share = stayFeesFor(
+      resolveStayFeePolicy({ earlyDeparture: { feeType: 'percent_of_remaining', amount: 50 } }),
+      stay,
+      branch,
+      day('2026-11-10'),
+      new Date('2026-11-10T18:00:00.000Z'),
+      new Set(['2026-11-10']),
+    );
+    expect(share[0].amount.toFixed(2)).toBe('35000.00');
+  });
+
+  it('no early departure fee when every night left is already paid for', () => {
+    const oneNight = { ...stay, checkOutDate: day('2026-11-11'), confirmedRate: D('20000'), nightlyRates: stay.nightlyRates.slice(0, 1) };
+    expect(
+      stayFeesFor(resolveStayFeePolicy({ earlyDeparture: { feeType: 'flat', amount: 7500 } }), oneNight, branch, day('2026-11-10'), new Date('2026-11-10T18:00:00.000Z'), new Set(['2026-11-10'])),
+    ).toEqual([]);
+  });
+
   it('no early departure fee on the booked last day', () => {
     expect(stayFeesFor(resolveStayFeePolicy({ earlyDeparture: { feeType: 'flat', amount: 7500 } }), stay, branch, day('2026-11-14'), new Date('2026-11-14T08:00:00.000Z'))).toEqual([]);
   });

@@ -35,6 +35,7 @@ function makeTx() {
       aggregate: jest.fn().mockResolvedValue({ _sum: { amount: null } }),
     },
     shift: { findFirst: jest.fn().mockResolvedValue({ id: 'shift-1' }) },
+    reservation: { findFirst: jest.fn().mockResolvedValue({ status: 'checked_in' }) },
     auditLog: { create: jest.fn().mockResolvedValue({}) },
   };
 }
@@ -43,11 +44,13 @@ describe('RefundsService', () => {
   let service: RefundsService;
   let tx: ReturnType<typeof makeTx>;
   let totals: jest.Mock;
+  let settleIfFullyPaid: jest.Mock;
 
   beforeEach(async () => {
     tx = makeTx();
     // The bill: paid 50,000 against 30,000 of charges — 20,000 in credit.
     totals = jest.fn().mockResolvedValue({ balanceDue: d(-20000) });
+    settleIfFullyPaid = jest.fn().mockResolvedValue(true);
     const moduleRef = await Test.createTestingModule({
       providers: [
         RefundsService,
@@ -56,6 +59,7 @@ describe('RefundsService', () => {
           provide: FoliosService,
           useValue: {
             totalsInTx: totals,
+            settleIfFullyPaid,
             shiftRequired: () => new ConflictException({ code: 'SHIFT_REQUIRED', message: 'Open a shift before taking cash — it has to go into a drawer that gets counted at close' }),
           },
         },
@@ -202,6 +206,19 @@ describe('RefundsService', () => {
       await service.payOut(TENANT_ID, 'refund-1', desk);
       expect(tx.shift.findFirst).not.toHaveBeenCalled();
       expect(tx.payment.create.mock.calls[0][0].data.shiftId).toBeUndefined();
+    });
+
+    it('closes the bill of a stay that is over once the refund brings it to nothing', async () => {
+      tx.refund.findFirst.mockResolvedValueOnce(refund({ status: 'approved', method: 'card' }));
+      tx.reservation.findFirst.mockResolvedValueOnce({ status: 'cancelled' });
+      await service.payOut(TENANT_ID, 'refund-1', desk);
+      expect(settleIfFullyPaid).toHaveBeenCalledWith(tx, expect.objectContaining({ id: FOLIO_ID }), 'desk-1', 'refund');
+    });
+
+    it('leaves a guest still in the house with their bill open', async () => {
+      tx.refund.findFirst.mockResolvedValueOnce(refund({ status: 'approved', method: 'card' }));
+      await service.payOut(TENANT_ID, 'refund-1', desk);
+      expect(settleIfFullyPaid).not.toHaveBeenCalled();
     });
 
     it('never pays out more than the credit left — the guest must not end up owing', async () => {

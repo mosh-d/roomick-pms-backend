@@ -113,8 +113,38 @@ export class ChannelAllotmentsService {
     to: Date,
     exceptReservationId?: string,
   ): Promise<void> {
+    for (const { night, limit, sold } of await this.coveredNights(tx, branchId, roomTypeId, channel, from, to, exceptReservationId)) {
+      if (sold + 1 > limit) {
+        throw new ConflictException({
+          code: ErrorCode.RESERVATION_NOT_AVAILABLE,
+          message: `The ${CHANNEL_LABELS[channel]} allotment for this room type is full on ${night} (${limit} a night)`,
+        });
+      }
+    }
+  }
+
+  /**
+   * What a channel may still sell of a room type, by night (`YYYY-MM-DD`),
+   * where an allotment covers the night. A night no allotment covers isn't
+   * in the map: the channel sells from the whole house there.
+   */
+  async remainingByNight(tx: TenantTx, branchId: string, roomTypeId: string, channel: ReservationChannel, from: Date, to: Date): Promise<Map<string, number>> {
+    const covered = await this.coveredNights(tx, branchId, roomTypeId, channel, from, to);
+    return new Map(covered.map(({ night, limit, sold }) => [night, Math.max(0, limit - sold)]));
+  }
+
+  /** Each night an allotment covers: the smallest covering allotment, and the channel's stays already on that night. */
+  private async coveredNights(
+    tx: TenantTx,
+    branchId: string,
+    roomTypeId: string,
+    channel: ReservationChannel,
+    from: Date,
+    to: Date,
+    exceptReservationId?: string,
+  ): Promise<Array<{ night: string; limit: number; sold: number }>> {
     const allotments = await tx.channelAllotment.findMany({ where: { branchId, roomTypeId, channel, fromDate: { lt: to }, toDate: { gte: from } } });
-    if (allotments.length === 0) return;
+    if (allotments.length === 0) return [];
     const stays = await tx.reservation.findMany({
       where: {
         branchId,
@@ -129,18 +159,15 @@ export class ChannelAllotmentsService {
       },
       select: { checkInDate: true, checkOutDate: true },
     });
+    const nights: Array<{ night: string; limit: number; sold: number }> = [];
     for (let night = new Date(from); night < to; night = new Date(night.getTime() + 86_400_000)) {
       const covering = allotments.filter((a) => a.fromDate <= night && a.toDate >= night);
       if (covering.length === 0) continue;
       const limit = Math.min(...covering.map((a) => a.rooms));
       const sold = stays.filter((s) => s.checkInDate <= night && s.checkOutDate > night).length;
-      if (sold + 1 > limit) {
-        throw new ConflictException({
-          code: ErrorCode.RESERVATION_NOT_AVAILABLE,
-          message: `The ${CHANNEL_LABELS[channel]} allotment for this room type is full on ${day(night)} (${limit} a night)`,
-        });
-      }
+      nights.push({ night: day(night), limit, sold });
     }
+    return nights;
   }
 
   private assertDates(fromDate: string, toDate: string): void {

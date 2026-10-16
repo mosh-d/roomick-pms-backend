@@ -257,13 +257,14 @@ describe('Billing features (e2e)', () => {
       expect((await client.patch(`/branches/${branch.id}/policies/stay-fees`, owner, { earlyDeparture: { feeType: 'flat', amount: 5_000 } })).status).toBe(200);
       const leaving = await book(client, owner, branch, 'Leaves Early', lagosDay(0), lagosDay(3));
       const folioId = await checkIn(client, owner, leaving, branch.rooms[4].id);
+      // Leaving the day they arrived: tonight is on the bill already, so two nights are given up, not three.
       const quote = await client.get(`/reservations/${leaving}/check-out-quote`, desk);
-      expect(quote.body.fees).toEqual([expect.objectContaining({ kind: 'early_departure', amount: '5000.00', description: 'Early departure fee (3 nights given up)' })]);
+      expect(quote.body.fees).toEqual([expect.objectContaining({ kind: 'early_departure', amount: '5000.00', description: 'Early departure fee (2 nights given up)' })]);
 
       expect((await client.post(`/reservations/${leaving}/check-out`, desk, { waiveFees: true, waiverReason: 'Nice guest' })).status).toBe(403);
       expect((await client.post(`/reservations/${leaving}/check-out`, desk, {})).status).toBe(201);
       const after = await bill(folioId);
-      expect(after.lineItems.filter((l) => l.chargeType === 'penalty').map((l) => [l.description, l.amount])).toEqual([['Early departure fee (3 nights given up)', '5000']]);
+      expect(after.lineItems.filter((l) => l.chargeType === 'penalty').map((l) => [l.description, l.amount])).toEqual([['Early departure fee (2 nights given up)', '5000']]);
 
       const waived = await book(client, owner, branch, 'Waived Early', lagosDay(0), lagosDay(3));
       const waivedFolio = await checkIn(client, owner, waived, branch.rooms[5].id);

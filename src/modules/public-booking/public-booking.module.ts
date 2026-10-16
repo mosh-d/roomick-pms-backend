@@ -4,6 +4,7 @@ import { FoliosModule } from '../folios/folios.module';
 import { HousekeepingModule } from '../housekeeping/housekeeping.module';
 import { RateResolverModule } from '../rate-resolver/rate-resolver.module';
 import { ReservationsModule } from '../reservations/reservations.module';
+import { RevenueManagementModule } from '../revenue-management/revenue-management.module';
 import { BookingEngineAdminController, PublicBookingController } from './public-booking.controller';
 import { PublicBookingService } from './public-booking.service';
 
@@ -16,9 +17,11 @@ import { PublicBookingService } from './public-booking.service';
  * response, projected down to guest-safe fields — no second money calculation.
  * `CommsLogModule` and `HousekeepingModule` for guest messages: a message is a
  * comms-log row like any other, and a housekeeping request is an ordinary task.
+ * `RevenueManagementModule` for the website's channel allotments, which cap what
+ * the page offers as they cap what it books.
  */
 @Module({
-  imports: [ReservationsModule, RateResolverModule, FoliosModule, CommsLogModule, HousekeepingModule],
+  imports: [ReservationsModule, RateResolverModule, FoliosModule, CommsLogModule, HousekeepingModule, RevenueManagementModule],
   controllers: [PublicBookingController, BookingEngineAdminController],
   providers: [PublicBookingService],
 })

@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
-import { Prisma, Refund, RefundStatus } from '@prisma/client';
+import { Prisma, Refund, RefundStatus, ReservationStatus } from '@prisma/client';
 import { SystemRole } from '../../common/decorators/roles.decorator';
 import { ErrorCode } from '../../common/errors/error-codes';
 import { JwtPayload } from '../../common/types/request-context';
@@ -17,6 +17,9 @@ const APPROVER_ROLES = [SystemRole.Owner, SystemRole.Manager];
 
 /** Refunds still to come off a bill's credit: asked for, or approved and not yet handed over. */
 const OUTSTANDING: RefundStatus[] = ['pending', 'approved'];
+
+/** Stays that are over — left, cancelled, never came, walked to another hotel: a bill of one that a refund brings to nothing is closed. */
+const ENDED_STAYS: ReservationStatus[] = ['checked_out', 'cancelled', 'no_show', 'walked'];
 
 const REFUND_INCLUDE = {
   folio: {
@@ -226,6 +229,16 @@ export class RefundsService {
         ...(openShift ? { shiftId: openShift.id } : {}),
       });
       await this.webhookEvents.paymentRecorded(tx, { tenantId, branchId: refund.folio.branchId, type: 'refund.paid', paymentId: payment.id, refundId });
+      // A stay that is over — checked out, cancelled, a no-show — whose bill
+      // this refund brings to nothing is done with, the way check-out closes
+      // a paid bill. It stayed open at zero for ever: every deposit handed
+      // back after a cancellation left one behind. A guest still in the house
+      // keeps theirs open; their stay is still running up charges.
+      const reservation = await tx.reservation.findFirst({ where: { folios: { some: { id: refund.folioId } } }, select: { status: true } });
+      if (reservation && ENDED_STAYS.includes(reservation.status)) {
+        const folio = await tx.folio.findFirst({ where: { id: refund.folioId } });
+        if (folio && folio.status !== 'settled') await this.foliosService.settleIfFullyPaid(tx, folio, actor.sub, 'refund');
+      }
       return paid;
     });
   }

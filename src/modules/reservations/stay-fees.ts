@@ -76,15 +76,30 @@ function nightPrice(stay: StayForFees, night: Date): Prisma.Decimal {
   return nightlyRateFor({ nightlyRates: stay.nightlyRates }, night) ?? new Prisma.Decimal(stay.confirmedRate).div(nights).toDecimalPlaces(2);
 }
 
-/** What leaving now costs beyond the nights stayed. `today` is the branch's own date. */
-export function stayFeesFor(policy: StayFeePolicy, stay: StayForFees, branch: { timezone: string; checkOutTime: Date }, today: Date, now: Date): StayFee[] {
+/**
+ * What leaving now costs beyond the nights stayed. `today` is the branch's
+ * own date. `billedNights` (`YYYY-MM-DD`) are the stay's nights already on the
+ * bill — the arrival night, billed at check-in — which a guest leaving
+ * hasn't given up: they're paying for them.
+ */
+export function stayFeesFor(
+  policy: StayFeePolicy,
+  stay: StayForFees,
+  branch: { timezone: string; checkOutTime: Date },
+  today: Date,
+  now: Date,
+  billedNights: ReadonlySet<string> = new Set(),
+): StayFee[] {
   const fees: StayFee[] = [];
   const day = 86_400_000;
 
   if (policy.earlyDeparture && today.getTime() < stay.checkOutDate.getTime()) {
-    // Nights given up: tonight up to (not including) the booked departure day.
+    // Nights given up: tonight up to (not including) the booked departure day,
+    // less any already billed.
     const remaining: Date[] = [];
-    for (let night = new Date(Math.max(today.getTime(), stay.checkInDate.getTime())); night < stay.checkOutDate; night = new Date(night.getTime() + day)) remaining.push(night);
+    for (let night = new Date(Math.max(today.getTime(), stay.checkInDate.getTime())); night < stay.checkOutDate; night = new Date(night.getTime() + day)) {
+      if (!billedNights.has(night.toISOString().slice(0, 10))) remaining.push(night);
+    }
     let amount: Prisma.Decimal;
     const { feeType } = policy.earlyDeparture;
     if (feeType === 'flat') amount = new Prisma.Decimal(policy.earlyDeparture.amount ?? 0);
@@ -92,7 +107,8 @@ export function stayFeesFor(policy: StayFeePolicy, stay: StayForFees, branch: { 
     else amount = remaining.reduce((sum, night) => sum.plus(nightPrice(stay, night)), new Prisma.Decimal(0)).mul(policy.earlyDeparture.amount ?? 0).div(100);
     amount = amount.toDecimalPlaces(2);
     const given = remaining.length;
-    if (amount.greaterThan(0)) fees.push({ kind: 'early_departure', amount, description: `Early departure fee (${given} night${given === 1 ? '' : 's'} given up)` });
+    // Every night left is paid for: nothing is given up, so there's no fee.
+    if (given > 0 && amount.greaterThan(0)) fees.push({ kind: 'early_departure', amount, description: `Early departure fee (${given} night${given === 1 ? '' : 's'} given up)` });
   }
 
   if (policy.lateCheckout && today.getTime() >= stay.checkOutDate.getTime()) {
